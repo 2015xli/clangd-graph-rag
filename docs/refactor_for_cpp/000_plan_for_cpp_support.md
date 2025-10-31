@@ -19,10 +19,10 @@ This document outlines the Neo4j graph schema designed to represent C and C++ so
     *   Properties: `name`, `file_path`.
 
 ### Data & Type Definition Nodes
-*   **(DATA_STRUCTURE)**: Represents C-style data structures or simple C++ data-only structs.
-    *   Properties: `id` (unique), `name`, `kind` ('struct', 'enum', 'union'), `file_path`, `scope`.
-*   **(CLASS_STRUCTURE)**: Represents a C++ `class` or a `struct` with methods/inheritance.
-    *   Properties: `id` (unique), `name`, `kind` ('class', 'struct'), `file_path`, `scope`.
+*   **(DATA_STRUCTURE)**: Represents enum/union data structures and C struct.
+    *   Properties: `id` (unique), `name`, `kind` ('struct', 'enum', 'union'), `file_path`, `scope`, `lang`.
+*   **(CLASS_STRUCTURE)**: Represents a C++ `class` or C++ `struct`.
+    *   Properties: `id` (unique), `name`, `kind` ('class', 'struct'), `file_path`, `scope`, `lang`
 
 ### Callable & Member Nodes
 *   **(FUNCTION)**: Represents a standalone C-style or namespace-level function.
@@ -40,7 +40,7 @@ This document outlines the Neo4j graph schema designed to represent C and C++ so
 *   `(PROJECT) -[:CONTAINS]-> (FOLDER)`
 *   `(FOLDER) -[:CONTAINS]-> (FILE)`
 *   `(FILE) -[:INCLUDES]-> (FILE)`: Represents `#include` directives.
-*   `(FILE) -[:DECLARES_IN]-> (NAMESPACE)`: Links a file to the namespaces it contributes to (M:N).
+*   `(FILE) -[:DECLARES]-> (NAMESPACE)`: Links a file to the namespaces it contributes to (M:N).
 *   `(FILE) -[:DEFINES]-> (Symbol)`: Generic relationship linking a file to the symbols it defines (e.g., `FUNCTION`, `CLASS_STRUCTURE`, `VARIABLE`).
 
 ### Logical & Inheritance Relationships
@@ -56,8 +56,8 @@ This document outlines the Neo4j graph schema designed to represent C and C++ so
 
 ## Key Design Decisions
 
-1.  **`Struct` Handling**: A `struct` will be ingested as a `CLASS_STRUCTURE` if it contains methods or uses inheritance; otherwise, it will be a `DATA_STRUCTURE`. This reflects its dual role in C++.
-2.  **Namespace Modeling**: Namespaces are modeled as explicit `NAMESPACE` nodes to allow for powerful hierarchical queries. The M:N relationship between files and namespaces is handled via a `DECLARES_IN` relationship.
+1.  **`Struct` Handling**: A `struct` will be ingested as a `CLASS_STRUCTURE` in C++;  will be a `DATA_STRUCTURE` in C.
+2.  **Namespace Modeling**: Namespaces are modeled as explicit `NAMESPACE` nodes to allow for powerful hierarchical queries. The M:N relationship between files and namespaces is handled via a `DECLARES` relationship.
 3.  **`scope` vs. `qualified_name`**: The `scope` property will be stored on symbols for query convenience. The full `qualified_name` will **not** be stored on every symbol to reduce data redundancy and will be constructed at query time (`scope` + `::` + `name`). `NAMESPACE` nodes are an exception and will store a `qualified_name`.
 4.  **Relationship Specificity**:
     *   For class/struct members, specific relationships (`HAS_METHOD`, `HAS_FIELD`) are used for semantic clarity and query performance.
