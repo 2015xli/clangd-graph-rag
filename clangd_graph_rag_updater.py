@@ -17,7 +17,7 @@ from neo4j_manager import Neo4jManager
 from clangd_index_yaml_parser import SymbolParser
 from clangd_symbol_nodes_builder import PathManager, PathProcessor, SymbolProcessor
 from clangd_call_graph_builder import ClangdCallGraphExtractorWithContainer, ClangdCallGraphExtractorWithoutContainer
-from function_span_provider import FunctionSpanProvider
+from source_span_provider import SourceSpanProvider
 from code_graph_rag_generator import RagGenerator
 from llm_client import get_llm_client, get_embedding_client
 from compilation_manager import CompilationManager
@@ -154,7 +154,7 @@ class GraphUpdater:
         del full_symbol_parser
 
         # 4. Enrich the "mini" symbols with spans
-        span_provider = FunctionSpanProvider(mini_symbol_parser, comp_manager)
+        span_provider = SourceSpanProvider(mini_symbol_parser, comp_manager)
         span_provider.enrich_symbols_with_span()
 
         # 5. Re-run ingestion pipeline on the mini-scope

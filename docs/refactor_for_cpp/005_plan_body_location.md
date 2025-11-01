@@ -11,7 +11,7 @@ This step leverages and expands our existing source code parsing infrastructure.
 ## 2. Affected Files
 
 1.  **`compilation_parser.py`**: To extract body spans for data structures from the source code.
-2.  **`function_span_provider.py`**: To map the extracted spans to the correct in-memory `Symbol` objects.
+2.  **`source_span_provider.py`**: To map the extracted spans to the correct in-memory `Symbol` objects.
 3.  **`clangd_symbol_nodes_builder.py`**: To write the `body_location` property to the `:DATA_STRUCTURE` nodes in Neo4j.
 
 ## 3. Implementation Plan
@@ -26,9 +26,9 @@ This step leverages and expands our existing source code parsing infrastructure.
 3.  **Update `_process_function_node`**: This existing method was also updated to use the same robust `get_symbol_name_location` helper, ensuring consistent name location logic for all symbol types.
 4.  **Correction**: The key used to store the list of extracted spans was changed from `"Functions"` to the more generic `"Spans"`. This ensures that all symbol types are correctly processed by downstream modules.
 
-### 3.2. `function_span_provider.py`
+### 3.2. `source_span_provider.py`
 
-*   **Component**: `FunctionSpanProvider`
+*   **Component**: `SourceSpanProvider`
 *   **Task**: Generalize the enrichment process to apply to all symbols, not just functions.
 
 1.  **Update `enrich_symbols_with_span`**: 
@@ -42,7 +42,7 @@ This step leverages and expands our existing source code parsing infrastructure.
 
 1.  **Update `process_symbol`**: 
     *   An `if` block was added to check if the symbol `kind` is one of `Struct`, `Union`, `Enum`, or `Class`.
-    *   If it is, and if the in-memory `Symbol` object has a `body_location` attribute (attached by the `FunctionSpanProvider`), this location data is formatted and added to the `symbol_data` dictionary.
+    *   If it is, and if the in-memory `Symbol` object has a `body_location` attribute (attached by the `SourceSpanProvider`), this location data is formatted and added to the `symbol_data` dictionary.
 
 ## 4. Verification
 

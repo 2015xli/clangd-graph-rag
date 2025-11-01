@@ -39,7 +39,7 @@ The update process is divided into a sequence of phases orchestrated by the `Gra
     1.  **Parse Full Symbol Index**: Parses the **entire new `clangd` index file** to get up-to-date symbol information for the whole project.
     2.  **Parse Dirty Sources**: Calls `CompilationManager` to parse **only the dirty files** (using their absolute paths), efficiently gathering their include relationships and function spans.
     3.  **Create "Mini" Parser**: Creates a small, in-memory `SymbolParser` containing only the symbols whose definitions are located within one of the dirty files.
-    4.  **Enrich "Mini" Symbols**: Uses `FunctionSpanProvider` to attach the `body_location` data (from step 2) to the in-memory symbols in the `mini_symbol_parser` (from step 3).
+    4.  **Enrich "Mini" Symbols**: Uses `SourceSpanProvider` to attach the `body_location` data (from step 2) to the in-memory symbols in the `mini_symbol_parser` (from step 3).
     5.  **Re-run Processors**: It re-runs the standard `PathProcessor`, `SymbolProcessor`, `IncludeRelationProvider`, and `ClangdCallGraphExtractor` using the data from the "mini" and "dirty" datasets. These processors internally handle the conversion from absolute to relative paths where necessary for graph operations.
 
 ### Phase 5: Targeted RAG Update

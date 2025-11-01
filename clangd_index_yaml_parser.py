@@ -62,13 +62,13 @@ class RelativeLocation:
         )
 
 @dataclass
-class FunctionSpan:
+class SourceSpan:
     name: str
     name_location: RelativeLocation
     body_location: RelativeLocation
     
     @classmethod
-    def from_dict(cls, data: dict) -> 'FunctionSpan':
+    def from_dict(cls, data: dict) -> 'SourceSpan':
         return cls(
             name=data['Name'],
             name_location=RelativeLocation.from_dict(data['NameLocation']),

@@ -72,9 +72,9 @@ The final pass creates the vector embeddings that enable semantic search. This p
 ## 6. Key Components & Dependencies
 
 - **`Neo4jManager`**: Manages database interaction.
-- **`FunctionSpanProvider`**: Acts as a decoupled service and cache for function source code. It is initialized with the main `SymbolParser` to extract all function body locations, but it stores this information internally. This allows the large `SymbolParser` object to be released from memory before RAG generation begins, improving memory efficiency.
+- **`SourceSpanProvider`**: Acts as a decoupled service and cache for function source code. It is initialized with the main `SymbolParser` to extract all function body locations, but it stores this information internally. This allows the large `SymbolParser` object to be released from memory before RAG generation begins, improving memory efficiency.
 - **`LlmClient` / `EmbeddingClient`**: Abstractions for AI model APIs.
-- **`SymbolParser`**: Used to provide symbol info to the `FunctionSpanProvider`.
+- **`SymbolParser`**: Used to provide symbol info to the `SourceSpanProvider`.
 
 ## 7. Execution
 

@@ -238,14 +238,14 @@ class CompilationParser:
     """An abstract base class for source code parsers."""
     def __init__(self, project_path: str):
         self.project_path = project_path
-        self.function_spans: List[Dict] = []
+        self.source_spans: List[Dict] = []
         self.include_relations: Set[Tuple[str, str]] = set()
 
     def parse(self, files_to_parse: List[str], num_workers: int = 1):
         raise NotImplementedError
 
-    def get_function_spans(self) -> List[Dict]:
-        return self.function_spans
+    def get_source_spans(self) -> List[Dict]:
+        return self.source_spans
 
     def get_include_relations(self) -> Set[Tuple[str, str]]:
         return self.include_relations
@@ -274,7 +274,7 @@ class CompilationParser:
                     file_path = item if isinstance(item, str) else item.get('file', 'unknown')
                     logger.error(f"A worker failed while processing {file_path}: {e}", exc_info=True)
 
-        self.function_spans = all_spans
+        self.source_spans = all_spans
         self.include_relations = all_includes
         gc.collect()
 
@@ -319,7 +319,7 @@ class ClangParser(CompilationParser):
         except (FileNotFoundError, subprocess.CalledProcessError): return None
 
     def parse(self, files_to_parse: List[str], num_workers: int = 1):
-        self.function_spans.clear(); self.include_relations.clear()
+        self.source_spans.clear(); self.include_relations.clear()
         
         source_files = [f for f in files_to_parse if f.endswith(('.c', '.cpp', '.cc', '.cxx'))]
         if not source_files: logger.warning("ClangParser found no source files to parse."); return
@@ -348,7 +348,7 @@ class ClangParser(CompilationParser):
             worker = _ClangWorkerImpl(project_path=self.project_path, clang_include_path=self.clang_include_path)
             for entry in tqdm(compile_entries, desc="Parsing TUs (clang)"):
                 spans, includes = worker.run(entry)
-                if spans: self.function_spans.extend(spans)
+                if spans: self.source_spans.extend(spans)
                 if includes: self.include_relations.update(includes)
 
 class TreesitterParser(CompilationParser):
@@ -358,7 +358,7 @@ class TreesitterParser(CompilationParser):
         if not tsc or not TreeSitterParser: raise ImportError("tree-sitter not installed.")
 
     def parse(self, files_to_parse: List[str], num_workers: int = 1):
-        self.function_spans.clear(); self.include_relations.clear()
+        self.source_spans.clear(); self.include_relations.clear()
 
         valid_files = [f for f in files_to_parse if os.path.isfile(f)]
 
@@ -370,7 +370,7 @@ class TreesitterParser(CompilationParser):
             worker = _TreesitterWorkerImpl()
             for file_path in tqdm(valid_files, desc="Parsing spans (treesitter)"):
                 spans, _ = worker.run(file_path)
-                if spans: self.function_spans.extend(spans)
+                if spans: self.source_spans.extend(spans)
 
     def get_include_relations(self) -> Set[Tuple[str, str]]:
         logger.warning("Include relation extraction is not supported by TreesitterParser.")

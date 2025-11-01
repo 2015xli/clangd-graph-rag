@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-This module provides the FunctionSpanProvider class. 
+This module provides the SourceSpanProvider class. 
 
 In the refactored architecture, this class acts as an ADAPTER and ENRICHER. It
 takes a SymbolParser and a CompilationManager and its primary purpose is to
@@ -13,12 +13,12 @@ from typing import List, Optional
 
 from urllib.parse import urlparse, unquote
 
-from clangd_index_yaml_parser import SymbolParser, FunctionSpan
+from clangd_index_yaml_parser import SymbolParser, SourceSpan
 from compilation_manager import CompilationManager
 
 logger = logging.getLogger(__name__)
 
-class FunctionSpanProvider:
+class SourceSpanProvider:
     """
     Matches pre-parsed span data from a CompilationManager with Symbol objects
     from a SymbolParser, enriching them in-place with `body_location` data.
@@ -39,10 +39,10 @@ class FunctionSpanProvider:
         and attaches the `body_location` attribute to the matched Symbol objects.
         """
         if not self.symbol_parser:
-            logger.warning("No SymbolParser provided to FunctionSpanProvider; cannot enrich symbols.")
+            logger.warning("No SymbolParser provided to SourceSpanProvider; cannot enrich symbols.")
             return
 
-        span_file_dicts = self.compilation_manager.get_function_spans()
+        span_file_dicts = self.compilation_manager.get_source_spans()
         
         # 1. Process raw span dictionaries into a lookup table
         spans_lookup = {}
@@ -56,7 +56,7 @@ class FunctionSpanProvider:
             
             for span_data in file_dict['Spans']:
                 if not span_data: continue
-                span = FunctionSpan.from_dict(span_data)
+                span = SourceSpan.from_dict(span_data)
                 key = (span.name, file_uri, 
                        span.name_location.start_line, span.name_location.start_column)
                 spans_lookup[key] = span

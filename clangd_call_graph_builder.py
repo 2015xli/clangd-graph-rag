@@ -18,7 +18,7 @@ from tqdm import tqdm
 import input_params
 from compilation_manager import CompilationManager
 from clangd_index_yaml_parser import (
-    SymbolParser, Symbol, Location, Reference, FunctionSpan, RelativeLocation, CallRelation
+    SymbolParser, Symbol, Location, Reference, SourceSpan, RelativeLocation, CallRelation
 )
 from neo4j_manager import Neo4jManager
 
@@ -266,10 +266,11 @@ def main():
     compilation_manager.parse_folder(args.project_path)
     logger.info("--- Finished Phase 1 ---")
 
-    # --- NEW: Phase 2: Create FunctionSpanProvider adapter ---
-    from function_span_provider import FunctionSpanProvider
+    # --- NEW: Phase 2: Create SourceSpanProvider adapter ---
+    from source_span_provider import SourceSpanProvider
     logger.info("\n--- Starting Phase 2: Enriching Symbols with Spans ---")
-    FunctionSpanProvider(symbol_parser=symbol_parser, compilation_manager=compilation_manager)
+    span_provider = SourceSpanProvider(symbol_parser=symbol_parser, compilation_manager=compilation_manager)
+    span_provider.enrich_symbols_with_span()
     logger.info("--- Finished Phase 2 ---")
 
     # --- Phase 3: Create extractor based on available features ---

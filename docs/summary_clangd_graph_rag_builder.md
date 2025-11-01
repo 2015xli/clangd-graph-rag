@@ -23,7 +23,7 @@ These passes prepare all data in memory before connecting to the database.
     *   **Purpose**: To parse the entire project's source code. This provides two critical pieces of data: the complete set of `#include` relationships and the precise body locations (spans) of every function.
 
 *   **Pass 2: Enrich Symbols with Spans**
-    *   **Component**: `function_span_provider.FunctionSpanProvider`
+    *   **Component**: `source_span_provider.SourceSpanProvider`
     *   **Purpose**: This class acts as an "enricher." It takes the symbols from Pass 0 and the span data from Pass 1, matches them, and attaches a `body_location` attribute directly to each in-memory `Symbol` object corresponding to a function.
 
 ### Database Passes

@@ -55,35 +55,52 @@ class ParserCache:
 
     def is_valid(self) -> bool:
         """Checks if the cache is present and still valid (via git hash or mtime)."""
-        if not os.path.exists(self.cache_path): return False
-        try:
-            with open(self.cache_path, "rb") as f: cached_data = pickle.load(f)
-        except (pickle.UnpicklingError, EOFError):
-            logger.warning("Cache file %s is corrupted. Ignoring.", self.cache_path); return False
+        if not os.path.exists(self.cache_path):
+            return False
         
+        try:
+            with open(self.cache_path, "rb") as f:
+                cached_data = pickle.load(f)
+        except (pickle.UnpicklingError, EOFError):
+            logger.warning("Cache file %s is corrupted. Ignoring.", self.cache_path)
+            return False
+
+        # --- Git-based validation ---
+        # This is the preferred method. If we are in a clean git repo, a hash
+        # mismatch is a definitive sign that the cache is stale.
         if self.repo and not self.repo.is_dirty():
-            if cached_data.get("type") == "git" and cached_data.get("commit_hash") == self.repo.head.object.hexsha:
-                logger.info("Git-based parser cache is valid."); return True
-        else: # Fallback to mtime
-            cache_mtime = os.path.getmtime(self.cache_path)
-            for file_path in self.get_source_files():
-                if os.path.getmtime(file_path) > cache_mtime:
-                    logger.info(f"Cache is stale due to modified file: {file_path}"); return False
-            logger.info("Mtime-based parser cache is valid."); return True
-        return False
+            if cached_data.get("type") == "git":
+                if cached_data.get("commit_hash") == self.repo.head.object.hexsha:
+                    logger.info("Git-based parser cache is valid.")
+                    return True
+                else:
+                    logger.info("Git commit hash mismatch, cache is stale.")
+                    return False
+            # If cache is not git-typed, fall through to mtime check.
+        
+        # --- M-time validation ---
+        # This is the fallback if not in a clean git repo.
+        cache_mtime = os.path.getmtime(self.cache_path)
+        for file_path in self.get_source_files():
+            if os.path.getmtime(file_path) > cache_mtime:
+                logger.info(f"Cache is stale due to modified file: {file_path}")
+                return False
+                
+        logger.info("Mtime-based parser cache is valid.")
+        return True
 
     def load(self) -> Tuple[List[Dict], Set[Tuple[str, str]]]:
         """Loads extracted data (function spans, include relations) from the cache."""
         logger.info(f"Loading extracted data from cache: {self.cache_path}")
         with open(self.cache_path, "rb") as f: 
             loaded_data = pickle.load(f)
-            return loaded_data.get("function_spans", []), loaded_data.get("include_relations", set())
+            return loaded_data.get("source_spans", []), loaded_data.get("include_relations", set())
 
-    def save(self, function_spans: List[Dict], include_relations: Set[Tuple[str, str]]):
+    def save(self, source_spans: List[Dict], include_relations: Set[Tuple[str, str]]):
         """Saves extracted data to the cache."""
         logger.info(f"Saving new extracted data to cache: {self.cache_path}")
         cache_obj = {
-            "function_spans": function_spans,
+            "source_spans": source_spans,
             "include_relations": include_relations
         }
         if self.repo: 
@@ -126,9 +143,9 @@ class CompilationManager:
         """Parses a full folder, using a cache if possible, and returns the populated manager itself."""
         cache = ParserCache(folder, cache_path_spec)
         if cache.is_valid():
-            function_spans, include_relations = cache.load()
+            source_spans, include_relations = cache.load()
             parser = self._create_parser()
-            parser.function_spans = function_spans
+            parser.source_spans = source_spans
             parser.include_relations = include_relations
             return
         
@@ -137,7 +154,7 @@ class CompilationManager:
         source_files = cache.get_source_files()
         parser.parse(source_files, num_workers)
         logger.info(f"Finished parsing {len(source_files)} source files.")
-        cache.save(parser.get_function_spans(), parser.get_include_relations())
+        cache.save(parser.get_source_spans(), parser.get_include_relations())
         gc.collect()
         return
 
@@ -149,10 +166,10 @@ class CompilationManager:
         gc.collect()
         return
 
-    def get_function_spans(self) -> List[Dict]:
+    def get_source_spans(self) -> List[Dict]:
         if not hasattr(self, '_parser') or self._parser is None:
             raise RuntimeError("CompilationManager has not parsed any files yet.")
-        return self._parser.get_function_spans()
+        return self._parser.get_source_spans()
 
     def get_include_relations(self) -> Set[Tuple[str, str]]:
         if not hasattr(self, '_parser') or self._parser is None:
@@ -260,7 +277,7 @@ if __name__ == "__main__":
             grouped_includes[key].sort()
 
         results = {
-            'function_spans': manager.get_function_spans(),
+            'source_spans': manager.get_source_spans(),
             'grouped_include_relations': dict(sorted(grouped_includes.items()))
         }
 

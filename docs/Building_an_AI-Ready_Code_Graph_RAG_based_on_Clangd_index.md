@@ -228,7 +228,7 @@ This process was completely rewritten for correctness and robustness, using a de
 *   **`clangd_symbol_nodes_builder.py`**: Builds the graph's structural backbone. Its `PathProcessor` now consolidates paths from symbols and includes. Its `SymbolProcessor` now writes the `body_location` property to function nodes.
 *   **`clangd_call_graph_builder.py`**: Builds the `:CALLS` relationships. Its legacy `WithoutContainer` extractor is now simpler, relying on pre-enriched in-memory `Symbol` objects.
 *   **`code_graph_rag_generator.py`**: The AI enrichment engine. It is now simpler and reads `body_location` data directly from the graph.
-*   **`function_span_provider.py`**: This component's role has been significantly reduced. It now acts as a simple, temporary "enricher" used in an early pipeline pass to attach span data to in-memory symbols.
+*   **`source_span_provider.py`**: This component's role has been significantly reduced. It now acts as a simple, temporary "enricher" used in an early pipeline pass to attach span data to in-memory symbols.
 
 ### 3.2: Orchestrator Deep Dive (Refactored)
 

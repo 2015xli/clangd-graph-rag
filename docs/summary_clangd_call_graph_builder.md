@@ -54,7 +54,7 @@ This strategy is used for older `clangd` index formats that lack the `Container`
 
 *   **Prerequisite**: The `SymbolParser` detects that `has_container_field` is `False`.
 *   **Algorithm**:
-    1.  **Span Loading**: The `FunctionSpanProvider` is invoked first. It parses the entire project with `tree-sitter` to find the precise body location of every function and enriches the in-memory `Symbol` objects with this `body_location` data.
+    1.  **Span Loading**: The `SourceSpanProvider` is invoked first. It parses the entire project with `tree-sitter` to find the precise body location of every function and enriches the in-memory `Symbol` objects with this `body_location` data.
     2.  **Build Spatial Index**: The extractor builds a crucial in-memory data structure: a dictionary named `file_to_function_bodies_index`.
         *   **Keys**: File URIs (`'file:///path/to/file.c'`).
         *   **Values**: A list of all function bodies found in that file, sorted by their starting line number.

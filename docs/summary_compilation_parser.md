@@ -14,7 +14,7 @@ This module acts as the "worker" layer, providing concrete parsing implementatio
 
 The module is designed using the Strategy pattern to allow for flexible switching between different parsing engines. 
 
-*   **`CompilationParser` (Abstract Base Class)**: Defines the common interface that all concrete strategies must implement. This includes methods like `parse()`, `get_function_spans()`, and `get_include_relations()`.
+*   **`CompilationParser` (Abstract Base Class)**: Defines the common interface that all concrete strategies must implement. This includes methods like `parse()`, `get_source_spans()`, and `get_include_relations()`.
 
 This design allows the `CompilationManager` to treat any parser polymorphically, simply delegating the task of parsing to whichever concrete strategy has been chosen.
 

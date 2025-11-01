@@ -99,9 +99,9 @@ class GraphBuilder:
 
     def _pass_2_enrich_symbols(self):
         logger.info("\n--- Starting Pass 2: Enriching Symbols with Spans ---")
-        from function_span_provider import FunctionSpanProvider
+        from source_span_provider import SourceSpanProvider
         
-        span_provider = FunctionSpanProvider(self.symbol_parser, self.compilation_manager)
+        span_provider = SourceSpanProvider(self.symbol_parser, self.compilation_manager)
         span_provider.enrich_symbols_with_span() # Explicitly call the worker method
         
         logger.info(f"Enriched {span_provider.get_matched_count()} symbols with body_location.")

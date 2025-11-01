@@ -32,4 +32,4 @@ The manager exposes a clean API to handle different use cases:
 
 *   **`parse_folder()`**: This is used by the full graph builder. It orchestrates the entire caching logic. If a valid cache is found, it loads from it; otherwise, it triggers a full parse of the project folder and saves the results to the cache.
 *   **`parse_files()`**: This is used by the incremental graph updater. It takes a specific list of files to parse and **does not** use the cache, as the goal is always to get the fresh, updated information for that small subset of files.
-*   **`get_function_spans()` / `get_include_relations()`**: After a `parse_*` method has been called, these methods are used to retrieve the extracted data.
+*   **`get_source_spans()` / `get_include_relations()`**: After a `parse_*` method has been called, these methods are used to retrieve the extracted data.
