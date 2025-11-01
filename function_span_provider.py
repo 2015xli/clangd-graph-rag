@@ -42,35 +42,36 @@ class FunctionSpanProvider:
             logger.warning("No SymbolParser provided to FunctionSpanProvider; cannot enrich symbols.")
             return
 
-        function_span_file_dicts = self.compilation_manager.get_function_spans()
+        span_file_dicts = self.compilation_manager.get_function_spans()
         
         # 1. Process raw span dictionaries into a lookup table
         spans_lookup = {}
-        num_functions = sum(len(d.get('Functions', [])) for d in function_span_file_dicts)
-        logger.info(f"Processing {num_functions} function definitions from {len(function_span_file_dicts)} files for enrichment.")
+        num_spans = sum(len(d.get('Spans', [])) for d in span_file_dicts)
+        logger.info(f"Processing {num_spans} symbol definitions from {len(span_file_dicts)} files for enrichment.")
 
-        for file_dict in function_span_file_dicts:
+        for file_dict in span_file_dicts:
             file_uri = file_dict.get('FileURI')
-            if not file_uri or 'Functions' not in file_dict:
+            if not file_uri or 'Spans' not in file_dict:
                 continue
             
-            for func_data in file_dict['Functions']:
-                if not func_data: continue
-                span = FunctionSpan.from_dict(func_data)
+            for span_data in file_dict['Spans']:
+                if not span_data: continue
+                span = FunctionSpan.from_dict(span_data)
                 key = (span.name, file_uri, 
                        span.name_location.start_line, span.name_location.start_column)
                 spans_lookup[key] = span
         
         # 2. Match symbols against the lookup table and enrich
         matched_count = 0
-        for func_symbol in self.symbol_parser.functions.values():
-            if func_symbol.definition:
-                key = (func_symbol.name, func_symbol.definition.file_uri,
-                       func_symbol.definition.start_line, func_symbol.definition.start_column)
+        # Iterate through ALL symbols, not just functions
+        for sym in self.symbol_parser.symbols.values():
+            if sym.definition:
+                key = (sym.name, sym.definition.file_uri,
+                       sym.definition.start_line, sym.definition.start_column)
                 
                 if key in spans_lookup:
                     # Enrich the Symbol object directly in-place
-                    func_symbol.body_location = spans_lookup[key].body_location
+                    sym.body_location = spans_lookup[key].body_location
                     matched_count += 1
         
         self.matched_symbols_count = matched_count
@@ -78,7 +79,7 @@ class FunctionSpanProvider:
 
         # 3. Clean up references to free memory
         self.symbol_parser = None
-        del function_span_file_dicts, spans_lookup
+        del span_file_dicts, spans_lookup
         gc.collect()
 
     def get_matched_count(self) -> int:

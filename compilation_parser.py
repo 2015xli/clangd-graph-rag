@@ -64,11 +64,11 @@ class _ClangWorkerImpl:
         finally:
             os.chdir(original_dir)
 
-        function_spans = [
-            {"FileURI": file_uri, "Functions": functions}
-            for file_uri, functions in self.span_results.items()
+        span_results_list = [
+            {"FileURI": file_uri, "Spans": spans}
+            for file_uri, spans in self.span_results.items()
         ]
-        return function_spans, self.include_relations
+        return span_results_list, self.include_relations
 
     def _parse_translation_unit(self, file_path: str):
         args = self.entry['arguments']
@@ -97,6 +97,8 @@ class _ClangWorkerImpl:
         
         if node.kind == clang.cindex.CursorKind.FUNCTION_DECL and node.is_definition():
             self._process_function_node(node, file_name)
+        elif node.kind in (clang.cindex.CursorKind.STRUCT_DECL, clang.cindex.CursorKind.UNION_DECL, clang.cindex.CursorKind.ENUM_DECL) and node.is_definition():
+            self._process_structure_node(node, file_name)
 
         for c in node.get_children():
             self._walk_ast(c)
@@ -109,7 +111,7 @@ class _ClangWorkerImpl:
             return
         if is_header: self.processed_headers.add(func_sig)
         
-        name_start_line, name_start_col = (node.location.line - 1, node.location.column - 1)
+        name_start_line, name_start_col = self.get_symbol_name_location(node)
         body_start_line, body_start_col = (node.extent.start.line - 1, node.extent.start.column - 1)
         body_end_line, body_end_col = (node.extent.end.line - 1, node.extent.end.column - 1)
         
@@ -119,6 +121,49 @@ class _ClangWorkerImpl:
             "BodyLocation": {"Start": {"Line": body_start_line, "Column": body_start_col}, "End": {"Line": body_end_line, "Column": body_end_col}}
         }
         self.span_results[f"file://{os.path.abspath(file_name)}"].append(span_data)
+
+    def _process_structure_node(self, node, file_name):
+        name_start_line, name_start_col = self.get_symbol_name_location(node)
+        body_start_line, body_start_col = (node.extent.start.line - 1, node.extent.start.column - 1)
+        body_end_line, body_end_col = (node.extent.end.line - 1, node.extent.end.column - 1)
+        
+        kind_map = {
+            clang.cindex.CursorKind.STRUCT_DECL: "Struct",
+            clang.cindex.CursorKind.UNION_DECL: "Union",
+            clang.cindex.CursorKind.ENUM_DECL: "Enum",
+        }
+
+        span_data = {
+            "Name": node.spelling, "Kind": kind_map.get(node.kind, "Unknown"),
+            "NameLocation": {"Start": {"Line": name_start_line, "Column": name_start_col}, "End": {"Line": name_start_line, "Column": name_start_col + len(node.spelling)}},
+            "BodyLocation": {"Start": {"Line": body_start_line, "Column": body_start_col}, "End": {"Line": body_end_line, "Column": body_end_col}}
+        }
+        self.span_results[f"file://{os.path.abspath(file_name)}"].append(span_data)
+
+    def get_symbol_name_location(self, node):
+        """
+        Returns (line, column) zero-based position of symbol's name token.
+        Matches clangd indexer's behavior for functions, structs, enums, etc.
+        """
+        try:
+            # For functions and methods, cursor.location may be on return type.
+            if node.kind in (
+                clang.cindex.CursorKind.FUNCTION_DECL,
+                clang.cindex.CursorKind.CXX_METHOD,
+                clang.cindex.CursorKind.CONSTRUCTOR,
+                clang.cindex.CursorKind.DESTRUCTOR,
+            ):
+                for tok in node.get_tokens():
+                    if tok.spelling == node.spelling:
+                        loc = tok.location
+                        if loc.file and loc.file.name.startswith(self.project_path):
+                            return (loc.line - 1, loc.column - 1)
+            # Fallback: for structs, enums, etc. this is already correct.
+            loc = node.location
+            return (loc.line - 1, loc.column - 1)
+        except Exception:
+            loc = node.location
+            return (loc.line - 1, loc.column - 1)
 
 class _TreesitterWorkerImpl:
     """Contains the logic to parse one file using tree-sitter."""

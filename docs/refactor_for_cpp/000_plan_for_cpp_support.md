@@ -2,6 +2,100 @@
 
 This document outlines the Neo4j graph schema designed to represent C and C++ source code. The schema provides a rich, semantic understanding of the codebase, with explicit support for object-oriented constructs.
 
+THis is original schema:
+Node Properties:
+  (DATA_STRUCTURE)   
+    file_path: STRING
+    has_definition: BOOLEAN
+    id: STRING (INDEXED) (UNIQUE)
+    kind: STRING  # struct, enum, union
+    language: STRING
+    name: STRING
+    name_location: LIST
+    path: STRING
+    scope: STRING
+  (FILE)
+    name: STRING
+    path: STRING (INDEXED) (UNIQUE)
+    summary: STRING
+    summaryEmbedding: LIST
+  (FOLDER)
+    name: STRING
+    path: STRING (INDEXED) (UNIQUE)
+    summary: STRING
+    summaryEmbedding: LIST
+  (FUNCTION)
+    body_location: LIST
+    codeSummary: STRING
+    file_path: STRING
+    has_definition: BOOLEAN
+    id: STRING (INDEXED) (UNIQUE)
+    kind: STRING
+    language: STRING
+    name: STRING
+    name_location: LIST
+    path: STRING
+    return_type: STRING
+    scope: STRING
+    signature: STRING
+    summary: STRING
+    summaryEmbedding: LIST
+    type: STRING
+  (PROJECT)
+    commit_hash: STRING
+    name: STRING
+    path: STRING
+    summary: STRING
+    summaryEmbedding: LIST
+
+Relationships:
+  (FILE) -[:DEFINES]-> (DATA_STRUCTURE|FUNCTION)
+  (FILE) -[:INCLUDES]-> (FILE)
+  (FOLDER) -[:CONTAINS]-> (FILE)
+  (FUNCTION) -[:CALLS]-> (FUNCTION)
+  (PROJECT) -[:CONTAINS]-> (FOLDER)
+
+Property Explanations:
+  body_location: Entity's body location in the file [start_line, start_column, end_line, end_column].
+  codeSummary: LLM-generated summary of the code's literal function.
+  file_path: Absolute path to the file containing the symbol.
+  has_definition: Boolean indicating if a symbol has a definition.
+  id: Unique identifier for the node.
+  kind: Type of symbol (e.g., Function, Struct, Variable).
+  language: Programming language of the source code.
+  name: Name of the entity (e.g., function name, file name).
+  name_location: Entity's name location in the file [line, column].
+  path: Relative path to the project root if it is within the project folder. Otherwise, it is absolute path, including the PROJECT node
+  return_type: Return type of a function.
+  scope: Visibility scope (e.g., global, static).
+  signature: Full signature of a function.
+  summary: LLM-generated context-aware summary of the node's purpose.
+  summaryEmbedding: Vector embedding of the 'summary' for similarity search.
+  type: Data type of the symbol (e.g., int, void*).
+
+For C++, this is the additional kinds of symbols in a small C++ project extracted by clangd-indexer. I don't necessarily support all of them for my purpose.
+  Kind:            Class
+  Kind:            Constructor
+  Kind:            ConversionFunction
+  Kind:            Destructor
+  Kind:            Enum
+  Kind:            EnumConstant
+  Kind:            Field
+  Kind:            Function
+  Kind:            InstanceMethod
+  Kind:            Namespace
+  Kind:            StaticMethod
+  Kind:            StaticProperty
+  Kind:            Struct
+  Kind:            TypeAlias
+  Kind:            Union
+  Kind:            Using
+  Kind:            Variable
+
+
+
+# New planned schema
+
 ## Node Types
 
 ### Infrastructure Nodes

@@ -52,7 +52,7 @@ class SymbolProcessor:
         self.log_batch_size = log_batch_size
         self.cypher_tx_size = cypher_tx_size
     
-    def process_symbol(self, sym: Symbol) -> Optional[Dict]:
+    def process_symbol(self, sym: Symbol, scope_name_to_id: Dict[str, str]) -> Optional[Dict]:
         if not sym.id or not sym.kind:
             return None
 
@@ -65,27 +65,21 @@ class SymbolProcessor:
             "has_definition": sym.definition is not None,
         }
 
-        # Set primary display location for all symbols, not just functions
         primary_location = sym.definition or sym.declaration
         if primary_location:
             abs_file_path = unquote(urlparse(primary_location.file_uri).path)
             if self.path_manager.is_within_project(abs_file_path):
                 symbol_data["path"] = self.path_manager.uri_to_relative_path(primary_location.file_uri)
             else:
-                # For out-of-project symbol, skip it.
                 return None
-                # For out-of-project symbols, store the absolute path
-                # symbol_data["path"] = abs_file_path
             symbol_data["name_location"] = [primary_location.start_line, primary_location.start_column]
 
-        # Add function-specific properties
         if sym.kind == "Function":
             symbol_data.update({
                 "signature": sym.signature,
                 "return_type": sym.return_type,
                 "type": sym.type,
             })
-            # If the symbol has been enriched with body_location, add it.
             if hasattr(sym, 'body_location') and sym.body_location:
                 symbol_data["body_location"] = [
                     sym.body_location.start_line,
@@ -93,8 +87,26 @@ class SymbolProcessor:
                     sym.body_location.end_line,
                     sym.body_location.end_column
                 ]
-            
-        # Set file_path for creating DEFINES relationships (in-project only)
+        
+        if sym.kind in ("Struct", "Union", "Enum", "Class"):
+            if hasattr(sym, 'body_location') and sym.body_location:
+                symbol_data["body_location"] = [
+                    sym.body_location.start_line,
+                    sym.body_location.start_column,
+                    sym.body_location.end_line,
+                    sym.body_location.end_column
+                ]
+
+        if sym.kind == "Field":
+            parent_id = scope_name_to_id.get(sym.scope)
+            if parent_id:
+                symbol_data.update({
+                    "type": sym.type,
+                    "parent_id": parent_id
+                })
+            else:
+                logger.debug(f"Could not find parent ID for field '{sym.name}' with scope '{sym.scope}'")
+
         if sym.definition:
             abs_file_path = unquote(urlparse(sym.definition.file_uri).path)
             if self.path_manager.is_within_project(abs_file_path):
@@ -102,47 +114,56 @@ class SymbolProcessor:
         
         return symbol_data
 
-    def _process_and_filter_symbols(self, symbols: Dict[str, Symbol]) -> Tuple[List[Dict], List[Dict], List[Dict], List[Dict]]:
-        symbol_data_list = []
+    def _process_and_filter_symbols(self, symbols: Dict[str, Symbol], scope_name_to_id: Dict[str, str]) -> Dict[str, List[Dict]]:
+        processed_symbols = defaultdict(list)
         logger.info("Processing symbols for ingestion...")
-        for sym in tqdm(symbols.values(), desc="Processing symbols"):
-            data = self.process_symbol(sym)
-            if data:
-                symbol_data_list.append(data)
+        for sym in tqdm(symbols.values(), desc="Processing and grouping symbols by kind"):
+            data = self.process_symbol(sym, scope_name_to_id)
+            if data and 'kind' in data:
+                processed_symbols[data['kind']].append(data)
         
-        function_data_list = [d for d in symbol_data_list if d['kind'] == 'Function']
-        data_structure_data_list = [d for d in symbol_data_list if d['kind'] in ('Struct', 'Class', 'Union', 'Enum')]
-        
-        # Filter defines_data_list to only include FUNCTION and DATA_STRUCTURE for relationship creation
-        # Derived from already filtered lists for efficiency
-        defines_function_list = [d for d in function_data_list if 'file_path' in d]
-        defines_data_structure_list = [d for d in data_structure_data_list if 'file_path' in d]
-
-        del symbol_data_list
-        gc.collect()
-
-        return function_data_list, data_structure_data_list, defines_function_list, defines_data_structure_list
+        processed_symbols['DATA_STRUCTURE'] = (
+            processed_symbols.get('Struct', []) +
+            processed_symbols.get('Class', []) +
+            processed_symbols.get('Union', []) +
+            processed_symbols.get('Enum', [])
+        )
+        return processed_symbols
 
     def ingest_symbols_and_relationships(self, symbols: Dict[str, Symbol], neo4j_mgr: Neo4jManager, defines_generation_strategy: str = "batched-parallel"):
-        function_data_list, data_structure_data_list, defines_function_list, defines_data_structure_list = self._process_and_filter_symbols(symbols)
+        logger.info("Building lookup map from scope names to parent IDs...")
+        scope_name_to_id = {}
+        for sym in symbols.values():
+            if sym.kind in ('Struct', 'Class', 'Union'):
+                key = sym.scope + sym.name + '::'
+                scope_name_to_id[key] = sym.id
+
+        processed_symbols = self._process_and_filter_symbols(symbols, scope_name_to_id)
+
+        function_data_list = processed_symbols.get('Function', [])
+        data_structure_data_list = processed_symbols.get('DATA_STRUCTURE', [])
+        field_data_list = [f for f in processed_symbols.get('Field', []) if 'parent_id' in f]
 
         self._ingest_function_nodes(function_data_list, neo4j_mgr)
         self._ingest_data_structure_nodes(data_structure_data_list, neo4j_mgr)
+        self._ingest_field_nodes(field_data_list, neo4j_mgr)
+
+        defines_function_list = [d for d in function_data_list if 'file_path' in d]
+        defines_data_structure_list = [d for d in data_structure_data_list if 'file_path' in d]
 
         if defines_generation_strategy == "unwind-sequential":
-            logger.info("Using sequential UNWIND MERGE for DEFINES relationships.")
             self._ingest_defines_relationships_unwind_sequential(defines_function_list, defines_data_structure_list, neo4j_mgr)
         elif defines_generation_strategy == "isolated-parallel":
-            logger.info("Using isolated parallel MERGE for DEFINES relationships with file-based grouping.")
             self._ingest_defines_relationships_isolated_parallel(defines_function_list, defines_data_structure_list, neo4j_mgr)
         elif defines_generation_strategy == "batched-parallel":
-            logger.info("Using batched parallel MERGE for DEFINES relationships.")
             self._ingest_defines_relationships_batched_parallel(defines_function_list, defines_data_structure_list, neo4j_mgr)
         else:
             logger.error(f"Unknown defines generation strategy: {defines_generation_strategy}. Defaulting to batched-parallel.")
             self._ingest_defines_relationships_batched_parallel(defines_function_list, defines_data_structure_list, neo4j_mgr)
 
-        del function_data_list, data_structure_data_list, defines_function_list, defines_data_structure_list
+        self._ingest_has_field_relationships(field_data_list, neo4j_mgr)
+
+        del processed_symbols, function_data_list, data_structure_data_list, field_data_list
         gc.collect()
 
     def _ingest_function_nodes(self, function_data_list: List[Dict], neo4j_mgr: Neo4jManager):
@@ -184,6 +205,42 @@ class SymbolProcessor:
                 total_nodes_created += counters.nodes_created
                 total_properties_set += counters.properties_set
         logger.info(f"  Total DATA_STRUCTURE nodes created: {total_nodes_created}, properties set: {total_properties_set}")
+
+    def _ingest_field_nodes(self, field_data_list: List[Dict], neo4j_mgr: Neo4jManager):
+        if not field_data_list:
+            return
+        logger.info(f"Creating {len(field_data_list)} FIELD nodes in batches (1 batch = {self.ingest_batch_size} nodes)...")
+        total_nodes_created = 0
+        total_properties_set = 0
+        for i in tqdm(range(0, len(field_data_list), self.ingest_batch_size), desc="Ingesting FIELD nodes"):
+            batch = field_data_list[i:i + self.ingest_batch_size]
+            field_merge_query = """
+            UNWIND $field_data AS data
+            MERGE (n:FIELD {id: data.id})
+            SET n += apoc.map.removeKey(data, 'parent_id')
+            """
+            all_counters = neo4j_mgr.process_batch([(field_merge_query, {"field_data": batch})])
+            for counters in all_counters:
+                total_nodes_created += counters.nodes_created
+                total_properties_set += counters.properties_set
+        logger.info(f"  Total FIELD nodes created: {total_nodes_created}, properties set: {total_properties_set}")
+
+    def _ingest_has_field_relationships(self, field_data_list: List[Dict], neo4j_mgr: Neo4jManager):
+        if not field_data_list:
+            return
+        logger.info(f"Creating {len(field_data_list)} HAS_FIELD relationships in batches...")
+        query = """
+        UNWIND $field_data AS data
+        MATCH (parent:DATA_STRUCTURE {id: data.parent_id})
+        MATCH (child:FIELD {id: data.id})
+        MERGE (parent)-[:HAS_FIELD]->(child)
+        """
+        total_rels_created = 0
+        for i in tqdm(range(0, len(field_data_list), self.ingest_batch_size), desc="Ingesting HAS_FIELD relationships"):
+            batch = field_data_list[i:i + self.ingest_batch_size]
+            counters = neo4j_mgr.execute_autocommit_query(query, {"field_data": batch})
+            total_rels_created += counters.relationships_created
+        logger.info(f"  Total HAS_FIELD relationships created: {total_rels_created}")
 
     def _get_defines_stats(self, defines_list: List[Dict]) -> str:
         from collections import Counter

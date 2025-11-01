@@ -21,13 +21,10 @@ This step leverages and expands our existing source code parsing infrastructure.
 *   **Component**: `_ClangWorkerImpl`
 *   **Task**: Modify the AST walk to recognize and process data structure definitions, not just functions.
 
-1.  **Update `_walk_ast`**: The `if` condition will be expanded to check for more cursor kinds.
-    *   **Current**: `if node.kind == clang.cindex.CursorKind.FUNCTION_DECL and node.is_definition():`
-    *   **New**: Add an `elif` to handle `STRUCT_DECL`, `UNION_DECL`, and `ENUM_DECL`.
-2.  **Add `_process_structure_node` method**: A new method will be added to `_ClangWorkerImpl` to handle these new kinds. It will:
-    *   Use the robust `get_symbol_name_location` helper to find the accurate start of the symbol's name.
-    *   Use `node.extent` to get the full start and end coordinates of the entire definition body.
-    *   Store this information in `self.span_results` with the appropriate `Kind` (e.g., 'Struct', 'Union').
+1.  **Update `_walk_ast`**: The `if` condition was expanded with an `elif` to handle `STRUCT_DECL`, `UNION_DECL`, and `ENUM_DECL`.
+2.  **Add `_process_structure_node` method**: A new method was added to handle these new kinds. It uses `node.extent` to get the full start and end coordinates of the definition body.
+3.  **Update `_process_function_node`**: This existing method was also updated to use the same robust `get_symbol_name_location` helper, ensuring consistent name location logic for all symbol types.
+4.  **Correction**: The key used to store the list of extracted spans was changed from `"Functions"` to the more generic `"Spans"`. This ensures that all symbol types are correctly processed by downstream modules.
 
 ### 3.2. `function_span_provider.py`
 
@@ -35,9 +32,8 @@ This step leverages and expands our existing source code parsing infrastructure.
 *   **Task**: Generalize the enrichment process to apply to all symbols, not just functions.
 
 1.  **Update `enrich_symbols_with_span`**: 
-    *   The main loop currently iterates over `self.symbol_parser.functions.values()`.
-    *   This will be changed to iterate over `self.symbol_parser.symbols.values()`.
-    *   The existing matching logic, which uses a composite key of `(name, file_uri, line, column)`, is generic and will work perfectly for matching `struct`, `union`, and `enum` symbols in addition to functions.
+    *   The main loop was changed to iterate over `self.symbol_parser.symbols.values()` instead of just `functions.values()`.
+    *   **Correction**: The logic was updated to look for the generic `"Spans"` key from the parser instead of the old `"Functions"` key, ensuring data structure spans are found and processed.
 
 ### 3.3. `clangd_symbol_nodes_builder.py`
 
@@ -45,9 +41,8 @@ This step leverages and expands our existing source code parsing infrastructure.
 *   **Task**: Add the `body_location` data to the properties of `:DATA_STRUCTURE` nodes before they are ingested.
 
 1.  **Update `process_symbol`**: 
-    *   A new `if` block will be added. It will check if the symbol `kind` is one of `Struct`, `Union`, `Enum`, or `Class`.
-    *   If it is, and if the in-memory `Symbol` object has a `body_location` attribute (attached by the `FunctionSpanProvider`), this location data will be formatted and added to the `symbol_data` dictionary.
-    *   This is the exact same logic that is already in place for `Function` symbols.
+    *   An `if` block was added to check if the symbol `kind` is one of `Struct`, `Union`, `Enum`, or `Class`.
+    *   If it is, and if the in-memory `Symbol` object has a `body_location` attribute (attached by the `FunctionSpanProvider`), this location data is formatted and added to the `symbol_data` dictionary.
 
 ## 4. Verification
 

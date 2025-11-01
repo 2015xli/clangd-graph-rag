@@ -14,65 +14,45 @@ The goal of this first step is to introduce `FIELD` nodes and connect them to th
 
 ### 3.1. `neo4j_manager.py`
 
-*   In the `create_constraints` method, add a new constraint for the `FIELD` node. Since `FIELD` symbols from `clangd` also have a unique ID, we can enforce this.
+*   In the `create_constraints` method, a new constraint was added for the `FIELD` node to enforce the uniqueness of its ID.
     ```python
     "CREATE CONSTRAINT IF NOT EXISTS FOR (f:FIELD) REQUIRE f.id IS UNIQUE",
     ```
 
 ### 3.2. `clangd_index_yaml_parser.py`
 
-*   The current `Symbol` data class and parser are generic enough to already handle `Field` kinds from the `clangd` index. The `scope` property of a `Field` symbol will contain the ID of its parent `DATA_STRUCTURE`. No major changes are needed here, but we need to be aware of this relationship for the next step.
+*   **Correction**: The initial assumption that a `Field` symbol's `scope` property contains the direct ID of its parent was incorrect. The `scope` is a string representation (e.g., `MyStruct::`).
+*   To handle this, a lookup map must be constructed in the `clangd_symbol_nodes_builder.py` module by iterating through all data structure symbols first. No changes are needed in the parser itself.
 
 ### 3.3. `clangd_symbol_nodes_builder.py`
 
-This file will see the most changes for this step. The refactoring will be done in a way that improves maintainability.
+This file saw the most changes for this step.
+
+*   **Create `scope_name_to_id` Map**: In `ingest_symbols_and_relationships`, a lookup map is now created at the beginning of the process. It iterates through all `Struct`, `Class`, and `Union` symbols and maps their scope name (e.g., `MyNamespace::MyStruct::`) to their unique symbol ID.
 
 *   **Refactor `SymbolProcessor._process_and_filter_symbols`**:
-    *   This method will be refactored to return a single dictionary instead of multiple lists. This makes the code cleaner and easier to extend in later steps.
-    *   The implementation will change from returning `list1, list2, ...` to returning `processed_symbols`, where `processed_symbols` is a `defaultdict(list)`.
-    *   The classification logic will be simplified:
-        ```python
-        processed_symbols = defaultdict(list)
-        for sym in symbols.values():
-            data = self.process_symbol(sym)
-            if data and 'kind' in data:
-                # Group symbols by their kind
-                processed_symbols[data['kind']].append(data)
-        return processed_symbols
-        ```
+    *   This method was refactored to return a single dictionary (`defaultdict(list)`) that groups symbols by their `kind`.
+    *   It now requires the `scope_name_to_id` map to be passed down to `process_symbol`.
 
-*   **In `SymbolProcessor.process_symbol`**:
-    *   Add logic to handle `Field` symbols. The `scope` property of the `Field` symbol is the ID of the parent struct/class. We will store this parent ID to create the relationship later.
-        ```python
-        # Inside process_symbol
-        if sym.kind == "Field":
-            symbol_data.update({
-                "type": sym.type,
-                # The 'scope' from clangd is the ID of the parent struct/class
-                "parent_id": sym.scope
-            })
-        ```
+*   **Update `SymbolProcessor.process_symbol`**:
+    *   The method now accepts the `scope_name_to_id` map.
+    *   When processing a `Field` symbol, it now correctly looks up the parent ID from the map: `parent_id = scope_name_to_id.get(sym.scope)`.
+    *   This `parent_id` is temporarily added to the data dictionary for the field.
 
-*   **In `SymbolProcessor.ingest_symbols_and_relationships`**:
-    *   This method will be updated to work with the new dictionary structure.
-    *   It will call `processed_symbols = self._process_and_filter_symbols(symbols)`.
-    *   It will then access the lists it needs by key: `field_data_list = processed_symbols.get('Field', [])`.
-    *   It will call two new methods: `self._ingest_field_nodes(field_data_list, neo4j_mgr)` and `self._ingest_has_field_relationships(field_data_list, neo4j_mgr)`.
+*   **Update `SymbolProcessor.ingest_symbols_and_relationships`**:
+    *   This method now orchestrates the new flow: it builds the `scope_name_to_id` map, calls the refactored `_process_and_filter_symbols`, and then calls the new ingestion methods for fields.
 
 *   **Create `SymbolProcessor._ingest_field_nodes`**:
-    *   This new method will take `field_data_list` and create `:FIELD` nodes in batched `UNWIND` queries.
-    *   The query will look like:
+    *   This new method creates `:FIELD` nodes in batches.
+    *   The Cypher query was optimized to prevent the temporary `parent_id` from being stored on the node, using `apoc.map.removeKey`:
         ```cypher
         UNWIND $field_data AS data
         MERGE (n:FIELD {id: data.id})
-        ON CREATE SET n += data
-        ON MATCH SET n += data
+        SET n += apoc.map.removeKey(data, 'parent_id')
         ```
 
 *   **Create `SymbolProcessor._ingest_has_field_relationships`**:
-    *   This new method will create the `[:HAS_FIELD]` relationships.
-    *   It will take `field_data_list` and run a batched query.
-    *   The query will match the parent `DATA_STRUCTURE` and the child `FIELD` using the `parent_id` we stored earlier.
+    *   This new method creates the `[:HAS_FIELD]` relationships using the `parent_id` from the processed field data.
         ```cypher
         UNWIND $field_data AS data
         MATCH (parent:DATA_STRUCTURE {id: data.parent_id})
