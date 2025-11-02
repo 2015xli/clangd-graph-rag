@@ -104,7 +104,7 @@ class _ClangWorkerImpl:
             self._walk_ast(c)
 
     def _process_function_node(self, node, file_name):
-        is_header = file_name.endswith('.h')
+        is_header = file_name.lower().endswith(('.h', '.hh', '.hpp', '.hxx', '.h++'))
         func_sig = (file_name, node.spelling, node.location.line, node.location.column)
 
         if is_header and func_sig in self.processed_headers:
@@ -123,6 +123,13 @@ class _ClangWorkerImpl:
         self.span_results[f"file://{os.path.abspath(file_name)}"].append(span_data)
 
     def _process_structure_node(self, node, file_name):
+        is_header = file_name.lower().endswith(('.h', '.hh', '.hpp', '.hxx', '.h++'))  
+        data_sig = (file_name, node.spelling, node.location.line, node.location.column)
+
+        if is_header and data_sig in self.processed_headers:
+            return
+        if is_header: self.processed_headers.add(data_sig)
+
         name_start_line, name_start_col = self.get_symbol_name_location(node)
         body_start_line, body_start_col = (node.extent.start.line - 1, node.extent.start.column - 1)
         body_end_line, body_end_col = (node.extent.end.line - 1, node.extent.end.column - 1)

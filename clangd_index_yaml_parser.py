@@ -105,7 +105,7 @@ class Symbol:
     body_location: Optional[RelativeLocation] = None
     
     def is_function(self) -> bool:
-        return self.kind == 'Function'
+        return self.kind in ('Function', 'InstanceMethod', 'StaticMethod', 'Constructor', 'Destructor', 'ConversionFunction')
 
 @dataclass
 class CallRelation:

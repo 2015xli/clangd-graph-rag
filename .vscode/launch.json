@@ -5,6 +5,13 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python Debugger: LLama Graph RAG builder",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "clangd_graph_rag_builder.py",
+            "args": ["~/Public/llama.cpp/llama_cpp_clangd_index.yaml", "~/Public/llama.cpp/", "--compile-commands", "~/Public/llama.cpp/compile_commands.json", "--generate-summary"]
+        },
+        {
             "name": "Python Debugger: Call graph builder",
             "type": "debugpy",
             "request": "launch",

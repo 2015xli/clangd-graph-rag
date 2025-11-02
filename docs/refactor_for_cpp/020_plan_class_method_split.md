@@ -4,7 +4,7 @@
 
 This is a major step. The goal is to differentiate between C-style constructs and C++ object-oriented constructs. We will:
 1.  Split the `FUNCTION` node type into `FUNCTION` (for free functions) and `METHOD` (for class-bound functions).
-2.  Split the `DATA_STRUCTURE` node type into `DATA_STRUCTURE` (for C-style structs/enums/unions) and `CLASS_STRUCTURE` (for C++ classes and structs with methods).
+2.  Split the `DATA_STRUCTURE` node type into `DATA_STRUCTURE` (for C language structs, and all enums/unions in C/C++) and `CLASS_STRUCTURE` (for C++ language classes and structs).
 3.  Introduce the `[:HAS_METHOD]` relationship.
 
 ## 2. Affected Files
@@ -22,7 +22,6 @@ This is a major step. The goal is to differentiate between C-style constructs an
     constraints = [
         "CREATE CONSTRAINT IF NOT EXISTS FOR (f:FILE) REQUIRE f.path IS UNIQUE",
         "CREATE CONSTRAINT IF NOT EXISTS FOR (f:FOLDER) REQUIRE f.path IS UNIQUE",
-        # Keep these for now, but they will apply to fewer nodes
         "CREATE CONSTRAINT IF NOT EXISTS FOR (fn:FUNCTION) REQUIRE fn.id IS UNIQUE",
         "CREATE CONSTRAINT IF NOT EXISTS FOR (ds:DATA_STRUCTURE) REQUIRE ds.id IS UNIQUE",
         # Add new constraints
@@ -36,13 +35,14 @@ This is a major step. The goal is to differentiate between C-style constructs an
 The `SymbolProcessor` class will need significant changes to its dispatch logic.
 
 *   **In `SymbolProcessor._process_and_filter_symbols`**:
-    *   The logic will become more complex. Instead of just two lists (`function_data_list`, `data_structure_data_list`), we now need lists for each new type: `function_list`, `method_list`, `class_list`, `datastructure_list`.
+    *   The logic will become more complex. Instead of just two kinds of data (function, data_structure), we now need new kinds for each new type: `method`, and `class`.
     *   The loop will classify symbols based on their `kind` from `clangd`:
-        *   `Function` -> `function_list`
-        *   `InstanceMethod`, `StaticMethod`, `Constructor`, `Destructor`, `ConversionFunction` -> `method_list`
-        *   `Class` -> `class_list`
-        *   `Struct` -> Needs a decision. For now, we can put all `Struct` symbols into a temporary list. We'll need a second pass to decide if a struct is a `CLASS_STRUCTURE` or a `DATA_STRUCTURE`. A simple heuristic: if a `Struct` is the parent (`scope`) of any `METHOD`, it's a `CLASS_STRUCTURE`. Otherwise, it's a `DATA_STRUCTURE`.
-        *   `Enum`, `Union` -> `datastructure_list`
+        *   `Function` -> `FUNCTION` as current
+        *   `InstanceMethod`, `StaticMethod`, `Constructor`, `Destructor`, `ConversionFunction` -> `METHOD`
+        *   `Class` -> `CLASS_STRUCTURE`
+        *   `Struct` -> if lang is C++, it's a `CLASS_STRUCTURE`. Otherwise, it's a `DATA_STRUCTURE`.
+        *   `Enum`, `Union` -> `DATA_STRUCTURE`  as current
+        *   Fields of Class/Struct/Enum/Union -> `FIELD`
 
 *   **In `SymbolProcessor.ingest_symbols_and_relationships`**:
     *   This method will now call new ingestion methods for each node type: `_ingest_class_nodes`, `_ingest_method_nodes`, etc.
@@ -50,26 +50,29 @@ The `SymbolProcessor` class will need significant changes to its dispatch logic.
 
 *   **Create `_ingest_class_nodes` and `_ingest_method_nodes`**:
     *   These will be new methods, similar to the existing `_ingest_function_nodes`. They will take their respective data lists and create `:CLASS_STRUCTURE` and `:METHOD` nodes in batched queries.
-    *   The `METHOD` node ingestion should include the new C++ specific properties (`is_static`, `access`, etc.) which can be parsed from the `Symbol` object.
-
-*   **Modify `_ingest_function_nodes` and `_ingest_data_structure_nodes`**:
-    *   These methods will now operate on smaller lists, as many symbols that were previously `FUNCTION` are now `METHOD`, and many `DATA_STRUCTURE` are now `CLASS_STRUCTURE`.
+    *   The `METHOD` node ingestion should include the `body_location` if available, but no C++ specific properties (`is_static`, `access`, `is_virtual`, `is_const`) for now.
 
 *   **Create `_ingest_has_method_relationships`**:
-    *   This new method will be similar to the `_ingest_has_field_relationships` from Step 1.
-    *   It will use the `parent_id` (derived from the `scope` of the `METHOD` symbol) to match `CLASS_STRUCTURE` nodes with their `METHOD` children and create the `[:HAS_METHOD]` relationship.
+    *   This new method will be similar to the `_ingest_has_field_relationships` from 010_plan_fields.md.
+    *   It will use the `parent_id` (derived from a map table for the `scope` of the `METHOD` symbol) to match `CLASS_STRUCTURE` nodes with their `METHOD` children and create the `[:HAS_METHOD]` relationship.
 
 ### 3.3. `clangd_call_graph_builder.py`
 
-*   For now, we only need to make the existing queries aware of the new `METHOD` type to avoid breaking the build. Full integration will come later.
+*   For now, we only need to make the existing queries aware of the new `METHOD` type to avoid breaking the build. Full integration will come later when we refactor the call graph builder.
 *   In `get_call_relation_ingest_query`, the `MATCH` clauses should be updated.
     *   `MATCH (caller:FUNCTION {id: ...})` becomes `MATCH (caller) WHERE (caller:FUNCTION OR caller:METHOD) AND caller.id = ...`
-    *   This ensures that if a `METHOD` ID appears as a caller or callee, the query doesn't fail.
+    *   This ensures that if a `METHOD` ID appears as a caller or callee, the query's `MATCH` doesn't fail.
+*   **Note**: The `self.symbol_parser.functions` dictionary, used for statistics and some internal logic, currently only contains `FUNCTION` nodes. For accurate statistics and future processing, this dictionary will eventually need to include `METHOD` nodes. This is considered a later refinement.
 
 ## 4. Verification
 
 1.  Run the builder on a C++ project.
 2.  Verify in Neo4j that `:CLASS_STRUCTURE` and `:METHOD` nodes are created.
-3.  Verify that C-style `structs` are still created as `:DATA_STRUCTURE`, but C++ `class`es are `:CLASS_STRUCTURE`.
+3.  Verify that C `structs` are still created as `:DATA_STRUCTURE`, but C++ `class`, `struct` are `:CLASS_STRUCTURE`.
 4.  Verify `[:HAS_METHOD]` relationships exist between classes and their methods.
 5.  Run the builder on the original C project to ensure no regressions have been introduced. It should still work perfectly.
+
+## 5. Missing Considerations (Future Work)
+
+*   **`SourceSpanProvider` Log Message**: The `SourceSpanProvider` currently logs "Matched and enriched X functions with body spans." This message will become inaccurate as it now enriches data structures and methods too. This is a minor point but worth noting for a later cleanup.
+*   **`code_graph_rag_generator.py`**: This file will eventually need to be updated to generate RAG data for `METHOD` and `CLASS_STRUCTURE` nodes. The current queries likely only target `FUNCTION` and `DATA_STRUCTURE`. This is a significant downstream impact that will be addressed in a later step.

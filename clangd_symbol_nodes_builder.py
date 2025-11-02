@@ -74,7 +74,21 @@ class SymbolProcessor:
                 return None
             symbol_data["name_location"] = [primary_location.start_line, primary_location.start_column]
 
+        # Handle Function vs Method
         if sym.kind == "Function":
+            # Check if it's actually a method by looking at its scope
+            # A simple heuristic: if scope ends with '::' and language is Cpp, it's likely a method
+            if sym.language and sym.language.lower() == "cpp" and sym.scope and sym.scope.endswith('::'):
+                symbol_data["node_label"] = "METHOD"
+                # Extract parent_id from scope
+                parent_scope_name = sym.scope.rsplit('::', 2)[0] + '::'
+                parent_id = scope_name_to_id.get(parent_scope_name)
+                if parent_id:
+                    symbol_data["parent_id"] = parent_id
+                else:
+                    logger.debug(f"Could not find parent ID for method '{sym.name}' with scope '{sym.scope}'")
+            else:
+                symbol_data["node_label"] = "FUNCTION"
             symbol_data.update({
                 "signature": sym.signature,
                 "return_type": sym.return_type,
@@ -87,8 +101,13 @@ class SymbolProcessor:
                     sym.body_location.end_line,
                     sym.body_location.end_column
                 ]
-        
-        if sym.kind in ("Struct", "Union", "Enum", "Class"):
+        elif sym.kind in ("InstanceMethod", "StaticMethod", "Constructor", "Destructor", "ConversionFunction"):
+            symbol_data["node_label"] = "METHOD"
+            symbol_data.update({
+                "signature": sym.signature,
+                "return_type": sym.return_type,
+                "type": sym.type,
+            })
             if hasattr(sym, 'body_location') and sym.body_location:
                 symbol_data["body_location"] = [
                     sym.body_location.start_line,
@@ -96,8 +115,48 @@ class SymbolProcessor:
                     sym.body_location.end_line,
                     sym.body_location.end_column
                 ]
+            # Extract parent_id from scope
+            parent_scope_name = sym.scope.rsplit('::', 2)[0] + '::'
+            parent_id = scope_name_to_id.get(parent_scope_name)
+            if parent_id:
+                symbol_data["parent_id"] = parent_id
+            else:
+                logger.debug(f"Could not find parent ID for method '{sym.name}' with scope '{sym.scope}'")
 
-        if sym.kind == "Field":
+        # Handle Struct/Class/Union/Enum
+        elif sym.kind == "Class":
+            symbol_data["node_label"] = "CLASS_STRUCTURE"
+            if hasattr(sym, 'body_location') and sym.body_location:
+                symbol_data["body_location"] = [
+                    sym.body_location.start_line,
+                    sym.body_location.start_column,
+                    sym.body_location.end_line,
+                    sym.body_location.end_column
+                ]
+        elif sym.kind == "Struct":
+            logger.debug(f"DEBUG: Processing Struct symbol: ID={sym.id}, Name={sym.name}, Language={sym.language}")
+            if sym.language and sym.language.lower() == "cpp":
+                symbol_data["node_label"] = "CLASS_STRUCTURE"
+            else:
+                symbol_data["node_label"] = "DATA_STRUCTURE"
+            if hasattr(sym, 'body_location') and sym.body_location:
+                symbol_data["body_location"] = [
+                    sym.body_location.start_line,
+                    sym.body_location.start_column,
+                    sym.body_location.end_line,
+                    sym.body_location.end_column
+                ]
+        elif sym.kind in ("Union", "Enum"):
+            symbol_data["node_label"] = "DATA_STRUCTURE"
+            if hasattr(sym, 'body_location') and sym.body_location:
+                symbol_data["body_location"] = [
+                    sym.body_location.start_line,
+                    sym.body_location.start_column,
+                    sym.body_location.end_line,
+                    sym.body_location.end_column
+                ]
+        elif sym.kind == "Field":
+            symbol_data["node_label"] = "FIELD"
             parent_id = scope_name_to_id.get(sym.scope)
             if parent_id:
                 symbol_data.update({
@@ -106,6 +165,9 @@ class SymbolProcessor:
                 })
             else:
                 logger.debug(f"Could not find parent ID for field '{sym.name}' with scope '{sym.scope}'")
+        else:
+            # For other kinds, we don't create nodes for now
+            return None
 
         if sym.definition:
             abs_file_path = unquote(urlparse(sym.definition.file_uri).path)
@@ -119,15 +181,11 @@ class SymbolProcessor:
         logger.info("Processing symbols for ingestion...")
         for sym in tqdm(symbols.values(), desc="Processing and grouping symbols by kind"):
             data = self.process_symbol(sym, scope_name_to_id)
-            if data and 'kind' in data:
-                processed_symbols[data['kind']].append(data)
+            if data and 'node_label' in data:
+                processed_symbols[data['node_label']].append(data)
         
-        processed_symbols['DATA_STRUCTURE'] = (
-            processed_symbols.get('Struct', []) +
-            processed_symbols.get('Class', []) +
-            processed_symbols.get('Union', []) +
-            processed_symbols.get('Enum', [])
-        )
+        # The 'kind' field in the original symbol data is preserved, but 'node_label' is used for dispatch
+        # No longer need to combine DATA_STRUCTURE here, as it's handled in process_symbol
         return processed_symbols
 
     def ingest_symbols_and_relationships(self, symbols: Dict[str, Symbol], neo4j_mgr: Neo4jManager, defines_generation_strategy: str = "batched-parallel"):
@@ -140,30 +198,37 @@ class SymbolProcessor:
 
         processed_symbols = self._process_and_filter_symbols(symbols, scope_name_to_id)
 
-        function_data_list = processed_symbols.get('Function', [])
+        function_data_list = processed_symbols.get('FUNCTION', [])
+        method_data_list = processed_symbols.get('METHOD', [])
         data_structure_data_list = processed_symbols.get('DATA_STRUCTURE', [])
-        field_data_list = [f for f in processed_symbols.get('Field', []) if 'parent_id' in f]
+        class_data_list = processed_symbols.get('CLASS_STRUCTURE', [])
+        field_data_list = [f for f in processed_symbols.get('FIELD', []) if 'parent_id' in f]
 
         self._ingest_function_nodes(function_data_list, neo4j_mgr)
+        self._ingest_method_nodes(method_data_list, neo4j_mgr)
         self._ingest_data_structure_nodes(data_structure_data_list, neo4j_mgr)
+        self._ingest_class_nodes(class_data_list, neo4j_mgr)
         self._ingest_field_nodes(field_data_list, neo4j_mgr)
 
         defines_function_list = [d for d in function_data_list if 'file_path' in d]
+        defines_method_list = [d for d in method_data_list if 'file_path' in d]
         defines_data_structure_list = [d for d in data_structure_data_list if 'file_path' in d]
+        defines_class_list = [d for d in class_data_list if 'file_path' in d]
 
         if defines_generation_strategy == "unwind-sequential":
-            self._ingest_defines_relationships_unwind_sequential(defines_function_list, defines_data_structure_list, neo4j_mgr)
+            self._ingest_defines_relationships_unwind_sequential(defines_function_list, defines_method_list, defines_data_structure_list, defines_class_list, neo4j_mgr)
         elif defines_generation_strategy == "isolated-parallel":
-            self._ingest_defines_relationships_isolated_parallel(defines_function_list, defines_data_structure_list, neo4j_mgr)
+            self._ingest_defines_relationships_isolated_parallel(defines_function_list, defines_method_list, defines_data_structure_list, defines_class_list, neo4j_mgr)
         elif defines_generation_strategy == "batched-parallel":
-            self._ingest_defines_relationships_batched_parallel(defines_function_list, defines_data_structure_list, neo4j_mgr)
+            self._ingest_defines_relationships_batched_parallel(defines_function_list, defines_method_list, defines_data_structure_list, defines_class_list, neo4j_mgr)
         else:
             logger.error(f"Unknown defines generation strategy: {defines_generation_strategy}. Defaulting to batched-parallel.")
-            self._ingest_defines_relationships_batched_parallel(defines_function_list, defines_data_structure_list, neo4j_mgr)
+            self._ingest_defines_relationships_batched_parallel(defines_function_list, defines_method_list, defines_data_structure_list, defines_class_list, neo4j_mgr)
 
         self._ingest_has_field_relationships(field_data_list, neo4j_mgr)
+        self._ingest_has_method_relationships(method_data_list, neo4j_mgr)
 
-        del processed_symbols, function_data_list, data_structure_data_list, field_data_list
+        del processed_symbols, function_data_list, method_data_list, data_structure_data_list, class_data_list, field_data_list
         gc.collect()
 
     def _ingest_function_nodes(self, function_data_list: List[Dict], neo4j_mgr: Neo4jManager):
@@ -242,18 +307,76 @@ class SymbolProcessor:
             total_rels_created += counters.relationships_created
         logger.info(f"  Total HAS_FIELD relationships created: {total_rels_created}")
 
+    def _ingest_class_nodes(self, class_data_list: List[Dict], neo4j_mgr: Neo4jManager):
+        if not class_data_list:
+            return
+        logger.info(f"Creating {len(class_data_list)} CLASS_STRUCTURE nodes in batches (1 batch = {self.ingest_batch_size} nodes)...")
+        total_nodes_created = 0
+        total_properties_set = 0
+        for i in tqdm(range(0, len(class_data_list), self.ingest_batch_size), desc="Ingesting CLASS_STRUCTURE nodes"):
+            batch = class_data_list[i:i + self.ingest_batch_size]
+            class_merge_query = """
+            UNWIND $class_data AS data
+            MERGE (n:CLASS_STRUCTURE {id: data.id})
+            ON CREATE SET n += data
+            ON MATCH SET n += data
+            """
+            all_counters = neo4j_mgr.process_batch([(class_merge_query, {"class_data": batch})])
+            for counters in all_counters:
+                total_nodes_created += counters.nodes_created
+                total_properties_set += counters.properties_set
+        logger.info(f"  Total CLASS_STRUCTURE nodes created: {total_nodes_created}, properties set: {total_properties_set}")
+
+    def _ingest_method_nodes(self, method_data_list: List[Dict], neo4j_mgr: Neo4jManager):
+        if not method_data_list:
+            return
+        logger.info(f"Creating {len(method_data_list)} METHOD nodes in batches (1 batch = {self.ingest_batch_size} nodes)...")
+        total_nodes_created = 0
+        total_properties_set = 0
+        for i in tqdm(range(0, len(method_data_list), self.ingest_batch_size), desc="Ingesting METHOD nodes"):
+            batch = method_data_list[i:i + self.ingest_batch_size]
+            method_merge_query = """
+            UNWIND $method_data AS data
+            MERGE (n:METHOD {id: data.id})
+            SET n += apoc.map.removeKey(data, 'parent_id')
+            """
+            all_counters = neo4j_mgr.process_batch([(method_merge_query, {"method_data": batch})])
+            for counters in all_counters:
+                total_nodes_created += counters.nodes_created
+                total_properties_set += counters.properties_set
+        logger.info(f"  Total METHOD nodes created: {total_nodes_created}, properties set: {total_properties_set}")
+
+    def _ingest_has_method_relationships(self, method_data_list: List[Dict], neo4j_mgr: Neo4jManager):
+        if not method_data_list:
+            return
+        logger.info(f"Creating {len(method_data_list)} HAS_METHOD relationships in batches...")
+        query = """
+        UNWIND $method_data AS data
+        MATCH (parent:CLASS_STRUCTURE {id: data.parent_id})
+        MATCH (child:METHOD {id: data.id})
+        MERGE (parent)-[:HAS_METHOD]->(child)
+        """
+        total_rels_created = 0
+        for i in tqdm(range(0, len(method_data_list), self.ingest_batch_size), desc="Ingesting HAS_METHOD relationships"):
+            batch = method_data_list[i:i + self.ingest_batch_size]
+            counters = neo4j_mgr.execute_autocommit_query(query, {"method_data": batch})
+            total_rels_created += counters.relationships_created
+        logger.info(f"  Total HAS_METHOD relationships created: {total_rels_created}")
+
     def _get_defines_stats(self, defines_list: List[Dict]) -> str:
         from collections import Counter
         kind_counts = Counter(d.get('kind', 'Unknown') for d in defines_list)
         return ", ".join(f"{kind}: {count}" for kind, count in sorted(kind_counts.items()))
 
-    def _ingest_defines_relationships_batched_parallel(self, defines_function_list: List[Dict], defines_data_structure_list: List[Dict], neo4j_mgr: Neo4jManager):
-        if not defines_function_list and not defines_data_structure_list:
+    def _ingest_defines_relationships_batched_parallel(self, defines_function_list: List[Dict], defines_method_list: List[Dict], defines_data_structure_list: List[Dict], defines_class_list: List[Dict], neo4j_mgr: Neo4jManager):
+        # METHOD nodes are not defined by files, but are members of CLASS_STRUCTURE
+        all_defines_list = defines_function_list + defines_data_structure_list + defines_class_list
+        if not all_defines_list:
             return
 
         logger.info(
-            f"Found {len(defines_function_list) + len(defines_data_structure_list)} potential DEFINES relationships. "
-            f"Breakdown by kind: {self._get_defines_stats(defines_function_list + defines_data_structure_list)}"
+            f"Found {len(all_defines_list)} potential DEFINES relationships. "
+            f"Breakdown by kind: {self._get_defines_stats(all_defines_list)}"
         )
         logger.info("Creating relationships using batched parallel MERGE...")
 
@@ -311,15 +434,44 @@ class SymbolProcessor:
                     total_rels_merged += results[0].get("totalRelsMerged", 0)
             logger.info(f"  Total DEFINES DATA_STRUCTURE relationships created: {total_rels_created}, merged: {total_rels_merged}")
 
+        # Ingest CLASS_STRUCTURE DEFINES relationships
+        total_rels_created = 0
+        total_rels_merged = 0
+        if defines_class_list:
+            logger.info(f"  Ingesting {len(defines_class_list)} CLASS_STRUCTURE DEFINES relationships in batches (1 batch = {self.ingest_batch_size} relationships)...")
+            for i in tqdm(range(0, len(defines_class_list), self.ingest_batch_size), desc="DEFINES (Class Structures)"):
+                batch = defines_class_list[i:i + self.ingest_batch_size]
+                defines_rel_query = """
+                CALL apoc.periodic.iterate(
+                    "UNWIND $defines_data AS data RETURN data",
+                    "MATCH (f:FILE {path: data.file_path}) MATCH (n:CLASS_STRUCTURE {id: data.id}) MERGE (f)-[:DEFINES]->(n)",
+                    {batchSize: $cypher_tx_size, parallel: true, params: {defines_data: $defines_data}}
+                )
+                YIELD updateStatistics
+                RETURN
+                    sum(updateStatistics.relationshipsCreated) AS totalRelsCreated,
+                    sum(updateStatistics.relationshipsUpdated) AS totalRelsMerged
+                """
+                results = neo4j_mgr.execute_query_and_return_records(
+                    defines_rel_query,
+                    {"defines_data": batch, "cypher_tx_size": self.cypher_tx_size}
+                )
+                if results and len(results) > 0:
+                    total_rels_created += results[0].get("totalRelsCreated", 0)
+                    total_rels_merged += results[0].get("totalRelsMerged", 0)
+            logger.info(f"  Total DEFINES CLASS_STRUCTURE relationships created: {total_rels_created}, merged: {total_rels_merged}")
+
         logger.info("Finished DEFINES relationship ingestion.")
 
-    def _ingest_defines_relationships_isolated_parallel(self, defines_function_list: List[Dict], defines_data_structure_list: List[Dict], neo4j_mgr: Neo4jManager):
-        if not defines_function_list and not defines_data_structure_list:
+    def _ingest_defines_relationships_isolated_parallel(self, defines_function_list: List[Dict], defines_method_list: List[Dict], defines_data_structure_list: List[Dict], defines_class_list: List[Dict], neo4j_mgr: Neo4jManager):
+        # METHOD nodes are not defined by files, but are members of CLASS_STRUCTURE
+        all_defines_list = defines_function_list + defines_data_structure_list + defines_class_list
+        if not all_defines_list:
             return
 
         logger.info(
-            f"Found {len(defines_function_list) + len(defines_data_structure_list)} potential DEFINES relationships. "
-            f"Breakdown by kind: {self._get_defines_stats(defines_function_list + defines_data_structure_list)}"
+            f"Found {len(all_defines_list)} potential DEFINES relationships. "
+            f"Breakdown by kind: {self._get_defines_stats(all_defines_list)}"
         )
         
         logger.info("Grouping relationships by file for deadlock-safe parallel ingestion...")
@@ -341,6 +493,15 @@ class SymbolProcessor:
                 if 'file_path' in item:
                     grouped_by_file_datastructures[item['file_path']].append(item)
             self._process_grouped_defines_isolated_parallel(grouped_by_file_datastructures, neo4j_mgr, ":DATA_STRUCTURE")
+
+        # Process CLASS_STRUCTURE DEFINES relationships
+        if defines_class_list:
+            logger.info(f"  Ingesting {len(defines_class_list)} CLASS_STRUCTURE DEFINES relationships...")
+            grouped_by_file_classes = defaultdict(list)
+            for item in defines_class_list:
+                if 'file_path' in item:
+                    grouped_by_file_classes[item['file_path']].append(item)
+            self._process_grouped_defines_isolated_parallel(grouped_by_file_classes, neo4j_mgr, ":CLASS_STRUCTURE")
 
         logger.info("Finished DEFINES relationship ingestion.")
 
@@ -389,13 +550,15 @@ class SymbolProcessor:
 
         logger.info(f"  Total DEFINES {node_label_filter} relationships created: {total_rels_created}, merged: {total_rels_merged}")
 
-    def _ingest_defines_relationships_unwind_sequential(self, defines_function_list: List[Dict], defines_data_structure_list: List[Dict], neo4j_mgr: Neo4jManager):
-        if not defines_function_list and not defines_data_structure_list:
+    def _ingest_defines_relationships_unwind_sequential(self, defines_function_list: List[Dict], defines_method_list: List[Dict], defines_data_structure_list: List[Dict], defines_class_list: List[Dict], neo4j_mgr: Neo4jManager):
+        # METHOD nodes are not defined by files, but are members of CLASS_STRUCTURE
+        all_defines_list = defines_function_list + defines_data_structure_list + defines_class_list
+        if not all_defines_list:
             return
 
         logger.info(
-            f"Found {len(defines_function_list) + len(defines_data_structure_list)} potential DEFINES relationships. "
-            f"Breakdown by kind: {self._get_defines_stats(defines_function_list + defines_data_structure_list)}"
+            f"Found {len(all_defines_list)} potential DEFINES relationships. "
+            f"Breakdown by kind: {self._get_defines_stats(all_defines_list)}"
         )
         logger.info("Creating relationships in batches using sequential UNWIND MERGE...")
 
@@ -436,6 +599,26 @@ class SymbolProcessor:
                 )
                 total_rels_created_ds += counters.relationships_created
             logger.info(f"  Total DATA_STRUCTURE DEFINES relationships created: {total_rels_created_ds}")
+
+        # Ingest CLASS_STRUCTURE DEFINES relationships
+        total_rels_created_class = 0
+        if defines_class_list:
+            logger.info(f"  Ingesting {len(defines_class_list)} CLASS_STRUCTURE DEFINES relationships in batches (1 batch = {self.ingest_batch_size} relationships)...")
+            for i in tqdm(range(0, len(defines_class_list), self.ingest_batch_size), desc="DEFINES (Class Structures, sequential)"):
+                batch = defines_class_list[i:i + self.ingest_batch_size]
+                defines_rel_query = """
+                UNWIND $defines_data AS data
+                MATCH (f:FILE {path: data.file_path})
+                MATCH (n:CLASS_STRUCTURE {id: data.id})
+                MERGE (f)-[:DEFINES]->(n)
+                """
+                counters = neo4j_mgr.execute_autocommit_query(
+                    defines_rel_query,
+                    {"defines_data": batch}
+                )
+                total_rels_created_class += counters.relationships_created
+            logger.info(f"  Total CLASS_STRUCTURE DEFINES relationships created: {total_rels_created_class}")
+
         logger.info("Finished DEFINES relationship ingestion (sequential UNWIND MERGE).")
 
 class PathProcessor:
@@ -641,6 +824,7 @@ def main():
     input_params.add_worker_args(parser)
     input_params.add_batching_args(parser)
     input_params.add_ingestion_strategy_args(parser)
+    input_params.add_source_parser_args(parser)
 
     args = parser.parse_args()
     
@@ -666,6 +850,23 @@ def main():
     symbol_parser.parse(num_workers=args.num_parse_workers)
 
     logger.info("--- Finished Phase 0 ---")
+
+    # --- NEW: Phase 1: Parse Source Code (for spans) ---
+    logger.info("\n--- Starting Phase 1: Parsing Source Code for Spans ---")
+    compilation_manager = CompilationManager(
+        parser_type=args.source_parser,
+        project_path=args.project_path,
+        compile_commands_path=args.compile_commands
+    )
+    compilation_manager.parse_folder(args.project_path, args.num_parse_workers)
+    logger.info("--- Finished Phase 1 ---")
+
+    # --- NEW: Phase 2: Create SourceSpanProvider adapter ---
+    from source_span_provider import SourceSpanProvider
+    logger.info("\n--- Starting Phase 2: Enriching Symbols with Spans ---")
+    span_provider = SourceSpanProvider(symbol_parser=symbol_parser, compilation_manager=compilation_manager)
+    span_provider.enrich_symbols_with_span()
+    logger.info("--- Finished Phase 2 ---")
     
     path_manager = PathManager(args.project_path)
     with Neo4jManager() as neo4j_mgr:
@@ -674,14 +875,14 @@ def main():
         neo4j_mgr.update_project_node(path_manager.project_path, {})
         neo4j_mgr.create_constraints()
         
-        logger.info("\n--- Starting Phase 1: Ingesting File & Folder Structure ---")
+        logger.info("\n--- Starting Phase 3: Ingesting File & Folder Structure ---")
         path_processor = PathProcessor(path_manager, neo4j_mgr, args.log_batch_size, args.ingest_batch_size)
-        path_processor.ingest_paths(symbol_parser.symbols)
+        path_processor.ingest_paths(symbol_parser.symbols, compilation_manager)
         del path_processor
         gc.collect()
-        logger.info("--- Finished Phase 1 ---")
+        logger.info("--- Finished Phase 3 ---")
 
-        logger.info("\n--- Starting Phase 2: Ingesting Symbol Definitions ---")
+        logger.info("\n--- Starting Phase 4: Ingesting Symbol Definitions ---")
         symbol_processor = SymbolProcessor(
             path_manager,
             log_batch_size=args.log_batch_size,

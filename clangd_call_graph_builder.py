@@ -38,8 +38,8 @@ class BaseClangdCallGraphExtractor:
             return ("", {})
         query = """
         UNWIND $relations as relation
-        MATCH (caller:FUNCTION {id: relation.caller_id})
-        MATCH (callee:FUNCTION {id: relation.callee_id})
+        MATCH (caller) WHERE (caller:FUNCTION OR caller:METHOD) AND caller.id = relation.caller_id
+        MATCH (callee) WHERE (callee:FUNCTION OR callee:METHOD) AND callee.id = relation.callee_id
         MERGE (caller)-[:CALLS]->(callee)
         """
         params = {

@@ -75,7 +75,7 @@ class SourceSpanProvider:
                     matched_count += 1
         
         self.matched_symbols_count = matched_count
-        logger.info(f"Matched and enriched {self.matched_symbols_count} functions with body spans.")
+        logger.info(f"Matched and enriched {self.matched_symbols_count} symbols with body spans.")
 
         # 3. Clean up references to free memory
         self.symbol_parser = None
