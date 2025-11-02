@@ -31,6 +31,11 @@ except ImportError:
     TreeSitterParser = None
 
 logger = logging.getLogger(__name__)
+formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+debug_file_handler = logging.FileHandler('debug.log')
+debug_file_handler.setLevel(logging.DEBUG)
+debug_file_handler.setFormatter(formatter)
+logger.addHandler(debug_file_handler)
 
 # --- Worker Implementations ---
 # These classes encapsulate the logic for a single unit of work.
@@ -90,7 +95,7 @@ class _ClangWorkerImpl:
 
         self._walk_ast(tu.cursor)
 
-    def _walk_ast(self, node):
+    def _walk_ast(self, node):           
         file_name = node.location.file.name if node.location.file else node.translation_unit.spelling
         if not file_name or not file_name.startswith(self.project_path):
             return
@@ -145,6 +150,10 @@ class _ClangWorkerImpl:
             "NameLocation": {"Start": {"Line": name_start_line, "Column": name_start_col}, "End": {"Line": name_start_line, "Column": name_start_col + len(node.spelling)}},
             "BodyLocation": {"Start": {"Line": body_start_line, "Column": body_start_col}, "End": {"Line": body_end_line, "Column": body_end_col}}
         }
+
+        if node.spelling == "mtmd_context":
+            logger.info(f"DEBUG: Processing data node name: {span_data['Name']}\n {node}")
+
         self.span_results[f"file://{os.path.abspath(file_name)}"].append(span_data)
 
     def get_symbol_name_location(self, node):
@@ -153,18 +162,11 @@ class _ClangWorkerImpl:
         Matches clangd indexer's behavior for functions, structs, enums, etc.
         """
         try:
-            # For functions and methods, cursor.location may be on return type.
-            if node.kind in (
-                clang.cindex.CursorKind.FUNCTION_DECL,
-                clang.cindex.CursorKind.CXX_METHOD,
-                clang.cindex.CursorKind.CONSTRUCTOR,
-                clang.cindex.CursorKind.DESTRUCTOR,
-            ):
-                for tok in node.get_tokens():
-                    if tok.spelling == node.spelling:
-                        loc = tok.location
-                        if loc.file and loc.file.name.startswith(self.project_path):
-                            return (loc.line - 1, loc.column - 1)
+            for tok in node.get_tokens():
+                if tok.spelling == node.spelling:
+                    loc = tok.location
+                    if loc.file and loc.file.name.startswith(self.project_path):
+                        return (loc.line - 1, loc.column - 1)
             # Fallback: for structs, enums, etc. this is already correct.
             loc = node.location
             return (loc.line - 1, loc.column - 1)
