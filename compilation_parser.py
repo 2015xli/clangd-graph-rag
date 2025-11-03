@@ -42,6 +42,27 @@ logger.addHandler(debug_file_handler)
 
 class _ClangWorkerImpl:
     """Contains the logic to parse one file using clang."""
+
+    _NODE_KIND_FUNCTIONS = {
+        clang.cindex.CursorKind.FUNCTION_DECL,
+        clang.cindex.CursorKind.CXX_METHOD,
+        clang.cindex.CursorKind.CONSTRUCTOR,
+        clang.cindex.CursorKind.DESTRUCTOR,
+        clang.cindex.CursorKind.CONVERSION_FUNCTION,
+        clang.cindex.CursorKind.FUNCTION_TEMPLATE,
+    }
+
+    _NODE_KIND_DATA = {
+        clang.cindex.CursorKind.STRUCT_DECL,
+        clang.cindex.CursorKind.UNION_DECL,
+        clang.cindex.CursorKind.ENUM_DECL,
+        clang.cindex.CursorKind.CLASS_DECL,
+        clang.cindex.CursorKind.CLASS_TEMPLATE,
+        clang.cindex.CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION,
+    }
+
+    _NODE_KIND_FOR_BODY_SPANS = _NODE_KIND_FUNCTIONS | _NODE_KIND_DATA
+
     def __init__(self, project_path: str, clang_include_path: str):
         self.project_path = project_path
         self.clang_include_path = clang_include_path
@@ -81,7 +102,8 @@ class _ClangWorkerImpl:
         skip_next = False
         for a in args:
             if skip_next: skip_next = False; continue
-            if a in {'-c', '-o', '-MMD', '-MF', '-MT', '-fcolor-diagnostics', '-fdiagnostics-color'}: skip_next = True; continue
+            if a in {'-c', '-o', '-MMD', '-MF', '-MT', '-fcolor-diagnostics', '-fdiagnostics-color'}: 
+                skip_next = True; continue
             if a == file_path or os.path.basename(a) == os.path.basename(file_path): continue
             sanitized_args.append(a)
 
@@ -95,66 +117,70 @@ class _ClangWorkerImpl:
 
         self._walk_ast(tu.cursor)
 
-    def _walk_ast(self, node):           
+    def _walk_ast(self, node):
         file_name = node.location.file.name if node.location.file else node.translation_unit.spelling
         if not file_name or not file_name.startswith(self.project_path):
             return
-        
-        if node.kind == clang.cindex.CursorKind.FUNCTION_DECL and node.is_definition():
-            self._process_function_node(node, file_name)
-        elif node.kind in (clang.cindex.CursorKind.STRUCT_DECL, clang.cindex.CursorKind.UNION_DECL, clang.cindex.CursorKind.ENUM_DECL) and node.is_definition():
-            self._process_structure_node(node, file_name)
+
+        # --- START: Added for targeted debugging ---
+        if False and 'json.hpp' in file_name and node.location.line > 3588 and node.location.line < 3595:
+            logger.warning(
+                f"Visiting node "
+                f"kind='{node.kind.name}', "
+                f"spelling='{node.spelling}', "
+                f"location='{node.location.line}:{node.location.column}', "
+                f"is_definition={node.is_definition()}"
+            )
+        # --- END: Added for targeted debugging ---
+
+        if node.is_definition():
+            if node.kind in _ClangWorkerImpl._NODE_KIND_DATA or \
+                node.kind in _ClangWorkerImpl._NODE_KIND_FUNCTIONS: #and self._has_implemented_function_body(node): 
+                self._process_generic_node(node, file_name, node.kind.name)
 
         for c in node.get_children():
             self._walk_ast(c)
 
-    def _process_function_node(self, node, file_name):
-        is_header = file_name.lower().endswith(('.h', '.hh', '.hpp', '.hxx', '.h++'))
-        func_sig = (file_name, node.spelling, node.location.line, node.location.column)
+    def _has_implemented_function_body(self, node):
+        return True
+        for child in node.get_children():
+            if child.kind == clang.cindex.CursorKind.COMPOUND_STMT:
+                return True
 
-        if is_header and func_sig in self.processed_headers:
+        return False
+
+    def _process_generic_node(self, node, file_name, kind_str):
+
+        if not self._should_process_node(node, file_name):
             return
-        if is_header: self.processed_headers.add(func_sig)
-        
+
         name_start_line, name_start_col = self.get_symbol_name_location(node)
         body_start_line, body_start_col = (node.extent.start.line - 1, node.extent.start.column - 1)
         body_end_line, body_end_col = (node.extent.end.line - 1, node.extent.end.column - 1)
-        
+
+        # --- START: Added for targeted debugging ---
+        if False and (node.spelling == 'is_basic_json') and ('json.hpp' in file_name): #and (node.location.line > 5623 and node.location.line < 5628) :
+            logger.info(f"DEBUG: Processing node: Kind={kind_str}, Name={node.spelling}, File={os.path.abspath(file_name)}, Line={node.location.line}")
+            logger.info(f"   - NameLocation: {debug_name_loc}")
+            logger.info(f"   - BodyLocation: {body_start_line}:{body_start_col}, {body_end_line}:{body_end_col}")
+        # --- END: Added for targeted debugging ---
+
         span_data = {
-            "Name": node.spelling, "Kind": "Function",
+            "Name": node.spelling, "Kind": kind_str,
             "NameLocation": {"Start": {"Line": name_start_line, "Column": name_start_col}, "End": {"Line": name_start_line, "Column": name_start_col + len(node.spelling)}},
             "BodyLocation": {"Start": {"Line": body_start_line, "Column": body_start_col}, "End": {"Line": body_end_line, "Column": body_end_col}}
         }
         self.span_results[f"file://{os.path.abspath(file_name)}"].append(span_data)
 
-    def _process_structure_node(self, node, file_name):
-        is_header = file_name.lower().endswith(('.h', '.hh', '.hpp', '.hxx', '.h++'))  
-        data_sig = (file_name, node.spelling, node.location.line, node.location.column)
+    def _should_process_node(self, node, file_name) -> bool:
+        is_header = file_name.lower().endswith(CompilationParser.ALL_HEADER_EXTENSIONS)
+        node_sig = (file_name, node.spelling, node.location.line, node.location.column)
 
-        if is_header and data_sig in self.processed_headers:
-            return
-        if is_header: self.processed_headers.add(data_sig)
-
-        name_start_line, name_start_col = self.get_symbol_name_location(node)
-        body_start_line, body_start_col = (node.extent.start.line - 1, node.extent.start.column - 1)
-        body_end_line, body_end_col = (node.extent.end.line - 1, node.extent.end.column - 1)
-        
-        kind_map = {
-            clang.cindex.CursorKind.STRUCT_DECL: "Struct",
-            clang.cindex.CursorKind.UNION_DECL: "Union",
-            clang.cindex.CursorKind.ENUM_DECL: "Enum",
-        }
-
-        span_data = {
-            "Name": node.spelling, "Kind": kind_map.get(node.kind, "Unknown"),
-            "NameLocation": {"Start": {"Line": name_start_line, "Column": name_start_col}, "End": {"Line": name_start_line, "Column": name_start_col + len(node.spelling)}},
-            "BodyLocation": {"Start": {"Line": body_start_line, "Column": body_start_col}, "End": {"Line": body_end_line, "Column": body_end_col}}
-        }
-
-        if node.spelling == "mtmd_context":
-            logger.info(f"DEBUG: Processing data node name: {span_data['Name']}\n {node}")
-
-        self.span_results[f"file://{os.path.abspath(file_name)}"].append(span_data)
+        if is_header and node_sig in self.processed_headers:
+            return False
+        if is_header:
+            self.processed_headers.add(node_sig)
+        return True
 
     def get_symbol_name_location(self, node):
         """
@@ -165,14 +191,18 @@ class _ClangWorkerImpl:
             for tok in node.get_tokens():
                 if tok.spelling == node.spelling:
                     loc = tok.location
-                    if loc.file and loc.file.name.startswith(self.project_path):
-                        return (loc.line - 1, loc.column - 1)
-            # Fallback: for structs, enums, etc. this is already correct.
+                    # Use expansion location instead of spelling
+                    file, line, col, _ = loc.get_expansion_location()
+                    if file and file.name.startswith(self.project_path):
+                        return (line - 1, col - 1)
+            # fallback
             loc = node.location
-            return (loc.line - 1, loc.column - 1)
+            file, line, col, _ = loc.get_expansion_location()
+            return (line - 1, col - 1)
         except Exception:
-            loc = node.location
-            return (loc.line - 1, loc.column - 1)
+            # last-resort fallback
+            return (node.location.line - 1, node.location.column - 1)
+
 
 class _TreesitterWorkerImpl:
     """Contains the logic to parse one file using tree-sitter."""
@@ -245,6 +275,17 @@ def _parallel_worker(data: Any) -> Tuple[List[Dict], Set]:
 
 class CompilationParser:
     """An abstract base class for source code parsers."""
+
+    C_SOURCE_EXTENSIONS = ('.c',)
+    CPP_SOURCE_EXTENSIONS = ('.cpp', '.cc', '.cxx')
+    CPP20_MODULE_EXTENSIONS = ('.cppm', '.ccm', '.cxxm', '.c++m')
+    C_HEADER_EXTENSIONS = ('.h',)
+    CPP_HEADER_EXTENSIONS = ('.hpp', '.hh', '.hxx', '.h++')
+
+    ALL_SOURCE_EXTENSIONS = C_SOURCE_EXTENSIONS + CPP_SOURCE_EXTENSIONS + CPP20_MODULE_EXTENSIONS
+    ALL_HEADER_EXTENSIONS = C_HEADER_EXTENSIONS + CPP_HEADER_EXTENSIONS
+    ALL_C_CPP_EXTENSIONS = ALL_SOURCE_EXTENSIONS + ALL_HEADER_EXTENSIONS
+
     def __init__(self, project_path: str):
         self.project_path = project_path
         self.source_spans: List[Dict] = []
@@ -330,7 +371,9 @@ class ClangParser(CompilationParser):
     def parse(self, files_to_parse: List[str], num_workers: int = 1):
         self.source_spans.clear(); self.include_relations.clear()
         
-        source_files = [f for f in files_to_parse if f.endswith(('.c', '.cpp', '.cc', '.cxx'))]
+        # Import CompilationManager here to avoid circular dependency
+        # from compilation_manager import CompilationManager # No longer needed
+        source_files = [f for f in files_to_parse if f.lower().endswith(CompilationParser.ALL_SOURCE_EXTENSIONS)]
         if not source_files: logger.warning("ClangParser found no source files to parse."); return
 
         compile_entries = []

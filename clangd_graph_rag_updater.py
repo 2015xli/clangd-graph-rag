@@ -22,6 +22,7 @@ from code_graph_rag_generator import RagGenerator
 from llm_client import get_llm_client, get_embedding_client
 from compilation_manager import CompilationManager
 from include_relation_provider import IncludeRelationProvider
+from compilation_parser import CompilationParser # Import CompilationParser
 
 logger = logging.getLogger(__name__)
 
@@ -100,8 +101,8 @@ class GraphUpdater:
 
     def _analyze_impact_from_graph(self, git_changes: Dict[str, List[str]]) -> Set[str]:
         logger.info("\n--- Phase 2: Analyzing Header Impact via Graph Query ---")
-        headers_to_check = [h for h in git_changes['modified'] if h.endswith('.h')] + \
-                           [h for h in git_changes['deleted'] if h.endswith('.h')]
+        headers_to_check = [h for h in git_changes['modified'] if h.lower().endswith(CompilationParser.ALL_HEADER_EXTENSIONS)] + \
+                           [h for h in git_changes['deleted'] if h.lower().endswith(CompilationParser.ALL_HEADER_EXTENSIONS)]
 
         if not headers_to_check:
             logger.info("No modified or deleted headers to analyze. Skipping graph query.")

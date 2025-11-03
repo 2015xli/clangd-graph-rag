@@ -40,7 +40,7 @@ The `SymbolProcessor` class will need significant changes to its dispatch logic.
         *   `Function` -> `FUNCTION` as current
         *   `InstanceMethod`, `StaticMethod`, `Constructor`, `Destructor`, `ConversionFunction` -> `METHOD`
         *   `Class` -> `CLASS_STRUCTURE`
-        *   `Struct` -> if lang is C++, it's a `CLASS_STRUCTURE`. Otherwise, it's a `DATA_STRUCTURE`.
+        *   `Struct` -> if lang is Cpp, it's a `CLASS_STRUCTURE`. Otherwise, it's a `DATA_STRUCTURE`.
         *   `Enum`, `Union` -> `DATA_STRUCTURE`  as current
         *   Fields of Class/Struct/Enum/Union -> `FIELD`
 
@@ -50,7 +50,7 @@ The `SymbolProcessor` class will need significant changes to its dispatch logic.
 
 *   **Create `_ingest_class_nodes` and `_ingest_method_nodes`**:
     *   These will be new methods, similar to the existing `_ingest_function_nodes`. They will take their respective data lists and create `:CLASS_STRUCTURE` and `:METHOD` nodes in batched queries.
-    *   The `METHOD` node ingestion should include the `body_location` if available, but no C++ specific properties (`is_static`, `access`, `is_virtual`, `is_const`) for now.
+    *   The `METHOD` node ingestion should include the `body_location` if available, but no Cpp specific properties (`is_static`, `access`, `is_virtual`, `is_const`) for now, because clangd indexer does not output that info for its method symbols. If we need those info, we have to use clang.cindex to parse the source files. We will not do that for now unless we see real needs.
 
 *   **Create `_ingest_has_method_relationships`**:
     *   This new method will be similar to the `_ingest_has_field_relationships` from 010_plan_fields.md.
@@ -62,7 +62,7 @@ The `SymbolProcessor` class will need significant changes to its dispatch logic.
 *   In `get_call_relation_ingest_query`, the `MATCH` clauses should be updated.
     *   `MATCH (caller:FUNCTION {id: ...})` becomes `MATCH (caller) WHERE (caller:FUNCTION OR caller:METHOD) AND caller.id = ...`
     *   This ensures that if a `METHOD` ID appears as a caller or callee, the query's `MATCH` doesn't fail.
-*   **Note**: The `self.symbol_parser.functions` dictionary, used for statistics and some internal logic, currently only contains `FUNCTION` nodes. For accurate statistics and future processing, this dictionary will eventually need to include `METHOD` nodes. This is considered a later refinement.
+*   **Note**: The `symbol_parser.functions` property was also updated to correctly return both `FUNCTION` and `METHOD` nodes by checking for all callable symbol kinds, ensuring that downstream consumers like the call graph builder have a complete view of all callable symbols.
 
 ## 4. Verification
 

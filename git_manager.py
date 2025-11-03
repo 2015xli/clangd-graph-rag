@@ -8,6 +8,8 @@ import git
 import logging
 from typing import Optional
 
+from compilation_parser import CompilationParser # Import CompilationParser
+
 logger = logging.getLogger(__name__)
 
 def get_git_repo(folder: str) -> Optional[git.Repo]:
@@ -48,8 +50,8 @@ class GitManager:
             raise
 
     def _filter_source_files(self, file_list):
-        """Filters a list of file paths for .c and .h files."""
-        return [f for f in file_list if f.endswith(('.c', '.h'))]
+        """Filters a list of file paths for C/C++ source and header files."""
+        return [f for f in file_list if f.lower().endswith(CompilationParser.ALL_C_CPP_EXTENSIONS)]
 
     def _get_detailed_changed_files(self, old_commit_hash: str, new_commit_hash: str) -> dict:
         """
@@ -135,13 +137,15 @@ class GitManager:
             
             filtered_renamed_exact = []
             for rename_pair in files_by_type['renamed_exact']:
-                if rename_pair['original'].endswith(('.c', '.h')) or rename_pair['new'].endswith(('.c', '.h')):
+                if rename_pair['original'].lower().endswith(CompilationParser.ALL_C_CPP_EXTENSIONS) or \
+                   rename_pair['new'].lower().endswith(CompilationParser.ALL_C_CPP_EXTENSIONS):
                     filtered_renamed_exact.append(rename_pair)
             files_by_type['renamed_exact'] = filtered_renamed_exact
 
             filtered_copied_exact = []
             for copy_pair in files_by_type['copied_exact']:
-                if copy_pair['original'].endswith(('.c', '.h')) or copy_pair['new'].endswith(('.c', '.h')):
+                if copy_pair['original'].lower().endswith(CompilationParser.ALL_C_CPP_EXTENSIONS) or \
+                   copy_pair['new'].lower().endswith(CompilationParser.ALL_C_CPP_EXTENSIONS):
                     filtered_copied_exact.append(copy_pair)
             files_by_type['copied_exact'] = filtered_copied_exact
 

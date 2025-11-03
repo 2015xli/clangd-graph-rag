@@ -116,7 +116,7 @@ class SymbolProcessor:
                     sym.body_location.end_column
                 ]
             # Extract parent_id from scope
-            parent_scope_name = sym.scope.rsplit('::', 2)[0] + '::'
+            parent_scope_name = sym.scope # The method's scope is the parent's FQN
             parent_id = scope_name_to_id.get(parent_scope_name)
             if parent_id:
                 symbol_data["parent_id"] = parent_id

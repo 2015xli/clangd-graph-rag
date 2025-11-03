@@ -42,13 +42,13 @@ class ParserCache:
         return base_path + f".compilation_parser_{base_name}.pkl"
 
     def get_source_files(self) -> list[str]:
-        """Scans the project folder to get all .c and .h files."""
+        """Scans the project folder to get all C and C++ source/header files"""
         if self.source_files is None:
             logger.info("Scanning project folder for source files...")
             files = []
             for root, _, fs in os.walk(self.folder):
                 for f in fs:
-                    if f.endswith((".c", ".h")):
+                    if f.lower().endswith(CompilationParser.ALL_C_CPP_EXTENSIONS):
                         files.append(os.path.join(root, f))
             self.source_files = files
         return self.source_files
@@ -114,6 +114,7 @@ class ParserCache:
 
 class CompilationManager:
     """Manages parsing, caching, and strategy selection."""
+
     def __init__(self, parser_type: str = 'clang', 
                  project_path: str = '.', compile_commands_path: Optional[str] = None):
         self.parser_type = parser_type
@@ -210,17 +211,17 @@ if __name__ == "__main__":
     for p in args.paths:
         resolved_p = p.resolve()
         if resolved_p.is_file():
-            if str(resolved_p).endswith(('.c', '.h')):
+            if str(resolved_p).lower().endswith(CompilationParser.ALL_C_CPP_EXTENSIONS):
                 unique_files.add(str(resolved_p))
         elif resolved_p.is_dir():
             for root, _, files in os.walk(resolved_p):
                 for f in files:
-                    if f.endswith(('.c', '.h')):
+                    if f.lower().endswith(CompilationParser.ALL_C_CPP_EXTENSIONS):
                         unique_files.add(os.path.join(root, f))
     
     file_list = sorted(list(unique_files))
     if not file_list:
-        logger.error("No .c or .h files found in the provided paths. Aborting.")
+        logger.error("No C/C++ source/header files found in the provided paths. Aborting.")
         sys.exit(1)
 
     logger.info(f"Found {len(file_list)} unique source files to process.")
