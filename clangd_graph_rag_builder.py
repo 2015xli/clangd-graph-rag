@@ -142,7 +142,7 @@ class GraphBuilder:
         )
         # The processor will now automatically find and add the 'body_location'
         # property from the enriched symbol objects.
-        symbol_processor.ingest_symbols_and_relationships(self.symbol_parser.symbols, neo4j_mgr, self.args.defines_generation)
+        symbol_processor.ingest_symbols_and_relationships(self.symbol_parser, neo4j_mgr, self.args.defines_generation)
         del symbol_processor, path_manager
         gc.collect()
         logger.info("--- Finished Pass 4 ---")

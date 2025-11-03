@@ -129,9 +129,12 @@ class SymbolParser:
         self.functions: Dict[str, Symbol] = {}
         self.has_container_field: bool = False
         self.has_call_kind: bool = False
+        self.inheritance_relations: List[Tuple[str, str]] = []
+        self.override_relations: List[Tuple[str, str]] = []
         
-        # This field is transient and only used during YAML parsing
+        # These fields are transient and only used during YAML parsing
         self.unlinked_refs: List[Dict] = []
+        self.unlinked_relations: List[Dict] = []
 
     def parse(self, num_workers: int = 1):
         """
@@ -171,6 +174,8 @@ class SymbolParser:
             self.functions = cache_data['functions']
             self.has_container_field = cache_data['has_container_field']
             self.has_call_kind = cache_data['has_call_kind']
+            self.inheritance_relations = cache_data.get('inheritance_relations', []) # Use .get for backward compatibility
+            self.override_relations = cache_data.get('override_relations', [])       # Use .get for backward compatibility
             logger.info("Successfully loaded symbols from cache.")
         except (pickle.UnpicklingError, EOFError, KeyError) as e:
             logger.error(f"Cache file {cache_path} is corrupted or invalid: {e}. Please delete it and re-run.", exc_info=True)
@@ -183,7 +188,9 @@ class SymbolParser:
                 'symbols': self.symbols,
                 'functions': self.functions,
                 'has_container_field': self.has_container_field,
-                'has_call_kind': self.has_call_kind
+                'has_call_kind': self.has_call_kind,
+                'inheritance_relations': self.inheritance_relations,
+                'override_relations': self.override_relations
             }
             with open(cache_path, 'wb') as f:
                 pickle.dump(cache_data, f)
@@ -258,6 +265,8 @@ class SymbolParser:
                 self.symbols[symbol.id] = symbol
             elif 'ID' in doc and 'References' in doc:
                 self.unlinked_refs.append(doc)
+            elif 'Subject' in doc and 'Predicate' in doc and 'Object' in doc:
+                self.unlinked_relations.append(doc)
 
     def build_cross_references(self):
         """Phase 2: Links loaded references and builds the functions table."""
@@ -284,7 +293,17 @@ class SymbolParser:
             if symbol.is_function():
                 self.functions[symbol.id] = symbol
 
+        for rel_doc in self.unlinked_relations:
+            # Predicate: 0 is BaseOf, 1 is OverriddenBy
+            subject_id = rel_doc['Subject']['ID']
+            object_id = rel_doc['Object']['ID']
+            if rel_doc['Predicate'] == 0:
+                self.inheritance_relations.append((subject_id, object_id))
+            elif rel_doc['Predicate'] == 1:
+                self.override_relations.append((subject_id, object_id))
+
         del self.unlinked_refs
+        del self.unlinked_relations
         gc.collect()
         logger.info(f"Cross-referencing complete. Found {len(self.symbols)} symbols and {len(self.functions)} functions.")
 
@@ -364,16 +383,17 @@ class SymbolParser:
         with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
             results = executor.map(_parse_worker, content_chunks, itertools.repeat(self.log_batch_size))
             
-            for i, (symbols_chunk, refs_chunk) in enumerate(results):
+            for i, (symbols_chunk, refs_chunk, relations_chunk) in enumerate(results):
                 logger.info(f"Merging results from chunk {i+1}/{len(content_chunks)}...")
                 self.symbols.update(symbols_chunk)
                 self.unlinked_refs.extend(refs_chunk)
+                self.unlinked_relations.extend(relations_chunk)
         
         logger.info("All chunks processed and merged.")
 
 # --- Parallel Parser ---
 
-def _parse_worker(yaml_content_chunk: str, log_batch_size: int) -> Tuple[Dict[str, Symbol], List[Dict], bool]:
+def _parse_worker(yaml_content_chunk: str, log_batch_size: int) -> Tuple[Dict[str, Symbol], List[Dict], List[Dict], bool]:
     """
     Worker function to parse a YAML content string chunk.
     This function is executed in a separate process.
@@ -383,10 +403,10 @@ def _parse_worker(yaml_content_chunk: str, log_batch_size: int) -> Tuple[Dict[st
     local_parser = SymbolParser("", log_batch_size)
     try:
         local_parser._load_from_string(yaml_content_chunk)
-        return local_parser.symbols, local_parser.unlinked_refs
+        return local_parser.symbols, local_parser.unlinked_refs, local_parser.unlinked_relations
 
     except yaml.YAMLError as e:
         logger.error(f"YAML parsing error in worker: {e}")
-        return {}, [], False
+        return {}, [], [], False
 
 

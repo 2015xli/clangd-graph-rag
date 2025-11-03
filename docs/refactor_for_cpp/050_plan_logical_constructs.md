@@ -2,65 +2,67 @@
 
 ## 1. Goal
 
-This step focuses on adding the remaining logical constructs from our schema that are essential for representing C++ code structure accurately. The goal is to implement:
-1.  `NAMESPACE` nodes and their relationships.
-2.  `VARIABLE` nodes for global/namespace-level variables.
-3.  `TYPE_ALIAS` nodes for C++ `using` aliases.
+This step focuses on adding key logical constructs from our schema that are essential for representing C++ code structure accurately. The goal is to implement:
+1.  `NAMESPACE` nodes and their full relationship hierarchy.
+2.  A careful and selective ingestion of `VARIABLE` nodes to represent global and namespace-level variables, while correctly identifying static class members as `:FIELD`s.
+
+Implementation of `TYPE_ALIAS` nodes is deferred pending further investigation into reliably linking them to their underlying type.
 
 ## 2. Affected Files
 
-1.  **`clangd_index_yaml_parser.py`**: To parse the new symbol kinds.
-2.  **`clangd_symbol_nodes_builder.py`**: To ingest the new nodes and relationships.
-3.  **`neo4j_manager.py`**: To add new constraints.
+1.  **`clangd_symbol_nodes_builder.py`**: To ingest the new nodes and relationships.
+2.  **`neo4j_manager.py`**: To add new constraints.
 
 ## 3. Implementation Plan
 
 ### 3.1. `neo4j_manager.py`
 
-*   In `create_constraints`, add constraints for the new node types.
+*   In `create_constraints`, add constraints for the new node types:
     ```python
     "CREATE CONSTRAINT IF NOT EXISTS FOR (n:NAMESPACE) REQUIRE n.qualified_name IS UNIQUE",
     "CREATE CONSTRAINT IF NOT EXISTS FOR (v:VARIABLE) REQUIRE v.id IS UNIQUE",
-    "CREATE CONSTRAINT IF NOT EXISTS FOR (t:TYPE_ALIAS) REQUIRE t.id IS UNIQUE",
     ```
 
-### 3.2. `clangd_index_yaml_parser.py`
+### 3.2. `clangd_symbol_nodes_builder.py`
 
-*   The parser is already generic enough to handle these new `kind`s (`Namespace`, `Variable`, `TypeAlias`). No changes are likely needed, but we must be aware of these kinds in the builder.
+This file will be refactored to use a more efficient, single-pass discovery mechanism and to implement the logic for namespaces and variables.
 
-### 3.3. `clangd_symbol_nodes_builder.py`
+*   **Refactor `ingest_symbols_and_relationships` Orchestration**:
+    *   The method will be rewritten to perform a single, efficient **Discovery Phase** loop over all symbols from the parser.
+    *   This single loop will populate multiple data structures at once:
+        1.  The `scope_name_to_id` map (for class/struct scopes).
+        2.  A `set` of all unique namespace qualified names (for creating `:NAMESPACE` nodes).
+        3.  A `set` of all unique `(file_path, namespace_scope)` tuples (for creating `(FILE)-[:DECLARES]->(NAMESPACE)` relationships).
+    *   After the discovery phase, an **Ingestion Phase** will call a series of new, dedicated methods to create the nodes and relationships in the correct order (nodes first, then relationships).
 
-This file will require another round of significant updates to `SymbolProcessor`.
+*   **Namespace Implementation Details**:
+    *   **`_ingest_namespace_nodes`**: A new method that takes the set of unique namespace names and creates all `:NAMESPACE` nodes in a batched query.
+    *   **`_ingest_namespace_containment`**: A new method that creates the `(parent:NAMESPACE)-[:CONTAINS]->(child:NAMESPACE)` hierarchy.
+    *   **`_ingest_file_declarations`**: A new method that uses the set of `(file_path, namespace_scope)` tuples to create the `(FILE)-[:DECLARES]->(NAMESPACE)` relationships.
+    *   **`_ingest_symbol_containment`**: A new method that creates the `(NAMESPACE)-[:CONTAINS]->(Symbol)` relationships for functions, classes, etc., based on their `scope` property.
 
-*   **In `SymbolProcessor._process_and_filter_symbols`**:
-    *   Add new lists for the new types: `namespace_list`, `variable_list`, `type_alias_list`.
-    *   Update the classification logic to populate these lists based on the symbol `kind`.
+*   **Variable and Static Field Implementation Details**:
+    *   The logic in `process_symbol` is updated to handle `kind: 'Variable'` and `kind: 'Field'` with careful disambiguation:
+    1.  For `kind: 'Field'`, it is processed as a non-static field, and the property `is_static: false` is explicitly added.
+    2.  For `kind: 'Variable'`, it first filters out **function-local variables** by checking if the symbol's `scope` string contains parentheses `(` or `)`.
+    3.  For the remaining variables, it checks if the `scope` string (e.g., `MyClass::`) exists as a key in the `scope_name_to_id` map.
+    4.  If **YES**, the symbol is a **static class field**. It is processed as a `:FIELD` node, and the property `is_static: true` is added.
+    5.  If **NO**, the symbol is a **global or namespace-level variable**. It is processed as a `:VARIABLE` node.
+    *   A new method, `_ingest_variable_nodes`, was created to batch-create these new `:VARIABLE` nodes.
+    *   All three `_ingest_defines_relationships_*` methods (`batched_parallel`, `isolated_parallel`, and `unwind_sequential`) were updated to accept a list of variables and create the `(FILE)-[:DEFINES]->(VARIABLE)` relationships.
 
-*   **In `SymbolProcessor.ingest_symbols_and_relationships`**:
-    *   Add calls to new ingestion methods: `_ingest_namespace_nodes`, `_ingest_variable_nodes`, `_ingest_type_alias_nodes`.
-    *   Add calls for new relationship methods: `_ingest_namespace_containment`, `_ingest_file_declarations`, `_ingest_alias_relationships`.
+## 4. `TYPE_ALIAS` Implementation (Deferred)
 
-*   **Create Ingestion Methods for New Nodes**:
-    *   Create `_ingest_namespace_nodes`, `_ingest_variable_nodes`, and `_ingest_type_alias_nodes`.
-    *   These will follow the same batched `UNWIND` + `MERGE` pattern as the other node ingestion methods.
-    *   For `NAMESPACE`, we must construct the `qualified_name` during processing, as it's the unique key.
+The implementation of `:TYPE_ALIAS` nodes is postponed. The `clangd` index provides the name of the aliased type as a string (e.g., `type: 'struct OtherType'`), not a direct symbol ID. Reliably resolving this string back to the correct symbol ID in the graph requires a robust name lookup mechanism that needs further design and investigation to avoid ambiguity.
 
-*   **Create Ingestion Methods for New Relationships**:
-    *   **`_ingest_namespace_containment`**: This method will create `[:CONTAINS]` relationships between namespaces. It can iterate through the `namespace_list`. For a namespace with `scope` 'A' and `name` 'B', it creates a `(NAMESPACE {name:'A'})-[:CONTAINS]->(NAMESPACE {name:'A::B'})` relationship.
-    *   **`_ingest_file_declarations`**: This method creates the `[:DECLARES_IN]` relationship. It needs to associate files with the namespaces they contribute to. This can be derived by looking at the `file_path` and `scope` of all symbols.
-    *   **`_ingest_alias_relationships`**: This method creates the `[:ALIASES_TYPE]` relationship. The `TypeAlias` symbol from `clangd` usually has an `underlying_type` property that contains the ID of the type it aliases. The query will match the `TYPE_ALIAS` node and the `CLASS_STRUCTURE` or `DATA_STRUCTURE` node by their respective IDs and create the relationship.
+## 5. Verification
 
-*   **Update `DEFINES` Relationship**:
-    *   The generic `(FILE)-[:DEFINES]->(Symbol)` relationship should be updated to include the new symbol types like `VARIABLE` and `TYPE_ALIAS`.
-
-## 4. Verification
-
-1.  Run the builder on a C++ project with namespaces, global variables, and type aliases.
+1.  Run the builder on a C++ project with namespaces, global variables, and static class variables.
 2.  Verify in Neo4j:
     *   `MATCH (n:NAMESPACE) RETURN n LIMIT 10;`
-    *   `MATCH (n:VARIABLE) RETURN n LIMIT 10;`
-    *   `MATCH (n:TYPE_ALIAS) RETURN n LIMIT 10;`
+    *   `MATCH (v:VARIABLE) RETURN v LIMIT 10;` (Should only show global/namespace variables).
+    *   `MATCH (f:FIELD {is_static: true}) RETURN f LIMIT 10;` (Should show static class members).
 3.  Verify relationships:
-    *   `MATCH (n:NAMESPACE)-[:CONTAINS]->(m) RETURN n,m LIMIT 10;` (Check for nested namespaces and contained classes/functions).
-    *   `MATCH (f:FILE)-[:DECLARES_IN]->(n:NAMESPACE) RETURN f,n LIMIT 10;`
-    *   `MATCH (t:TYPE_ALIAS)-[:ALIASES_TYPE]->(c) RETURN t,c LIMIT 10;`
+    *   `MATCH (p:NAMESPACE)-[:CONTAINS]->(c:NAMESPACE) RETURN p.name, c.name LIMIT 10;`
+    *   `MATCH (n:NAMESPACE)-[:CONTAINS]->(s) WHERE NOT s:NAMESPACE RETURN n.name, s.name, labels(s) LIMIT 20;`
+    *   `MATCH (f:FILE)-[:DECLARES]->(n:NAMESPACE) RETURN f.name, n.name LIMIT 10;`
