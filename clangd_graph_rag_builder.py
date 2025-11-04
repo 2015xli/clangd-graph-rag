@@ -189,6 +189,7 @@ class GraphBuilder:
             project_path=self.args.project_path,
             # No longer needs span_provider
             llm_client=llm_client,
+            max_context_size=self.args.max_context_size,
             embedding_client=embedding_client,
             num_local_workers=self.args.num_local_workers,
             num_remote_workers=self.args.num_remote_workers

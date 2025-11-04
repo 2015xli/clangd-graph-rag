@@ -42,6 +42,8 @@ def add_rag_args(parser: argparse.ArgumentParser):
                         help='Generate AI summaries and embeddings for the code graph.')
     rag_group.add_argument('--llm-api', choices=['openai', 'deepseek', 'ollama', 'fake'], default='fake',
                         help='The LLM API to use for summarization. (default fake)')
+    rag_group.add_argument('--max-context-size', type=int, default=30000,
+                        help='The maximum context token size for a single LLM call. (default: 30000)')
 
 def add_ingestion_strategy_args(parser: argparse.ArgumentParser):
     """Adds arguments that control ingestion strategy."""

@@ -15,12 +15,28 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Iterable, Callable, List
 from tqdm import tqdm
 
+try:
+    import tiktoken
+except ImportError:
+    tiktoken = None
+
+import re
 import input_params
+from rag_generation_prompts import RagGenerationPromptManager # New import
+
+_SPECIAL_PATTERN = re.compile(r"<\|[^|]+?\|>")
+
+def sanitize_special_tokens(text: str) -> str:
+    """Break up special tokens so the model won't treat them as control tokens."""
+    return _SPECIAL_PATTERN.sub(lambda m: f"< |{m.group(0)[2:-2]}| >", text)
 from neo4j_manager import Neo4jManager
 from llm_client import get_llm_client, LlmClient, get_embedding_client, EmbeddingClient
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# --- Constants for Summarization ---
+TOKEN_ENCODING = "cl100k_base"
 
 # --- Main RAG Generation Logic ---
 
@@ -34,13 +50,30 @@ class RagGenerator:
 
     def __init__(self, neo4j_mgr: Neo4jManager, project_path: str, 
                  llm_client: LlmClient, embedding_client: EmbeddingClient, 
-                 num_local_workers: int, num_remote_workers: int):
+                 num_local_workers: int, num_remote_workers: int, max_context_size: int):
         self.neo4j_mgr = neo4j_mgr
         self.project_path = os.path.abspath(project_path)
         self.llm_client = llm_client
         self.embedding_client = embedding_client
         self.num_local_workers = num_local_workers
         self.num_remote_workers = num_remote_workers
+        self.max_context_token_size = max_context_size
+        self.iterative_chunk_size = int(0.5 * self.max_context_token_size)
+        self.iterative_chunk_overlap = int(0.1 * self.iterative_chunk_size)
+        self.prompt_manager = RagGenerationPromptManager() # New instantiation
+        self.tokenizer = None
+        if tiktoken:
+            try:
+                self.tokenizer = tiktoken.get_encoding(TOKEN_ENCODING)
+            except Exception as e:
+                logger.warning(f"Could not initialize tiktoken tokenizer: {e}. Falling back to character count heuristic.")
+
+    def _get_token_count(self, text: str) -> int:
+        """Returns the number of tokens in a string, using a tokenizer if available."""
+        if self.tokenizer:
+            safe_text = sanitize_special_tokens(text)
+            return len(self.tokenizer.encode(safe_text))
+        return len(text) // 4 # Fallback heuristic
 
     def _parallel_process(self, items: Iterable, process_func: Callable, max_workers: int, desc: str) -> list:
         """
@@ -68,6 +101,7 @@ class RagGenerator:
         """Main orchestrator method to run all summarization passes for a full build."""
         self.summarize_functions_individually()
         self.summarize_functions_with_context()
+        self.summarize_class_structures()
         logging.info("--- Starting File and Folder Summarization ---")
         self._summarize_all_files()
         self._summarize_all_folders()
@@ -134,9 +168,9 @@ class RagGenerator:
         
         query = """
         UNWIND $seed_ids AS seedId
-        MATCH (n) WHERE n.id = seedId
+        MATCH (n) WHERE n.id = seedId AND (n:FUNCTION OR n:METHOD)
         // Match direct callers and callees
-        OPTIONAL MATCH (neighbor:FUNCTION)-[:CALLS*1]-(n)
+        OPTIONAL MATCH (neighbor)-[:CALLS*1]-(n) WHERE (neighbor:FUNCTION OR neighbor:METHOD)
         WITH collect(DISTINCT n.id) + collect(DISTINCT neighbor.id) AS allIds
         UNWIND allIds as id
         RETURN collect(DISTINCT id) as ids
@@ -153,7 +187,7 @@ class RagGenerator:
         # Optimized query with DISTINCT and a label hint on the symbol node.
         query = """
         UNWIND $symbol_ids as symbolId
-        MATCH (f:FILE)-[:DEFINES]->(s:FUNCTION {id: symbolId})
+        MATCH (f:FILE)-[:DEFINES]->(s) WHERE s.id = symbolId AND (s:FUNCTION OR s:METHOD)
         RETURN DISTINCT f.path AS path
         """
         results = self.neo4j_mgr.execute_read_query(query, {"symbol_ids": list(symbol_ids)})
@@ -161,15 +195,15 @@ class RagGenerator:
 
     # --- Pass 1 Methods ---
     def summarize_functions_individually(self):
-        """PASS 1: Generates a code-only summary for all functions in the graph."""
-        logging.info("\n--- Starting Pass 1: Summarizing Functions Individually ---")
+        """PASS 1: Generates a code-only summary for all functions and methods in the graph."""
+        logging.info("\n--- Starting Pass 1: Summarizing Functions & Methods Individually ---")
         
-        query = "MATCH (n:FUNCTION) WHERE n.body_location IS NOT NULL RETURN n.id AS id"
+        query = "MATCH (n) WHERE (n:FUNCTION OR n:METHOD) AND n.body_location IS NOT NULL RETURN n.id AS id"
         results = self.neo4j_mgr.execute_read_query(query)
         all_function_ids = [r['id'] for r in results]
 
         if not all_function_ids:
-            logging.warning("No functions with body_location found in graph. Exiting Pass 1.")
+            logging.warning("No functions or methods with body_location found. Exiting Pass 1.")
             return
         
         self._summarize_functions_individually_with_ids(all_function_ids)
@@ -177,18 +211,18 @@ class RagGenerator:
 
     def _summarize_functions_individually_with_ids(self, function_ids: list[str]) -> set:
         """
-        Core logic for Pass 1, operating on a specific list of function IDs.
-        Returns the set of function IDs that were actually updated.
+        Core logic for Pass 1, operating on a specific list of function/method IDs.
+        Returns the set of IDs that were actually updated.
         """
         if not function_ids:
             return set()
             
         functions_to_process = self._get_functions_for_code_summary(function_ids)
         if not functions_to_process:
-            logging.info("No functions from the provided list require a code summary.")
+            logging.info("No functions or methods from the provided list require a code summary.")
             return set()
             
-        logging.info(f"Found {len(functions_to_process)} functions that need code summaries.")
+        logging.info(f"Found {len(functions_to_process)} functions/methods that need code summaries.")
         max_workers = self.num_local_workers if self.llm_client.is_local else self.num_remote_workers
         logging.info(f"Using {max_workers} parallel workers for Pass 1.")
 
@@ -202,19 +236,19 @@ class RagGenerator:
 
     def _get_functions_for_code_summary(self, function_ids: list[str]) -> list[dict]:
         query = """
-        MATCH (n:FUNCTION)
-        WHERE n.id IN $function_ids AND n.codeSummary IS NULL AND n.body_location IS NOT NULL
+        MATCH (n)
+        WHERE n.id IN $function_ids AND (n:FUNCTION OR n:METHOD) AND n.codeSummary IS NULL AND n.body_location IS NOT NULL
         RETURN n.id AS id, n.path AS path, n.body_location as body_location
         """
         return self.neo4j_mgr.execute_read_query(query, {"function_ids": function_ids})
 
     def _process_one_function_for_code_summary(self, func: dict) -> str | None:
         """
-        Processes a single function for a code-only summary.
-        Returns the function ID if a summary was successfully generated, otherwise None.
+        Orchestrates the code-only summary for a single function/method.
+        This now uses the iterative summarizer for all functions, which handles both large and small functions.
         """
         func_id = func['id']
-        body_location = func.get('body_location') # This is an array [start_line, start_col, end_line, end_col]
+        body_location = func.get('body_location')
         file_path = func.get('path')
 
         if not body_location or not isinstance(body_location, list) or len(body_location) != 4 or not file_path:
@@ -226,38 +260,99 @@ class RagGenerator:
         if not source_code:
             return None
 
-        prompt = f"Summarize the purpose of this C function based on its code:\n\n```c\n{source_code}```"
-        summary = self.llm_client.generate_summary(prompt)
+        summary = self._summarize_text_iteratively(source_code)
+
         if not summary:
             return None
 
-        update_query = "MATCH (n:FUNCTION {id: $id}) SET n.codeSummary = $summary"
+        update_query = "MATCH (n {id: $id}) WHERE n:FUNCTION OR n:METHOD SET n.codeSummary = $summary"
         self.neo4j_mgr.execute_autocommit_query(update_query, {"id": func_id, "summary": summary})
         return func_id
 
+    def _chunk_text_by_tokens(self, text: str, chunk_size: int, overlap: int) -> List[str]:
+        """Splits text into overlapping chunks based on token count using a stride."""
+        if not self.tokenizer:
+            # Fallback to character-based chunking if tokenizer is not available
+            stride = (chunk_size - overlap) * 4
+            return [text[i:i + chunk_size*4] for i in range(0, len(text), stride)]
+
+        safe_text = sanitize_special_tokens(text)
+        tokens = self.tokenizer.encode(safe_text)
+        if not tokens:
+            return []
+
+        stride = chunk_size - overlap
+        chunks = []
+        
+        i = 0
+        while True:
+            # The last chunk should just be the remainder
+            if i + chunk_size >= len(tokens):
+                chunks.append(tokens[i:])
+                break
+            
+            chunks.append(tokens[i:i + chunk_size])
+            i += stride
+            # If the next stride would be the last chunk, but the remainder is small,
+            # just make the current chunk the last one to avoid a tiny final chunk.
+            if i + chunk_size >= len(tokens) and len(tokens) - i < (chunk_size * 0.5):
+                 chunks[-1] = tokens[i-stride:]
+                 break
+
+        return [self.tokenizer.decode(chunk) for chunk in chunks]
+
+    def _summarize_text_iteratively(self, text: str) -> str:
+        """Summarizes a piece of text using an iterative, sequential approach."""
+        token_count = self._get_token_count(text)
+        if token_count <= self.max_context_token_size:
+            chunks = [text]
+        else:
+            logging.info(f"Text is large ({token_count} tokens), chunking for iterative summarization...")
+            chunks = self._chunk_text_by_tokens(text, self.iterative_chunk_size, self.iterative_chunk_overlap)
+        
+        running_summary = ""
+
+        for i, chunk in enumerate(chunks):
+            is_first_chunk = (i == 0)
+            is_last_chunk = (i == len(chunks) - 1)
+
+            # Construct the prompt dynamically
+            prompt = self.prompt_manager.get_code_summary_prompt(chunk, is_first_chunk, is_last_chunk, running_summary)
+
+            # Get the new summary
+            running_summary = self.llm_client.generate_summary(prompt)
+            if not running_summary:
+                logger.error(f"Iterative summarization failed at chunk {i+1}.")
+                return ""
+
+        return running_summary
+
     # --- Pass 2 Methods ---
     def summarize_functions_with_context(self):
-        """PASS 2: Generates a final, context-aware summary for all functions in the graph."""
-        logging.info("\n--- Starting Pass 2: Summarizing Functions With Context ---")
+        """PASS 2: Generates a final, context-aware summary for all functions and methods."""
+        logging.info("--- Starting Pass 2: Summarizing Functions & Methods With Context ---")
         
-        functions_to_process = self._get_functions_for_contextual_summary()
-        if not functions_to_process:
-            logging.info("No functions require summarization in Pass 2.")
+        items_to_process = self._get_functions_for_contextual_summary()
+        if not items_to_process:
+            logging.info("No items require summarization in Pass 2.")
             return
         
-        func_ids = [func['id'] for func in functions_to_process]
-        self._summarize_functions_with_context_with_ids(func_ids)
+        # This pass is not parallelized because the iterative summarization within
+        # each item can be resource-intensive.
+        for item in tqdm(items_to_process, desc="Pass 2: Context Summaries"):
+            self._process_one_function_for_contextual_summary(item['id'])
+
         logging.info("--- Finished Pass 2 ---")
 
     def _summarize_functions_with_context_with_ids(self, function_ids: list[str]) -> set:
         """
-        Core logic for Pass 2, operating on a specific list of function IDs.
+        Core logic for Pass 2, operating on a specific list of function/method IDs.
         Returns the set of function IDs that were actually updated.
         """
         if not function_ids:
             return set()
 
-        logging.info(f"Found {len(function_ids)} functions that need a final summary.")
+        logging.info(f"Found {len(function_ids)} functions/methods that need a final summary.")
         max_workers = self.num_local_workers if self.llm_client.is_local else self.num_remote_workers
         logging.info(f"Using {max_workers} parallel workers for Pass 2.")
 
@@ -270,18 +365,15 @@ class RagGenerator:
         return set(updated_ids)
 
     def _get_functions_for_contextual_summary(self) -> list[dict]:
-        query = "MATCH (n:FUNCTION) WHERE n.codeSummary IS NOT NULL AND n.summary IS NULL RETURN n.id AS id"
+        query = "MATCH (n) WHERE (n:FUNCTION OR n:METHOD) AND n.codeSummary IS NOT NULL AND n.summary IS NULL RETURN n.id AS id"
         return self.neo4j_mgr.execute_read_query(query)
 
     def _process_one_function_for_contextual_summary(self, func_id: str) -> str | None:
-        """
-        Processes a single function for a contextual summary.
-        Returns the function ID if the final summary was generated or changed, otherwise None.
-        """
+        """Orchestrates the generation of a context-aware summary for a single function/method."""
         context_query = """
-        MATCH (n:FUNCTION {id: $id})
-        OPTIONAL MATCH (caller:FUNCTION)-[:CALLS]->(n)
-        OPTIONAL MATCH (n)-[:CALLS]->(callee:FUNCTION)
+        MATCH (n) WHERE n.id = $id AND (n:FUNCTION OR n:METHOD)
+        OPTIONAL MATCH (caller)-[:CALLS]->(n) WHERE (caller:FUNCTION OR caller:METHOD) AND caller.codeSummary IS NOT NULL
+        OPTIONAL MATCH (n)-[:CALLS]->(callee) WHERE (callee:FUNCTION OR callee:METHOD) AND callee.codeSummary IS NOT NULL
         RETURN n.codeSummary AS codeSummary,
                n.summary AS old_summary,
                collect(DISTINCT caller.codeSummary) AS callerSummaries,
@@ -292,37 +384,172 @@ class RagGenerator:
 
         context = results[0]
         code_summary = context.get('codeSummary')
-        old_summary = context.get('old_summary')
-        
         if not code_summary: return None
 
-        prompt = self._build_contextual_prompt(
-            code_summary,
-            context.get('callerSummaries', []),
-            context.get('calleeSummaries', [])
-        )
-        final_summary = self.llm_client.generate_summary(prompt)
-        if not final_summary: return None
+        caller_summaries = context.get('callerSummaries', [])
+        callee_summaries = context.get('calleeSummaries', [])
 
-        if final_summary != old_summary:
-            update_query = "MATCH (n:FUNCTION {id: $id}) SET n.summary = $summary REMOVE n.summaryEmbedding"
+        # Check if everything fits in a single pass
+        full_context_text = code_summary + " ".join(caller_summaries) + " ".join(callee_summaries)
+        if self._get_token_count(full_context_text) < self.max_context_token_size:
+            prompt = self._build_contextual_prompt(code_summary, caller_summaries, callee_summaries)
+            final_summary = self.llm_client.generate_summary(prompt)
+        else:
+            final_summary = self._summarize_context_iteratively(code_summary, caller_summaries, callee_summaries)
+
+        if final_summary and final_summary != context.get('old_summary'):
+            update_query = "MATCH (n {id: $id}) WHERE n:FUNCTION OR n:METHOD SET n.summary = $summary REMOVE n.summaryEmbedding"
             self.neo4j_mgr.execute_autocommit_query(update_query, {"id": func_id, "summary": final_summary})
             return func_id
         
         return None
 
+
     def _build_contextual_prompt(self, code_summary, caller_summaries, callee_summaries) -> str:
         caller_text = ", ".join([s for s in caller_summaries if s]) or "none"
         callee_text = ", ".join([s for s in callee_summaries if s]) or "none"
-        return (
-            f"A C function is described as: '{code_summary}'.\n"
-            f"It is called by functions with these responsibilities: [{caller_text}].\n"
-            f"It calls other functions to do the following: [{callee_text}].\n\n"
-            f"Based on this context, what is the high-level purpose of this function in the overall system? "
-            f"Describe it in one concise sentence."
-        )
+        return self.prompt_manager.get_contextual_function_prompt(code_summary, caller_text, callee_text)
 
-    # --- Pass 3 Methods ---
+    def _summarize_context_iteratively(self, code_summary: str, caller_summaries: List[str], callee_summaries: List[str]) -> str:
+        """Generates a contextual summary by iteratively processing batches of caller and callee summaries."""
+        logging.info("Context is too large, starting iterative contextual summarization...")
+
+        # Stage 1: Fold in caller context
+        caller_aware_summary = self._summarize_relations_iteratively(code_summary, caller_summaries, "function_has_callers")
+
+        # Stage 2: Fold in callee context
+        final_summary = self._summarize_relations_iteratively(caller_aware_summary, callee_summaries, "function_has_callees")
+
+        return final_summary
+
+    def _summarize_relations_iteratively(self, summary: str, relation_summaries: List[str], relation_name: str) -> str:
+        """Generic helper to iteratively fold a list of relation summaries into a base summary."""
+        if not relation_summaries:
+            return summary
+
+        relations_text = "\n - ".join(relation_summaries)
+        relation_chunks = self._chunk_text_by_tokens(relations_text, self.iterative_chunk_size, self.iterative_chunk_overlap)
+
+        running_summary = summary
+        for i, chunk in enumerate(relation_chunks):
+            if len(relation_chunks) > 1: # Only log if there's more than one chunk
+                prompt = self.prompt_manager.get_iterative_relation_prompt(relation_name, running_summary, chunk)
+            else:
+                logging.info(f"Iteratively processing {relation_name} batch {i+1}/{len(relation_chunks)}...")
+                prompt = self.prompt_manager.get_iterative_relation_prompt(relation_name, running_summary, chunk)
+            
+            running_summary = self.llm_client.generate_summary(prompt)
+            if not running_summary:
+                logger.error(f"Iterative relation summarization failed at chunk {i+1}.")
+                return summary # Return the last good summary
+        
+        return running_summary
+
+    # --- Pass 3 Methods: Class Summaries ---
+    def summarize_class_structures(self):
+        """PASS 3: Generates a summary for all class structures in the graph."""
+        logging.info("\n--- Starting Pass 3: Summarizing Class Structures ---")
+        
+        items_to_process = self._get_classes_for_summary()
+        if not items_to_process:
+            logging.info("No class structures require summarization.")
+            return
+
+        logging.info(f"Found {len(items_to_process)} class structures to summarize.")
+        max_workers = self.num_local_workers if self.llm_client.is_local else self.num_remote_workers
+        
+        self._parallel_process(
+            items=items_to_process,
+            process_func=self._summarize_one_class_structure,
+            max_workers=max_workers,
+            desc="Pass 3: Class Summaries"
+        )
+        logging.info("--- Finished Pass 3 ---")
+
+    def _get_classes_for_summary(self) -> list[dict]:
+        """Fetches CLASS_STRUCTURE nodes that need a summary."""
+        query = """
+        MATCH (c:CLASS_STRUCTURE)
+        WHERE c.summary IS NULL
+        RETURN c.id AS id, c.name AS name
+        """
+        return self.neo4j_mgr.execute_read_query(query)
+
+    def _summarize_one_class_structure(self, class_info: dict) -> str | None:
+        """Orchestrates the generation of a summary for a single class structure."""
+        class_id = class_info['id']
+        class_name = class_info['name']
+
+        context_query = """
+        MATCH (c:CLASS_STRUCTURE {id: $id})
+        // Get summaries of directly inherited parent classes
+        OPTIONAL MATCH (c)-[:INHERITS]->(parent:CLASS_STRUCTURE)
+        WHERE parent.summary IS NOT NULL
+        WITH c, collect(DISTINCT parent.summary) AS parentSummaries
+        // Get summaries of own methods
+        OPTIONAL MATCH (c)-[:HAS_METHOD]->(method:METHOD)
+        WHERE method.summary IS NOT NULL
+        WITH c, parentSummaries, collect(DISTINCT method.summary) AS methodSummaries
+        // Get names and types of own fields
+        OPTIONAL MATCH (c)-[:HAS_FIELD]->(field:FIELD)
+        RETURN c.summary AS old_summary,
+               parentSummaries,
+               methodSummaries,
+               collect(DISTINCT {name: field.name, type: field.type}) AS fields
+        """
+        results = self.neo4j_mgr.execute_read_query(context_query, {"id": class_id})
+        if not results: return None
+
+        context = results[0]
+        parent_summaries = context.get('parentSummaries', [])
+        method_summaries = context.get('methodSummaries', [])
+        fields = context.get('fields', [])
+
+        # If there's no content to summarize, don't proceed
+        if not parent_summaries and not method_summaries and not fields:
+            return None
+
+        # Check if everything fits in a single pass
+        field_text = ", ".join([f"{f['type']} {f['name']}" for f in fields if f and f.get('name') and f.get('type')])
+        full_context_text = " ".join(parent_summaries) + " ".join(method_summaries) + field_text
+        
+        if self._get_token_count(full_context_text) < self.max_context_token_size:
+            prompt = self._build_class_summary_prompt(class_name, parent_summaries, method_summaries, field_text)
+            final_summary = self.llm_client.generate_summary(prompt)
+        else:
+            final_summary = self._summarize_class_context_iteratively(class_name, parent_summaries, method_summaries, field_text)
+
+        if final_summary and final_summary != context.get('old_summary'):
+            update_query = "MATCH (c:CLASS_STRUCTURE {id: $id}) SET c.summary = $summary REMOVE c.summaryEmbedding"
+            self.neo4j_mgr.execute_autocommit_query(update_query, {"id": class_id, "summary": final_summary})
+            return class_id
+        
+        return None
+
+    def _build_class_summary_prompt(self, class_name: str, parent_summaries: list[str], method_summaries: list[str], field_text: str) -> str:
+        """Constructs the prompt for summarizing a class."""
+        parent_text = f"It inherits from classes with these roles: [{'; '.join(parent_summaries)}]." if parent_summaries else ""
+        field_text_prompt = f"It has the following data members: [{field_text}]." if field_text else ""
+        method_text = f"It has methods that perform these functions: [{'; '.join(method_summaries)}]." if method_summaries else ""
+
+        return self.prompt_manager.get_class_summary_prompt(class_name, parent_text, field_text_prompt, method_text)
+
+    def _summarize_class_context_iteratively(self, class_name: str, parent_summaries: list[str], method_summaries: list[str], field_text: str) -> str:
+        """Generates a class summary by iteratively processing its context components."""
+        logging.info(f"Context for class '{class_name}' is too large, starting iterative summarization...")
+
+        # Start with a base description including fields, as they are usually small.
+        base_summary = f"The class '{class_name}' has data members: [{field_text}]."
+
+        # Stage 1: Fold in inheritance context
+        inheritance_aware_summary = self._summarize_relations_iteratively(base_summary, parent_summaries, "class_has_parents")
+
+        # Stage 2: Fold in method context
+        final_summary = self._summarize_relations_iteratively(inheritance_aware_summary, method_summaries, "class_has_methods")
+
+        return final_summary
+
+    # --- Pass 4 Methods ---
     def _summarize_all_files(self):
         logging.info("\n--- Starting Pass 3: Summarizing All Files ---")
         # Query for all files, not just ones with summary is null, to ensure correctness on re-runs
@@ -349,15 +576,15 @@ class RagGenerator:
 
     def _summarize_one_file(self, file_path: str):
         query = """
-        MATCH (f:FILE {path: $path})-[:DEFINES]->(func:FUNCTION)
-        WHERE func.summary IS NOT NULL
-        RETURN func.summary AS summary
+        MATCH (f:FILE {path: $path})-[:DEFINES]->(s)
+        WHERE (s:FUNCTION OR s:CLASS_STRUCTURE) AND s.summary IS NOT NULL
+        RETURN s.summary AS summary
         """
         results = self.neo4j_mgr.execute_read_query(query, {"path": file_path})
-        func_summaries = [r['summary'] for r in results if r['summary']]
-        if not func_summaries: return
+        summaries = [r['summary'] for r in results if r['summary']]
+        if not summaries: return
 
-        prompt = f"A file named '{os.path.basename(file_path)}' contains functions with the following responsibilities: [{ '; '.join(func_summaries)}]. What is the overall purpose of this file?"
+        prompt = self.prompt_manager.get_file_summary_prompt(os.path.basename(file_path), '; '.join(summaries))
         summary = self.llm_client.generate_summary(prompt)
         if not summary: return
 
@@ -415,7 +642,7 @@ class RagGenerator:
         child_summaries = [f"{r['label'].lower()} '{r['name']}' is responsible for: {r['summary']}" for r in results]
         if not child_summaries: return
 
-        prompt = f"A folder named '{folder_name}' contains the following components: [{ '; '.join(child_summaries)}]. What is this folder's collective role in the project?"
+        prompt = self.prompt_manager.get_folder_summary_prompt(folder_name, '; '.join(child_summaries))
         summary = self.llm_client.generate_summary(prompt)
         if not summary: return
 
@@ -436,7 +663,7 @@ class RagGenerator:
             return
 
         child_summaries = [f"The {r['label'].lower()} '{r['name']}' is responsible for: {r['summary']}" for r in results]
-        prompt = f"A software project contains the following top-level components: [{ '; '.join(child_summaries)}]. What is the overall purpose and architecture of this project?"
+        prompt = self.prompt_manager.get_project_summary_prompt('; '.join(child_summaries))
         summary = self.llm_client.generate_summary(prompt)
         if not summary: return
 
@@ -493,8 +720,8 @@ class RagGenerator:
         # This query finds any node with a final summary but no embedding yet.
         query = """
         MATCH (n)
-        WHERE (n:FUNCTION OR n:FILE OR n:FOLDER OR n:PROJECT)
-          AND n.summary IS NOT NULL 
+        WHERE (n:FUNCTION OR n:METHOD OR n:CLASS_STRUCTURE OR n:NAMESPACE OR n:FILE OR n:FOLDER OR n:PROJECT)
+          AND n.summary IS NOT NULL
           AND n.summaryEmbedding IS NULL
         RETURN elementId(n) AS elementId, n.summary AS summary
         """
@@ -558,7 +785,8 @@ def main():
                 llm_client, 
                 embedding_client,
                 args.num_local_workers,
-                args.num_remote_workers
+                args.num_remote_workers,
+                args.max_context_size
             )
             
             generator.summarize_code_graph()
