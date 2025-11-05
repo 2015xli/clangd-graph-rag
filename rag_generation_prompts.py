@@ -1,3 +1,5 @@
+from typing import Optional
+
 class RagGenerationPromptManager:
     def __init__(self):
         pass
@@ -102,7 +104,26 @@ class RagGenerationPromptManager:
             f"What is the overall purpose and architecture of this project?"
         )
 
-    def get_iterative_relation_prompt(self, relation_name: str, summary: str, relations: str) -> str:
+    def get_namespace_summary_prompt(self, namespace_name: str, child_summaries_text: str) -> str:
+        """
+        Returns the prompt for namespace summarization (Pass 4).
+        """
+        return (
+            f"A C++ namespace named '{namespace_name}' contains the following components: [{child_summaries_text}]. "
+            f"What is this namespace's collective role and purpose?"
+        )
+
+    def get_iterative_namespace_children_prompt(self, namespace_name: str, summary: str, relations: str) -> str:
+        """
+        Returns the template for iterative namespace children summarization.
+        """
+        return (
+            f"The namespace '{namespace_name}' is summarized as: {{summary}}. "
+            f"It also contains the following components: {{relations}}. "
+            f"Provide a new, comprehensive summary of the namespace's overall purpose."
+        )
+
+    def get_iterative_relation_prompt(self, relation_name: str, summary: str, relations: str, context_name: Optional[str] = None) -> str:
         """
         Returns the formatted prompt for iterative relation summarization based on relation_name.
         """
@@ -114,6 +135,10 @@ class RagGenerationPromptManager:
             template = self.get_iterative_class_inheritance_prompt_template()
         elif relation_name == "class_has_methods": # For class methods
             template = self.get_iterative_class_method_prompt_template()
+        elif relation_name == "namespace_children": # For namespace children
+            if context_name is None:
+                raise ValueError("context_name must be provided for namespace_children relation_name.")
+            return self.get_iterative_namespace_children_prompt(context_name, summary, relations) # This template is already formatted
         else:
             raise ValueError(f"Unknown relation_name for iterative prompt: {relation_name}")
         return template.format(summary=summary, relations=relations)

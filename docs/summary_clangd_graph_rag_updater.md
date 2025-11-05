@@ -31,6 +31,8 @@ The update process is divided into a sequence of phases orchestrated by the `Gra
 
 *   **Purpose**: To remove all outdated information from the graph, creating a clean slate for the new data.
 *   **Mechanism**: The main orchestrator determines the complete set of **"dirty files"** (the union of files from Phase 1 and 2) as absolute paths. It then converts these paths to **relative paths** before calling the appropriate `neo4j_manager` methods to purge nodes and relationships from the graph.
+    *   **Updated Purging**: `neo4j_manager.purge_symbols_defined_in_files` now deletes all C++ specific symbol nodes (`:METHOD`, `:CLASS_STRUCTURE`, `:FIELD`, `:VARIABLE`) in addition to `:FUNCTION` and `:DATA_STRUCTURE` nodes.
+    *   **Namespace Cleanup**: After files and symbols are purged, `neo4j_manager.cleanup_orphaned_namespaces()` is called. This method iteratively deletes `:NAMESPACE` nodes that are no longer declared by any file and contain no other nodes, handling cascading deletions of nested namespaces.
 
 ### Phase 4: Rebuild Dirty Scope
 
@@ -41,12 +43,14 @@ The update process is divided into a sequence of phases orchestrated by the `Gra
     3.  **Create "Mini" Parser**: Creates a small, in-memory `SymbolParser` containing only the symbols whose definitions are located within one of the dirty files.
     4.  **Enrich "Mini" Symbols**: Uses `SourceSpanProvider` to attach the `body_location` data (from step 2) to the in-memory symbols in the `mini_symbol_parser` (from step 3).
     5.  **Re-run Processors**: It re-runs the standard `PathProcessor`, `SymbolProcessor`, `IncludeRelationProvider`, and `ClangdCallGraphExtractor` using the data from the "mini" and "dirty" datasets. These processors internally handle the conversion from absolute to relative paths where necessary for graph operations.
+    *   **RAG Seed IDs**: The `rag_seed_ids` passed to the `RagGenerator` are now expanded to include `METHOD` and `CLASS_STRUCTURE` nodes from the `mini_symbol_parser`, ensuring all relevant C++ symbols are considered for targeted summarization.
 
 ### Phase 5: Targeted RAG Update
 
 *   **Purpose**: To efficiently update AI-generated summaries and embeddings.
 *   **Component**: `code_graph_rag_generator.RagGenerator`
 *   **Mechanism**: It calls the `summarize_targeted_update()` method, providing the set of all function IDs from the "mini-parser" as the initial "seed." The `RagGenerator` reads the `body_location` property directly from the graph nodes to fetch the source code it needs.
+    *   **Context Size**: The `RagGenerator` is now initialized with the `max_context_size` argument, allowing configurable LLM context windows for summarization.
 
 ## 4. Design Subtlety: Path Management
 

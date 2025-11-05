@@ -12,7 +12,7 @@ import logging
 import os
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Iterable, Callable, List
+from typing import Iterable, Callable, List, Optional
 from tqdm import tqdm
 
 try:
@@ -102,6 +102,7 @@ class RagGenerator:
         self.summarize_functions_individually()
         self.summarize_functions_with_context()
         self.summarize_class_structures()
+        self.summarize_namespaces() # New call
         logging.info("--- Starting File and Folder Summarization ---")
         self._summarize_all_files()
         self._summarize_all_folders()
@@ -238,7 +239,7 @@ class RagGenerator:
         query = """
         MATCH (n)
         WHERE n.id IN $function_ids AND (n:FUNCTION OR n:METHOD) AND n.codeSummary IS NULL AND n.body_location IS NOT NULL
-        RETURN n.id AS id, n.path AS path, n.body_location as body_location
+        RETURN n.id AS id, n.name AS name, n.path AS path, n.body_location as body_location
         """
         return self.neo4j_mgr.execute_read_query(query, {"function_ids": function_ids})
 
@@ -255,12 +256,13 @@ class RagGenerator:
             logging.warning(f"Invalid or missing body_location/path for function {func_id}. Skipping.")
             return None
         
-        start_line, _, end_line, _ = body_location
+        start_line, start_col, end_line, end_col = body_location
         source_code = self._get_source_code_for_location(file_path, start_line, end_line)
         if not source_code:
             return None
 
-        summary = self._summarize_text_iteratively(source_code)
+        # Construct context_info for logging
+        summary = self._summarize_function_text_iteratively(source_code, func)
 
         if not summary:
             return None
@@ -301,13 +303,15 @@ class RagGenerator:
 
         return [self.tokenizer.decode(chunk) for chunk in chunks]
 
-    def _summarize_text_iteratively(self, text: str) -> str:
+    def _summarize_function_text_iteratively(self, text: str, func: dict) -> str:
         """Summarizes a piece of text using an iterative, sequential approach."""
         token_count = self._get_token_count(text)
         if token_count <= self.max_context_token_size:
             chunks = [text]
         else:
-            logging.info(f"Text is large ({token_count} tokens), chunking for iterative summarization...")
+            context_info = f"function/method {func['name']} ({func['path']}:{func['body_location'][0]+1}:{func['body_location'][1]+1})"
+            log_prefix = f"Text of {context_info} is large" if context_info else "Text is large"
+            logging.info(f"{log_prefix} ({token_count} tokens), chunking for iterative summarization...")
             chunks = self._chunk_text_by_tokens(text, self.iterative_chunk_size, self.iterative_chunk_overlap)
         
         running_summary = ""
@@ -392,10 +396,10 @@ class RagGenerator:
         # Check if everything fits in a single pass
         full_context_text = code_summary + " ".join(caller_summaries) + " ".join(callee_summaries)
         if self._get_token_count(full_context_text) < self.max_context_token_size:
-            prompt = self._build_contextual_prompt(code_summary, caller_summaries, callee_summaries)
+            prompt = self._build_function_contextual_prompt(code_summary, caller_summaries, callee_summaries)
             final_summary = self.llm_client.generate_summary(prompt)
         else:
-            final_summary = self._summarize_context_iteratively(code_summary, caller_summaries, callee_summaries)
+            final_summary = self._summarize_function_context_iteratively(code_summary, caller_summaries, callee_summaries)
 
         if final_summary and final_summary != context.get('old_summary'):
             update_query = "MATCH (n {id: $id}) WHERE n:FUNCTION OR n:METHOD SET n.summary = $summary REMOVE n.summaryEmbedding"
@@ -405,14 +409,14 @@ class RagGenerator:
         return None
 
 
-    def _build_contextual_prompt(self, code_summary, caller_summaries, callee_summaries) -> str:
+    def _build_function_contextual_prompt(self, code_summary, caller_summaries, callee_summaries) -> str:
         caller_text = ", ".join([s for s in caller_summaries if s]) or "none"
         callee_text = ", ".join([s for s in callee_summaries if s]) or "none"
         return self.prompt_manager.get_contextual_function_prompt(code_summary, caller_text, callee_text)
 
-    def _summarize_context_iteratively(self, code_summary: str, caller_summaries: List[str], callee_summaries: List[str]) -> str:
+    def _summarize_function_context_iteratively(self, code_summary: str, caller_summaries: List[str], callee_summaries: List[str]) -> str:
         """Generates a contextual summary by iteratively processing batches of caller and callee summaries."""
-        logging.info("Context is too large, starting iterative contextual summarization...")
+        logging.info(f"Context for function is too large, starting iterative contextual summarization...")
 
         # Stage 1: Fold in caller context
         caller_aware_summary = self._summarize_relations_iteratively(code_summary, caller_summaries, "function_has_callers")
@@ -549,9 +553,92 @@ class RagGenerator:
 
         return final_summary
 
-    # --- Pass 4 Methods ---
+    # --- Pass 4 Methods: Namespace Summaries ---
+    def summarize_namespaces(self):
+        """PASS 4: Generates a summary for all namespace nodes in the graph."""
+        logging.info("\n--- Starting Pass 4: Summarizing Namespaces ---")
+
+        namespaces_to_process = self._get_namespaces_for_summary()
+        if not namespaces_to_process:
+            logging.info("No namespaces require summarization.")
+            return
+
+        # Sort namespaces bottom-up (deepest first)
+        namespaces_to_process.sort(key=lambda ns: ns['qualified_name'].count('::'), reverse=True)
+
+        logging.info(f"Found {len(namespaces_to_process)} namespaces to summarize.")
+        max_workers = self.num_local_workers if self.llm_client.is_local else self.num_remote_workers
+        
+        self._parallel_process(
+            items=namespaces_to_process,
+            process_func=self._summarize_one_namespace,
+            max_workers=max_workers,
+            desc="Pass 4: Namespace Summaries"
+        )
+        logging.info("--- Finished Pass 4 ---")
+
+    def _get_namespaces_for_summary(self) -> list[dict]:
+        """Fetches NAMESPACE nodes that need a summary."""
+        query = """
+        MATCH (n:NAMESPACE)
+        WHERE n.summary IS NULL
+        RETURN n.qualified_name AS qualified_name, n.name AS name
+        """
+        return self.neo4j_mgr.execute_read_query(query)
+
+    def _summarize_one_namespace(self, namespace_info: dict) -> str | None:
+        """Orchestrates the generation of a summary for a single namespace."""
+        qualified_name = namespace_info['qualified_name']
+        ns_name = namespace_info['name']
+
+        context_query = """
+        MATCH (ns:NAMESPACE {qualified_name: $qualified_name})-[:CONTAINS]->(child)
+        WHERE child.summary IS NOT NULL
+        RETURN labels(child)[-1] AS label, child.name AS name, child.summary AS summary
+        """
+        results = self.neo4j_mgr.execute_read_query(context_query, {"qualified_name": qualified_name})
+        child_summaries = [f"The {r['label'].lower()} '{r['name']}' is responsible for: {r['summary']}" for r in results]
+        if not child_summaries: return None
+
+        child_summaries_text = '; '.join(child_summaries)
+        full_context_text = child_summaries_text
+        
+        if self._get_token_count(full_context_text) < self.max_context_token_size:
+            prompt = self.prompt_manager.get_namespace_summary_prompt(ns_name, child_summaries_text)
+            final_summary = self.llm_client.generate_summary(prompt)
+        else:
+            final_summary = self._summarize_namespace_iteratively(namespace_info, child_summaries)
+
+        if final_summary:
+            update_query = "MATCH (n:NAMESPACE {qualified_name: $qualified_name}) SET n.summary = $summary REMOVE n.summaryEmbedding"
+            self.neo4j_mgr.execute_autocommit_query(update_query, {"qualified_name": qualified_name, "summary": final_summary})
+            return qualified_name
+        
+        return None
+
+    def _summarize_namespace_iteratively(self, namespace_info: dict, child_summaries: List[str]) -> str:
+        """Generates a namespace summary by iteratively processing its child summaries."""
+        logging.info(f"Context for namespace '{namespace_info['qualified_name']}' is too large, starting iterative summarization...")
+
+        relations_text = "\n - ".join(child_summaries)
+        relation_chunks = self._chunk_text_by_tokens(relations_text, self.iterative_chunk_size, self.iterative_chunk_overlap)
+
+        running_summary = f"The namespace '{namespace_info['qualified_name']}' contains various components."
+        for i, chunk in enumerate(relation_chunks):
+            if len(relation_chunks) > 1:
+                logging.info(f"Iteratively processing namespace children batch {i+1}/{len(relation_chunks)}...")
+            
+            prompt = self.prompt_manager.get_iterative_namespace_children_prompt(namespace_info['qualified_name'], running_summary, chunk)
+            running_summary = self.llm_client.generate_summary(prompt)
+            if not running_summary:
+                logger.error(f"Iterative namespace summarization failed at chunk {i+1}.")
+                return running_summary # Return the last good summary
+        
+        return running_summary
+
+    # --- Pass 5 Methods ---
     def _summarize_all_files(self):
-        logging.info("\n--- Starting Pass 3: Summarizing All Files ---")
+        logging.info("\n--- Starting Pass 5: Summarizing All Files ---")
         # Query for all files, not just ones with summary is null, to ensure correctness on re-runs
         files_to_process = self.neo4j_mgr.execute_read_query("MATCH (f:FILE) RETURN f.path AS path")
         if not files_to_process:
@@ -591,9 +678,9 @@ class RagGenerator:
         update_query = "MATCH (f:FILE {path: $path}) SET f.summary = $summary REMOVE f.summaryEmbedding"
         self.neo4j_mgr.execute_autocommit_query(update_query, {"path": file_path, "summary": summary})
 
-    # --- Pass 4 Methods ---
+    # --- Pass 6 Methods ---
     def _summarize_all_folders(self):
-        logging.info("\n--- Starting Pass 4: Summarizing All Folders (bottom-up) ---")
+        logging.info("\n--- Starting Pass 6: Summarizing All Folders (bottom-up) ---")
         folders_to_process = self.neo4j_mgr.execute_read_query("MATCH (f:FOLDER) RETURN f.path AS path")
         if not folders_to_process:
             logging.info("No folders found to summarize.")
@@ -671,10 +758,10 @@ class RagGenerator:
         self.neo4j_mgr.execute_autocommit_query(update_query, {"summary": summary})
         logging.info("-> Stored summary for PROJECT node.")
 
-    # --- Pass 5 Methods ---
+    # --- Pass 7 Methods ---
     def generate_embeddings(self):
-        """PASS 5: Generates and stores embeddings for all generated summaries in batches."""
-        logging.info("\n--- Starting Pass 5: Generating Embeddings ---")
+        """PASS 7: Generates and stores embeddings for all generated summaries in batches."""
+        logging.info("\n--- Starting Pass 7: Generating Embeddings ---")
         nodes_to_embed = self._get_nodes_for_embedding()
         if not nodes_to_embed:
             logging.info("No nodes require embedding.")

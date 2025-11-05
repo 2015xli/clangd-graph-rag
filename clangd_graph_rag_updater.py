@@ -124,6 +124,12 @@ class GraphUpdater:
         if deleted_files_rel:
             logger.info(f"Deleting {len(deleted_files_rel)} FILE nodes.")
             self.neo4j_mgr.purge_files(deleted_files_rel)
+        
+        # NEW: Cleanup orphaned NAMESPACE nodes after files and symbols are purged
+        logger.info("Cleaning up orphaned NAMESPACE nodes...")
+        deleted_namespaces_count = self.neo4j_mgr.cleanup_orphaned_namespaces()
+        if deleted_namespaces_count > 0:
+            logger.info(f"Removed {deleted_namespaces_count} orphaned NAMESPACE nodes.")
 
     def _rebuild_dirty_scope(self, git_changes: Dict[str, List[str]], impacted_from_graph: Set[str]):
         dirty_files = set(git_changes['added'] + git_changes['modified']) | impacted_from_graph
@@ -197,9 +203,11 @@ class GraphUpdater:
             embedding_client=embedding_client,
             num_local_workers=self.args.num_local_workers,
             num_remote_workers=self.args.num_remote_workers,
+            max_context_size=self.args.max_context_size,
         )
         
-        rag_seed_ids = {s.id for s in mini_symbol_parser.functions.values()}
+        rag_seed_ids = {s.id for s in mini_symbol_parser.symbols.values()
+                        if s.is_function() or s.kind == 'Class'}
         
         structurally_changed_files_for_rag = {
             'added': git_changes['added'],

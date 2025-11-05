@@ -173,7 +173,7 @@ class Neo4jManager:
         query = """
         UNWIND $paths AS path
         MATCH (file:FILE {path: path})-[:DEFINES]->(s)
-        WHERE s:FUNCTION OR s:DATA_STRUCTURE
+        WHERE s:FUNCTION OR s:METHOD OR s:CLASS_STRUCTURE OR s:DATA_STRUCTURE OR s:FIELD OR s:VARIABLE
         DETACH DELETE s
         """
         with self.driver.session() as session:
@@ -225,6 +225,34 @@ class Neo4jManager:
             count = result.single()[0]
             logger.info(f"Purged {count} :INCLUDES relationships from {len(file_paths)} files.")
             return count
+
+    def cleanup_orphaned_namespaces(self) -> int:
+        """
+        Deletes NAMESPACE nodes that are no longer declared by any file and contain no other nodes.
+        This process is run iteratively to handle cascading deletions of nested namespaces.
+        """
+        total_deleted = 0
+        while True:
+            query = """
+            MATCH (ns:NAMESPACE)
+            WHERE NOT EXISTS((ns)<-[:DECLARES]-(:FILE))
+              AND NOT EXISTS((ns)-[:CONTAINS]->())
+            DETACH DELETE ns
+            RETURN count(ns) AS deletedCount
+            """
+            with self.driver.session() as session:
+                result = session.run(query)
+                deleted_count = result.single()['deletedCount']
+                if deleted_count == 0:
+                    break # No more namespaces to delete in this iteration
+                total_deleted += deleted_count
+                logger.info(f"Cleaned up {deleted_count} orphaned NAMESPACE nodes in this iteration.")
+        return total_deleted
+        with self.driver.session() as session:
+            result = session.run(query)
+            deleted_count = result.single()['deletedCount']
+            logger.info(f"Cleaned up {deleted_count} orphaned NAMESPACE nodes.")
+            return deleted_count
 
     def create_vector_indices(self) -> None:
         """Creates vector indices for summary embeddings."""
