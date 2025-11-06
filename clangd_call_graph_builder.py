@@ -6,7 +6,7 @@ to produce a function-level call graph.
 
 import yaml
 import re
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional, Any, Set
 import logging
 import gc
 import os
@@ -14,6 +14,7 @@ import argparse
 import json
 import math
 from tqdm import tqdm
+from collections import defaultdict
 
 import input_params
 from compilation_manager import CompilationManager
@@ -32,37 +33,18 @@ class BaseClangdCallGraphExtractor:
         self.log_batch_size = log_batch_size
         self.ingest_batch_size = ingest_batch_size
 
-    def get_call_relation_ingest_query(self, call_relations: List[CallRelation]) -> Tuple[str, Dict]:
-        """Generates a single, parameterized Cypher query for ingesting all call relations."""
-        if not call_relations:
-            return ("", {})
-        query = """
-        UNWIND $relations as relation
-        MATCH (caller) WHERE (caller:FUNCTION OR caller:METHOD) AND caller.id = relation.caller_id
-        MATCH (callee) WHERE (callee:FUNCTION OR callee:METHOD) AND callee.id = relation.callee_id
-        MERGE (caller)-[:CALLS]->(callee)
-        """
-        params = {
-            "relations": [
-                {"caller_id": r.caller_id, "callee_id": r.callee_id} for r in call_relations
-            ]
-        }
-        return (query, params)
-    
-    def generate_statistics(self, call_relations: List[CallRelation]) -> str:
+    def generate_statistics(self, caller_to_callees_map: Dict[str, Set[str]]) -> str:
         """Generate statistics about the extracted call graph."""
-        functions_in_graph = set()
-        callers = set()
-        callees = set()
-        recursive_calls = 0
+        all_call_relations = []
+        for caller_id, callees in caller_to_callees_map.items():
+            for callee_id in callees:
+                all_call_relations.append((caller_id, callee_id))
+
+        callers = set(caller_to_callees_map.keys())
+        callees = set(callee for callee_set in caller_to_callees_map.values() for callee in callee_set)
         
-        for relation in call_relations:
-            functions_in_graph.add(relation.caller_name)
-            functions_in_graph.add(relation.callee_name)
-            callers.add(relation.caller_name)
-            callees.add(relation.callee_name)
-            if relation.caller_id == relation.callee_id:
-                recursive_calls += 1
+        functions_in_graph = callers.union(callees)
+        recursive_calls = sum(1 for caller, callee_set in caller_to_callees_map.items() if caller in callee_set)
         
         functions_with_bodies = len([f for f in self.symbol_parser.functions.values() if f.body_location])
         
@@ -74,50 +56,53 @@ Functions with body spans: {functions_with_bodies}
 Total unique functions in call graph: {len(functions_in_graph)}
 Functions that call others: {len(callers)}
 Functions that are called: {len(callees)}
-Total call relationships: {len(call_relations)}
+Total call relationships: {len(all_call_relations)}
 Recursive calls: {recursive_calls}
 Functions that only call (entry points): {len(callers - callees)}
 Functions that are only called (leaf functions): {len(callees - callers)}
 """
         return stats
 
-    def ingest_call_relations(self, call_relations: List[CallRelation], neo4j_mgr: Optional[Neo4jManager] = None) -> None:
+    def ingest_call_relations(self, caller_to_callees_map: Dict[str, Set[str]], neo4j_mgr: Optional[Neo4jManager] = None) -> None:
         """
-        Ingests call relations into Neo4j in batches, or writes them to a CQL file.
+        Ingests call relations from a map into Neo4j in batches.
         """
-        if not call_relations:
+        if not caller_to_callees_map:
             logger.info("No call relations to ingest.")
             return
 
-        total_relations = len(call_relations)
+        # Flatten the map into a list of pairs for ingestion
+        all_relations = []
+        for caller_id, callee_set in caller_to_callees_map.items():
+            for callee_id in callee_set:
+                all_relations.append({"caller_id": caller_id, "callee_id": callee_id})
+
+        total_relations = len(all_relations)
         logger.info(f"Preparing {total_relations} call relationships for batched ingestion (1 batch = {self.ingest_batch_size} relationships)...")
 
-        output_file_path = "generated_call_graph_cypher_queries.cql"
-        file_mode = 'w'
-        
-        total_rels_created = 0
+        query = """
+        UNWIND $relations as relation
+        MATCH (caller) WHERE (caller:FUNCTION OR caller:METHOD) AND caller.id = relation.caller_id
+        MATCH (callee) WHERE (callee:FUNCTION OR callee:METHOD) AND callee.id = relation.callee_id
+        MERGE (caller)-[:CALLS]->(callee)
+        """
 
-        for i in tqdm(range(0, total_relations, self.ingest_batch_size), desc="Ingesting CALLS relations"):
-            batch = call_relations[i:i + self.ingest_batch_size]
-            query_template, params = self.get_call_relation_ingest_query(batch)
-
-            if neo4j_mgr:
-                all_counters = neo4j_mgr.process_batch([(query_template, params)])
+        if neo4j_mgr:
+            total_rels_created = 0
+            for i in tqdm(range(0, total_relations, self.ingest_batch_size), desc="Ingesting CALLS relations"):
+                batch = all_relations[i:i + self.ingest_batch_size]
+                all_counters = neo4j_mgr.process_batch([(query, {"relations": batch})])
                 for counters in all_counters:
                     total_rels_created += counters.relationships_created
-            else:
-                formatted_query = query_template.strip()
-                formatted_params = json.dumps(params, indent=2)
-                with open(output_file_path, file_mode) as f:
-                    f.write(f"// Batch {i // self.ingest_batch_size + 1} \n")
-                    f.write(f"{formatted_query};\n")
-                    f.write(f"// PARAMS: {formatted_params}\n")
-                file_mode = 'a'
-
-        logger.info(f"Finished processing {total_relations} call relationships in batches.")
-        if neo4j_mgr:
+            logger.info(f"Finished processing {total_relations} call relationships in batches.")
             logger.info(f"  Total CALLS relationships created: {total_rels_created}")
         else:
+            # Fallback to writing to a file if no manager is provided
+            output_file_path = "generated_call_graph_cypher_queries.cql"
+            with open(output_file_path, 'w') as f:
+                f.write(f"// Total relations: {total_relations}\n")
+                f.write(f"{query.strip()};\n")
+                f.write(f"// PARAMS: Use the full list of relations\n")
             logger.info(f"Batched Cypher queries written to {output_file_path}")
 
 # --- Extractor Without Container ---
@@ -137,14 +122,16 @@ class ClangdCallGraphExtractorWithoutContainer(BaseClangdCallGraphExtractor):
         
         return start_ok and end_ok
 
-    def extract_call_relationships(self) -> List[CallRelation]:
+    def extract_call_relationships(self, generate_bidirectional: bool = False):
         """Extract function call relationships from the parsed data using spatial indexing."""
-        call_relations = []
+        caller_to_callees = defaultdict(set)
+        callee_to_callers = defaultdict(set) if generate_bidirectional else None
+
         functions_with_bodies = {fid: f for fid, f in self.symbol_parser.functions.items() if f.body_location}
         
         if not functions_with_bodies:
             logger.warning("No functions have body locations. Did you load function spans?")
-            return call_relations
+            return (caller_to_callees, callee_to_callers) if generate_bidirectional else caller_to_callees
         
         logger.info(f"Analyzing calls for {len(functions_with_bodies)} functions with body spans using optimized lookup")
 
@@ -160,16 +147,10 @@ class ClangdCallGraphExtractorWithoutContainer(BaseClangdCallGraphExtractor):
         del functions_with_bodies
         gc.collect()
 
-        # Determine the correct call kinds to look for based on the clangd version.
         if self.symbol_parser.has_call_kind:
-            # Kind 20: Call | Reference
-            # Kind 28: Call | Reference | Spelled
             valid_call_kinds = [20, 28]
         else:
-            # Kind 4: Reference
-            # Kind 12: Reference | Spelled
             valid_call_kinds = [4, 12]
-        
         logger.info(f"Using call kinds for detection: {valid_call_kinds}")
 
         logger.info("Processing call relationships for callees...")
@@ -185,24 +166,23 @@ class ClangdCallGraphExtractorWithoutContainer(BaseClangdCallGraphExtractor):
                 if call_location.file_uri in file_to_function_bodies_index:
                     for body_loc, caller_symbol in file_to_function_bodies_index[call_location.file_uri]:
                         if self._is_location_within_function_body(call_location, body_loc, call_location.file_uri):
-                            call_relations.append(CallRelation(
-                                caller_id=caller_symbol.id,
-                                caller_name=caller_symbol.name,
-                                callee_id=callee_symbol.id,
-                                callee_name=callee_symbol.name,
-                                call_location=call_location
-                            ))
+                            caller_to_callees[caller_symbol.id].add(callee_symbol.id)
+                            if generate_bidirectional:
+                                callee_to_callers[callee_symbol.id].add(caller_symbol.id)
                             break
 
-        logger.info(f"Extracted {len(call_relations)} call relationships")
+        total_relations = sum(len(v) for v in caller_to_callees.values())
+        logger.info(f"Extracted {total_relations} call relationships")
         del file_to_function_bodies_index
         gc.collect()
 
-        return call_relations
+        return (caller_to_callees, callee_to_callers) if generate_bidirectional else caller_to_callees
     
 class ClangdCallGraphExtractorWithContainer(BaseClangdCallGraphExtractor):
-    def extract_call_relationships(self) -> List[CallRelation]:
-        call_relations = []
+    def extract_call_relationships(self, generate_bidirectional: bool = False):
+        caller_to_callees = defaultdict(set)
+        callee_to_callers = defaultdict(set) if generate_bidirectional else None
+        
         logger.info("Extracting call relationships using Container field...")
 
         for callee_symbol in self.symbol_parser.symbols.values():
@@ -215,16 +195,13 @@ class ClangdCallGraphExtractorWithContainer(BaseClangdCallGraphExtractor):
                     caller_symbol = self.symbol_parser.symbols.get(caller_id)
                     
                     if caller_symbol and caller_symbol.is_function():
-                        call_relations.append(CallRelation(
-                            caller_id=caller_symbol.id,
-                            caller_name=caller_symbol.name,
-                            callee_id=callee_symbol.id,
-                            callee_name=callee_symbol.name,
-                            call_location=reference.location
-                        ))
+                        caller_to_callees[caller_id].add(callee_symbol.id)
+                        if generate_bidirectional:
+                            callee_to_callers[callee_symbol.id].add(caller_id)
         
-        logger.info(f"Extracted {len(call_relations)} call relationships")
-        return call_relations
+        total_relations = sum(len(v) for v in caller_to_callees.values())
+        logger.info(f"Extracted {total_relations} call relationships")
+        return (caller_to_callees, callee_to_callers) if generate_bidirectional else caller_to_callees
 
 import input_params
 from pathlib import Path
@@ -285,7 +262,8 @@ def main():
 
     # --- Phase 4: Extract call relationships ---
     logger.info("\n--- Starting Phase 4: Extracting Call Relationships ---")
-    call_relations = extractor.extract_call_relationships()
+    # For standalone execution, we only need the unidirectional map for ingestion
+    caller_to_callees_map = extractor.extract_call_relationships(generate_bidirectional=False)
     logger.info("--- Finished Phase 4 ---")
     
     # --- Phase 5: Ingest or write to file ---
@@ -295,15 +273,15 @@ def main():
             if neo4j_mgr.check_connection():
                 if not neo4j_mgr.verify_project_path(args.project_path):
                     return
-                extractor.ingest_call_relations(call_relations, neo4j_mgr=neo4j_mgr)
+                extractor.ingest_call_relations(caller_to_callees_map, neo4j_mgr=neo4j_mgr)
     else:
-        extractor.ingest_call_relations(call_relations, neo4j_mgr=None)
+        extractor.ingest_call_relations(caller_to_callees_map, neo4j_mgr=None)
     logger.info("--- Finished Phase 5 ---")
     
     # --- Phase 6: Generate statistics ---
     if args.stats:
         logger.info("\n--- Starting Phase 6: Generating Statistics ---")
-        stats = extractor.generate_statistics(call_relations)
+        stats = extractor.generate_statistics(caller_to_callees_map)
         logger.info(stats)
         logger.info("--- Finished Phase 6 ---")
 

@@ -15,14 +15,11 @@ from git_manager import GitManager
 from git.exc import InvalidGitRepositoryError
 from neo4j_manager import Neo4jManager
 from clangd_index_yaml_parser import SymbolParser
-from clangd_symbol_nodes_builder import PathManager, PathProcessor, SymbolProcessor
-from clangd_call_graph_builder import ClangdCallGraphExtractorWithContainer, ClangdCallGraphExtractorWithoutContainer
-from source_span_provider import SourceSpanProvider
 from code_graph_rag_generator import RagGenerator
 from llm_client import get_llm_client, get_embedding_client
-from compilation_manager import CompilationManager
 from include_relation_provider import IncludeRelationProvider
 from compilation_parser import CompilationParser # Import CompilationParser
+from graph_update_scope_builder import GraphUpdateScopeBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -58,10 +55,11 @@ class GraphUpdater:
 
             logger.info(f"Processing changes from {old_commit} to {new_commit}")
 
+            # Phase 1 & 2: Identify all files that are dirty due to direct or indirect changes
             git_changes = self._identify_git_changes(old_commit, new_commit)
             impacted_from_graph = self._analyze_impact_from_graph(git_changes)
-            
             dirty_files = set(git_changes['added'] + git_changes['modified']) | impacted_from_graph
+            
             if not dirty_files and not git_changes['deleted']:
                 logger.info("No relevant source file changes detected. Updating commit hash and exiting.")
                 self.neo4j_mgr.update_project_node(self.project_path, {'commit_hash': new_commit})
@@ -69,14 +67,23 @@ class GraphUpdater:
 
             logger.info(f"Found {len(dirty_files)} files to re-ingest and {len(git_changes['deleted'])} files to delete.")
 
-            # Convert paths to relative for purge operations
+            # Phase 3: Purge all stale data from the graph
             dirty_files_rel = {os.path.relpath(f, self.project_path) for f in dirty_files}
             deleted_files_rel = [os.path.relpath(f, self.project_path) for f in git_changes['deleted']]
             self._purge_stale_graph_data(dirty_files_rel, deleted_files_rel)
 
-            # The rebuild scope method still works with absolute paths
-            self._rebuild_dirty_scope(git_changes, impacted_from_graph)
+            # Phase 4: Rebuild the dirty scope using the dedicated builder
+            full_symbol_parser = SymbolParser(self.args.index_file)
+            full_symbol_parser.parse(self.args.num_parse_workers)
 
+            scope_builder = GraphUpdateScopeBuilder(self.args, self.neo4j_mgr, self.project_path)
+            mini_symbol_parser = scope_builder.rebuild_dirty_scope(dirty_files, full_symbol_parser)
+
+            # Phase 5: Run targeted RAG update if any symbols were re-ingested
+            if mini_symbol_parser:
+                self._regenerate_summary(mini_symbol_parser, git_changes, impacted_from_graph)
+
+            # Final Step: Update the commit hash in the graph to the new state
             self.neo4j_mgr.update_project_node(self.project_path, {'commit_hash': new_commit})
             logger.info(f"Successfully updated PROJECT node to commit: {new_commit}")
 
@@ -176,12 +183,17 @@ class GraphUpdater:
         include_provider = IncludeRelationProvider(self.neo4j_mgr, self.project_path)
         include_provider.ingest_include_relations(comp_manager, self.args.ingest_batch_size)
 
+        # 5.5 Re-ingest call graph for the mini-scope
+        logger.info("Re-ingesting call graph for the dirty scope...")
         if mini_symbol_parser.has_container_field:
             extractor = ClangdCallGraphExtractorWithContainer(mini_symbol_parser, self.args.log_batch_size, self.args.ingest_batch_size)
         else:
             extractor = ClangdCallGraphExtractorWithoutContainer(mini_symbol_parser, self.args.log_batch_size, self.args.ingest_batch_size)
-        call_relations = extractor.extract_call_relationships()
-        extractor.ingest_call_relations(call_relations, neo4j_mgr=self.neo4j_mgr)
+        
+        # Extract unidirectional map for ingestion
+        caller_to_callees_map = extractor.extract_call_relationships(generate_bidirectional=False)
+        # Ingest the new relationships
+        extractor.ingest_call_relations(caller_to_callees_map, neo4j_mgr=self.neo4j_mgr)
 
         logger.info("--- Re-ingestion complete ---")
 

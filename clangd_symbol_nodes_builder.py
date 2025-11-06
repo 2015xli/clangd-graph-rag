@@ -7,6 +7,7 @@ import os
 import sys
 import argparse
 import math
+import re # Import re for scope normalization
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 from typing import List, Dict, Any, Tuple, Optional
@@ -52,7 +53,7 @@ class SymbolProcessor:
         self.log_batch_size = log_batch_size
         self.cypher_tx_size = cypher_tx_size
     
-    def process_symbol(self, sym: Symbol, scope_name_to_id: Dict[str, str]) -> Optional[Dict]:
+    def process_symbol(self, sym: Symbol, scope_to_structure_id: Dict[str, str]) -> Optional[Dict]:
         if not sym.id or not sym.kind:
             return None
 
@@ -74,6 +75,9 @@ class SymbolProcessor:
                 return None
             symbol_data["name_location"] = [primary_location.start_line, primary_location.start_column]
 
+        # Normalize the scope string by removing template arguments for parent lookups
+        normalized_scope = re.sub('<.*>', '', sym.scope)
+
         # Handle Function vs Method
         if sym.kind == "Function":
             # Check if it's actually a method by looking at its scope
@@ -82,11 +86,11 @@ class SymbolProcessor:
                 symbol_data["node_label"] = "METHOD"
                 # Extract parent_id from scope
                 parent_scope_name = sym.scope.rsplit('::', 2)[0] + '::'
-                parent_id = scope_name_to_id.get(parent_scope_name)
+                parent_id = scope_to_structure_id.get(parent_scope_name)
                 if parent_id:
                     symbol_data["parent_id"] = parent_id
                 else:
-                    logger.debug(f"Could not find parent ID for method '{sym.name}' with scope '{sym.scope}'")
+                    logger.info(f"Could not find parent ID for method '{sym.name}' with scope '{sym.scope}'")
             else:
                 symbol_data["node_label"] = "FUNCTION"
             symbol_data.update({
@@ -115,13 +119,12 @@ class SymbolProcessor:
                     sym.body_location.end_line,
                     sym.body_location.end_column
                 ]
-            # Extract parent_id from scope
-            parent_scope_name = sym.scope # The method's scope is the parent's FQN
-            parent_id = scope_name_to_id.get(parent_scope_name)
+            # Extract parent_id from the NORMALIZED scope
+            parent_id = scope_to_structure_id.get(normalized_scope)
             if parent_id:
                 symbol_data["parent_id"] = parent_id
             else:
-                logger.debug(f"Could not find parent ID for method '{sym.name}' with scope '{sym.scope}'")
+                logger.info(f"Could not find parent ID for method '{sym.name}' with scope '{sym.scope}'")
 
         # Handle Struct/Class/Union/Enum
         elif sym.kind == "Class":
@@ -157,7 +160,7 @@ class SymbolProcessor:
                 ]
         elif sym.kind == "Field":
             symbol_data["node_label"] = "FIELD"
-            parent_id = scope_name_to_id.get(sym.scope)
+            parent_id = scope_to_structure_id.get(normalized_scope)
             if parent_id:
                 symbol_data.update({
                     "type": sym.type,
@@ -165,7 +168,7 @@ class SymbolProcessor:
                     "is_static": False
                 })
             else:
-                logger.debug(f"Could not find parent ID for field '{sym.name}' with scope '{sym.scope}'")
+                logger.info(f"Could not find parent ID for field '{sym.name}' with scope '{sym.scope}'")
 
         elif sym.kind == "Variable":
             # Exclude function-local variables
@@ -173,7 +176,7 @@ class SymbolProcessor:
                 return None
 
             # Check if the scope belongs to a class/struct, making this a static field
-            parent_id = scope_name_to_id.get(sym.scope)
+            parent_id = scope_to_structure_id.get(normalized_scope)
             if parent_id:
                 symbol_data["node_label"] = "FIELD"
                 symbol_data.update({
@@ -198,11 +201,11 @@ class SymbolProcessor:
         
         return symbol_data
 
-    def _process_and_filter_symbols(self, symbols: Dict[str, Symbol], scope_name_to_id: Dict[str, str]) -> Dict[str, List[Dict]]:
+    def _process_and_filter_symbols(self, symbols: Dict[str, Symbol], scope_to_structure_id: Dict[str, str]) -> Dict[str, List[Dict]]:
         processed_symbols = defaultdict(list)
         logger.info("Processing symbols for ingestion...")
         for sym in tqdm(symbols.values(), desc="Processing and grouping symbols by kind"):
-            data = self.process_symbol(sym, scope_name_to_id)
+            data = self.process_symbol(sym, scope_to_structure_id)
             if data and 'node_label' in data:
                 processed_symbols[data['node_label']].append(data)
         
@@ -214,20 +217,21 @@ class SymbolProcessor:
         # Discovery Phase: Efficiently collect all data in a single pass
         logger.info("Discovery Phase: Collecting symbols, namespaces, and relationships...")
         
-        scope_name_to_id = {}
+        scope_to_structure_id = {}
         namespace_names = set()
         file_namespace_pairs = set()
 
         for sym in tqdm(symbol_parser.symbols.values(), desc="Discovering namespaces and scopes"):
-            # Populate scope_name_to_id map for class/struct/union members
+            # Populate scope_to_structure_id map for class/struct/union members
+            normalized_scope = re.sub('<.*>', '', sym.scope)
             if sym.kind in ('Struct', 'Class', 'Union'):
-                key = sym.scope + sym.name + '::'
-                scope_name_to_id[key] = sym.id
+                key = normalized_scope + sym.name + '::'
+                scope_to_structure_id[key] = sym.id
 
             # Discover namespaces from symbol scopes
-            if sym.scope:
+            if normalized_scope:
                 # Derive all parent namespaces from a scope like 'A::B::' -> {'A::', 'A::B::'}
-                parts = sym.scope.split('::')
+                parts = normalized_scope.split('::')
                 current_scope = ''
                 for part in parts:
                     if not part: continue
@@ -237,11 +241,11 @@ class SymbolProcessor:
                     # Associate this namespace with the file it's used in
                     if sym.definition:
                         file_path = self.path_manager.uri_to_relative_path(sym.definition.file_uri)
-                        if '..' not in file_path:
+                        if self.path_manager.is_within_project(file_path):
                             file_namespace_pairs.add((file_path, current_scope))
 
         # Process all symbols for ingestion
-        processed_symbols = self._process_and_filter_symbols(symbol_parser.symbols, scope_name_to_id)
+        processed_symbols = self._process_and_filter_symbols(symbol_parser.symbols, scope_to_structure_id)
 
         # Ingestion Phase: Create nodes and relationships in order
         logger.info("Ingestion Phase: Creating nodes and relationships...")

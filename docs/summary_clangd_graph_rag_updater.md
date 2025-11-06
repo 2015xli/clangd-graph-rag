@@ -14,43 +14,39 @@ The updater's core logic revolves around a robust, multi-stage process to determ
 
 ## 3. The Incremental Update Pipeline
 
-The update process is divided into a sequence of phases orchestrated by the `GraphUpdater` class.
+The update process is divided into a sequence of high-level phases orchestrated by the `GraphUpdater` class.
 
-### Phase 1: Identify Git Changes
+### Phase 1 & 2: Identify Full Impact Scope
 
-*   **Component**: `git_manager.GitManager`
-*   **Purpose**: To determine which source files (`.c`, `.h`, etc.) have been `added`, `modified`, or `deleted` between two Git commits, returned as absolute paths.
-
-### Phase 2: Analyze Header Impact via Graph Query
-
-*   **Component**: `include_relation_provider.IncludeRelationProvider`
-*   **Purpose**: To find all source files that are indirectly affected by header file changes.
-*   **Mechanism**: It takes the absolute paths of modified/deleted headers from Phase 1 and queries the graph to find all dependent files, returning them as a set of absolute paths.
+*   **Component**: `git_manager.GitManager`, `include_relation_provider.IncludeRelationProvider`
+*   **Purpose**: To determine the complete set of "dirty files" that need to be re-processed.
+*   **Mechanism**:
+    1.  **Textual Changes**: First, it calls `GitManager` to get the lists of `added`, `modified`, and `deleted` source files between two commits.
+    2.  **Header Impact**: It then passes the modified and deleted headers to the `IncludeRelationProvider`, which queries the existing `[:INCLUDES]` graph to find all source files that transitively depend on those headers.
+    3.  **Final Scope**: The "dirty files" set is the union of the textually changed files and the files impacted by header changes.
 
 ### Phase 3: Purge Stale Graph Data
 
+*   **Component**: `neo4j_manager.Neo4jManager`
 *   **Purpose**: To remove all outdated information from the graph, creating a clean slate for the new data.
-*   **Mechanism**: The main orchestrator determines the complete set of **"dirty files"** (the union of files from Phase 1 and 2) as absolute paths. It then converts these paths to **relative paths** before calling the appropriate `neo4j_manager` methods to purge nodes and relationships from the graph.
-    *   **Updated Purging**: `neo4j_manager.purge_symbols_defined_in_files` now deletes all C++ specific symbol nodes (`:METHOD`, `:CLASS_STRUCTURE`, `:FIELD`, `:VARIABLE`) in addition to `:FUNCTION` and `:DATA_STRUCTURE` nodes.
-    *   **Namespace Cleanup**: After files and symbols are purged, `neo4j_manager.cleanup_orphaned_namespaces()` is called. This method iteratively deletes `:NAMESPACE` nodes that are no longer declared by any file and contain no other nodes, handling cascading deletions of nested namespaces.
+*   **Mechanism**: It purges all symbols, relationships, and file nodes associated with the "dirty" and "deleted" files. This now includes a call to `cleanup_orphaned_namespaces()` to correctly handle C++ namespaces that may become empty.
 
 ### Phase 4: Rebuild Dirty Scope
 
-*   **Purpose**: To surgically "patch" the graph with new, updated information by running a "mini" version of the main builder pipeline.
-*   **Mechanism**:
-    1.  **Parse Full Symbol Index**: Parses the **entire new `clangd` index file** to get up-to-date symbol information for the whole project.
-    2.  **Parse Dirty Sources**: Calls `CompilationManager` to parse **only the dirty files** (using their absolute paths), efficiently gathering their include relationships and function spans.
-    3.  **Create "Mini" Parser**: Creates a small, in-memory `SymbolParser` containing only the symbols whose definitions are located within one of the dirty files.
-    4.  **Enrich "Mini" Symbols**: Uses `SourceSpanProvider` to attach the `body_location` data (from step 2) to the in-memory symbols in the `mini_symbol_parser` (from step 3).
-    5.  **Re-run Processors**: It re-runs the standard `PathProcessor`, `SymbolProcessor`, `IncludeRelationProvider`, and `ClangdCallGraphExtractor` using the data from the "mini" and "dirty" datasets. These processors internally handle the conversion from absolute to relative paths where necessary for graph operations.
-    *   **RAG Seed IDs**: The `rag_seed_ids` passed to the `RagGenerator` are now expanded to include `METHOD` and `CLASS_STRUCTURE` nodes from the `mini_symbol_parser`, ensuring all relevant C++ symbols are considered for targeted summarization.
+*   **Component**: `graph_update_scope_builder.GraphUpdateScopeBuilder`
+*   **Purpose**: To surgically "patch" the graph with new, updated information. This is the most complex phase of the update.
+*   **Mechanism**: The `GraphUpdater` now delegates the entire rebuilding process to the `GraphUpdateScopeBuilder` module. This new module encapsulates all the logic for this phase:
+    1.  It parses the **entire new `clangd` index file** to have a complete view of all symbols.
+    2.  It determines the initial "seed symbols" from the dirty files.
+    3.  It performs a comprehensive, iterative expansion of the seed set to create a **"sufficient subset"** of symbols, including all necessary C++ dependencies (parent classes, base classes, etc.). This is the core logic that makes C++ updates robust.
+    4.  It then runs a "mini" ingestion pipeline on this sufficient subset to update the graph.
+*   **Further Reading**: For a detailed explanation of this component, see [`summary_graph_update_scope_builder.md`](./summary_graph_update_scope_builder.md).
 
 ### Phase 5: Targeted RAG Update
 
-*   **Purpose**: To efficiently update AI-generated summaries and embeddings.
 *   **Component**: `code_graph_rag_generator.RagGenerator`
-*   **Mechanism**: It calls the `summarize_targeted_update()` method, providing the set of all function IDs from the "mini-parser" as the initial "seed." The `RagGenerator` reads the `body_location` property directly from the graph nodes to fetch the source code it needs.
-    *   **Context Size**: The `RagGenerator` is now initialized with the `max_context_size` argument, allowing configurable LLM context windows for summarization.
+*   **Purpose**: To efficiently update AI-generated summaries and embeddings.
+*   **Mechanism**: After the scope is rebuilt, the `GraphUpdater` calls `summarize_targeted_update()`, providing the set of all symbol IDs from the "mini-parser" as the initial "seed." The `RagGenerator` then intelligently updates summaries for the changed nodes and any parent nodes affected by the change.
 
 ## 4. Design Subtlety: Path Management
 
