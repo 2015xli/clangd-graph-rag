@@ -52,8 +52,29 @@ class SymbolProcessor:
         self.ingest_batch_size = ingest_batch_size
         self.log_batch_size = log_batch_size
         self.cypher_tx_size = cypher_tx_size
-    
-    def process_symbol(self, sym: Symbol, scope_to_structure_id: Dict[str, str]) -> Optional[Dict]:
+
+    def _build_scope_maps(self, symbols: Dict[str, Symbol]) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """
+        Performs a single pass over all symbols to build essential lookup tables for
+        linking namespaces and structures.
+        """
+        logger.info("Building scope-to-ID lookup maps for namespaces and structures...")
+        qualified_namespace_to_id = {}
+        scope_to_structure_id = {}
+
+        for sym in tqdm(symbols.values(), desc="Building scope maps"):
+            if sym.kind == 'Namespace':
+                qualified_name = sym.scope + sym.name + '::'
+                qualified_namespace_to_id[qualified_name] = sym.id
+            elif sym.kind in ('Struct', 'Class', 'Union'):
+                # Normalize the scope string by removing template arguments for parent lookups
+                normalized_scope = re.sub('<.*>', '', sym.scope)
+                key = normalized_scope + sym.name + '::'
+                scope_to_structure_id[key] = sym.id
+        logger.info(f"Built maps for {len(qualified_namespace_to_id)} namespaces and {len(scope_to_structure_id)} structures.")
+        return qualified_namespace_to_id, scope_to_structure_id
+
+    def process_symbol(self, sym: Symbol, scope_to_structure_id: Dict[str, str], qualified_namespace_to_id: Dict[str, str]) -> Optional[Dict]:
         if not sym.id or not sym.kind:
             return None
 
@@ -72,14 +93,29 @@ class SymbolProcessor:
             if self.path_manager.is_within_project(abs_file_path):
                 symbol_data["path"] = self.path_manager.uri_to_relative_path(primary_location.file_uri)
             else:
-                return None
+                # For namespaces, we might have a declaration without a file path
+                # but we still want to create the node.
+                if sym.kind != 'Namespace':
+                    return None
             symbol_data["name_location"] = [primary_location.start_line, primary_location.start_column]
+
+        # --- Namespace Parent Check ---
+        # For any symbol, check if its scope corresponds to a known namespace
+        namespace_id = qualified_namespace_to_id.get(sym.scope)
+        if namespace_id:
+            symbol_data["namespace_id"] = namespace_id
 
         # Normalize the scope string by removing template arguments for parent lookups
         normalized_scope = re.sub('<.*>', '', sym.scope)
 
+        # Handle Namespace
+        if sym.kind == "Namespace":
+            symbol_data["node_label"] = "NAMESPACE"
+            # The qualified name is the full scope path including the symbol's own name
+            symbol_data["qualified_name"] = sym.scope + sym.name + '::'
+
         # Handle Function vs Method
-        if sym.kind == "Function":
+        elif sym.kind == "Function":
             # Check if it's actually a method by looking at its scope
             # A simple heuristic: if scope ends with '::' and language is Cpp, it's likely a method
             if sym.language and sym.language.lower() == "cpp" and sym.scope and sym.scope.endswith('::'):
@@ -201,11 +237,11 @@ class SymbolProcessor:
         
         return symbol_data
 
-    def _process_and_filter_symbols(self, symbols: Dict[str, Symbol], scope_to_structure_id: Dict[str, str]) -> Dict[str, List[Dict]]:
+    def _process_and_filter_symbols(self, symbols: Dict[str, Symbol], scope_to_structure_id: Dict[str, str], qualified_namespace_to_id: Dict[str, str]) -> Dict[str, List[Dict]]:
         processed_symbols = defaultdict(list)
         logger.info("Processing symbols for ingestion...")
         for sym in tqdm(symbols.values(), desc="Processing and grouping symbols by kind"):
-            data = self.process_symbol(sym, scope_to_structure_id)
+            data = self.process_symbol(sym, scope_to_structure_id, qualified_namespace_to_id)
             if data and 'node_label' in data:
                 processed_symbols[data['node_label']].append(data)
         
@@ -214,64 +250,43 @@ class SymbolProcessor:
         return processed_symbols
 
     def ingest_symbols_and_relationships(self, symbol_parser: SymbolParser, neo4j_mgr: Neo4jManager, defines_generation_strategy: str = "batched-parallel"):
-        # Discovery Phase: Efficiently collect all data in a single pass
-        logger.info("Discovery Phase: Collecting symbols, namespaces, and relationships...")
-        
-        scope_to_structure_id = {}
-        namespace_names = set()
-        file_namespace_pairs = set()
+        # --- Phase 1: Discovery and Map Building ---
+        logger.info("Phase 1: Building scope maps and processing symbols...")
+        qualified_namespace_to_id, scope_to_structure_id = self._build_scope_maps(symbol_parser.symbols)
+        processed_symbols = self._process_and_filter_symbols(symbol_parser.symbols, scope_to_structure_id, qualified_namespace_to_id)
 
-        for sym in tqdm(symbol_parser.symbols.values(), desc="Discovering namespaces and scopes"):
-            # Populate scope_to_structure_id map for class/struct/union members
-            normalized_scope = re.sub('<.*>', '', sym.scope)
-            if sym.kind in ('Struct', 'Class', 'Union'):
-                key = normalized_scope + sym.name + '::'
-                scope_to_structure_id[key] = sym.id
-
-            # Discover namespaces from symbol scopes
-            if normalized_scope:
-                # Derive all parent namespaces from a scope like 'A::B::' -> {'A::', 'A::B::'}
-                parts = normalized_scope.split('::')
-                current_scope = ''
-                for part in parts:
-                    if not part: continue
-                    current_scope += part + '::'
-                    namespace_names.add(current_scope)
-
-                    # Associate this namespace with the file it's used in
-                    if sym.definition:
-                        file_path = self.path_manager.uri_to_relative_path(sym.definition.file_uri)
-                        if self.path_manager.is_within_project(file_path):
-                            file_namespace_pairs.add((file_path, current_scope))
-
-        # Process all symbols for ingestion
-        processed_symbols = self._process_and_filter_symbols(symbol_parser.symbols, scope_to_structure_id)
-
-        # Ingestion Phase: Create nodes and relationships in order
-        logger.info("Ingestion Phase: Creating nodes and relationships...")
-
-        # Ingest structure nodes first
-        self._ingest_namespace_nodes(namespace_names, neo4j_mgr)
+        # --- Phase 2: Node Ingestion ---
+        logger.info("Phase 2: Ingesting all nodes...")
+        self._ingest_namespace_nodes(processed_symbols.get('NAMESPACE', []), neo4j_mgr)
         self._ingest_data_structure_nodes(processed_symbols.get('DATA_STRUCTURE', []), neo4j_mgr)
         self._ingest_class_nodes(processed_symbols.get('CLASS_STRUCTURE', []), neo4j_mgr)
-
-        # Ingest member and free-standing nodes
         self._ingest_function_nodes(processed_symbols.get('FUNCTION', []), neo4j_mgr)
         self._ingest_method_nodes(processed_symbols.get('METHOD', []), neo4j_mgr)
         self._ingest_field_nodes([f for f in processed_symbols.get('FIELD', []) if 'parent_id' in f], neo4j_mgr)
         self._ingest_variable_nodes(processed_symbols.get('VARIABLE', []), neo4j_mgr)
 
-        # Ingest relationships
-        self._ingest_namespace_containment(namespace_names, neo4j_mgr)
-        self._ingest_file_declarations(file_namespace_pairs, neo4j_mgr)
-        self._ingest_symbol_containment(processed_symbols, neo4j_mgr)
+        # --- Phase 3: Relationship Ingestion ---
+        logger.info("Phase 3: Ingesting all relationships...")
+        
+        # Consolidate and ingest all SCOPE_CONTAINS relationships
+        scope_contains_relations = []
+        for symbol_list in processed_symbols.values():
+            for symbol_data in symbol_list:
+                if "namespace_id" in symbol_data:
+                    scope_contains_relations.append({
+                        "parent_id": symbol_data["namespace_id"],
+                        "child_id": symbol_data["id"]
+                    })
+        self._ingest_scope_contains_relationships(scope_contains_relations, neo4j_mgr)
+
+        # Ingest other relationships
+        self._ingest_file_declarations(processed_symbols.get('NAMESPACE', []), neo4j_mgr)
 
         defines_function_list = [d for d in processed_symbols.get('FUNCTION', []) if 'file_path' in d]
         defines_variable_list = [d for d in processed_symbols.get('VARIABLE', []) if 'file_path' in d]
         defines_data_structure_list = [d for d in processed_symbols.get('DATA_STRUCTURE', []) if 'file_path' in d]
         defines_class_list = [d for d in processed_symbols.get('CLASS_STRUCTURE', []) if 'file_path' in d]
 
-        # Note: Methods and Fields are not defined by files, but by classes.
         if defines_generation_strategy == "unwind-sequential":
             self._ingest_defines_relationships_unwind_sequential(defines_function_list, defines_variable_list, defines_data_structure_list, defines_class_list, neo4j_mgr)
         elif defines_generation_strategy == "isolated-parallel":
@@ -793,87 +808,54 @@ class SymbolProcessor:
             total_rels_created += counters.relationships_created
         logger.info(f"  Total OVERRIDDEN_BY relationships created: {total_rels_created}")
 
-    def _ingest_namespace_nodes(self, namespace_names: set, neo4j_mgr: Neo4jManager):
-        if not namespace_names:
+    def _ingest_namespace_nodes(self, namespace_data_list: List[Dict], neo4j_mgr: Neo4jManager):
+        if not namespace_data_list:
             return
-        logger.info(f"Creating {len(namespace_names)} NAMESPACE nodes...")
+        logger.info(f"Creating {len(namespace_data_list)} NAMESPACE nodes...")
         
-        namespace_data = []
-        for qname in namespace_names:
-            parts = qname.strip(':').split('::')
-            name = parts[-1] if parts else ''
-            namespace_data.append({"qualified_name": qname, "name": name})
-
         query = """
         UNWIND $ns_data AS data
-        MERGE (n:NAMESPACE {qualified_name: data.qualified_name})
-        SET n.name = data.name
+        MERGE (n:NAMESPACE {id: data.id})
+        SET n.qualified_name = data.qualified_name,
+            n.name = data.name,
+            n.path = data.path,
+            n.name_location = data.name_location
         """
-        counters = neo4j_mgr.execute_autocommit_query(query, {"ns_data": namespace_data})
-        logger.info(f"  Total NAMESPACE nodes created: {counters.nodes_created}")
+        counters = neo4j_mgr.execute_autocommit_query(query, {"ns_data": namespace_data_list})
+        logger.info(f"  Total NAMESPACE nodes created/updated: {counters.nodes_created}")
 
-    def _ingest_namespace_containment(self, namespace_names: set, neo4j_mgr: Neo4jManager):
-        if not namespace_names:
+    def _ingest_scope_contains_relationships(self, relations: List[Dict], neo4j_mgr: Neo4jManager):
+        if not relations:
             return
-        logger.info("Creating NAMESPACE-[:CONTAINS]->NAMESPACE relationships...")
-
-        relations = []
-        for qname in namespace_names:
-            parts = qname.strip(':').split('::')
-            if len(parts) > 1:
-                parent_qname = '::'.join(parts[:-1]) + '::'
-                relations.append({"parent_qname": parent_qname, "child_qname": qname})
-
-        if not relations: return
-        query = """
-        UNWIND $relations AS rel
-        MATCH (parent:NAMESPACE {qualified_name: rel.parent_qname})
-        MATCH (child:NAMESPACE {qualified_name: rel.child_qname})
-        MERGE (parent)-[:CONTAINS]->(child)
-        """
-        counters = neo4j_mgr.execute_autocommit_query(query, {"relations": relations})
-        logger.info(f"  Total NAMESPACE-[:CONTAINS]->NAMESPACE relationships created: {counters.relationships_created}")
-
-    def _ingest_file_declarations(self, file_namespace_pairs: set, neo4j_mgr: Neo4jManager):
-        if not file_namespace_pairs:
-            return
-        logger.info(f"Creating {len(file_namespace_pairs)} FILE-[:DECLARES]->NAMESPACE relationships...")
         
-        relations_data = [{"file_path": pair[0], "qname": pair[1]} for pair in file_namespace_pairs]
-
+        logger.info(f"Creating {len(relations)} SCOPE_CONTAINS relationships...")
         query = """
         UNWIND $relations AS rel
-        MATCH (f:FILE {path: rel.file_path})
-        MATCH (ns:NAMESPACE {qualified_name: rel.qname})
+        MATCH (parent:NAMESPACE {id: rel.parent_id})
+        MATCH (child) WHERE child.id = rel.child_id
+        MERGE (parent)-[:SCOPE_CONTAINS]->(child)
+        """
+        total_rels_created = 0
+        for i in tqdm(range(0, len(relations), self.ingest_batch_size), desc="Ingesting SCOPE_CONTAINS relationships"):
+            batch = relations[i:i + self.ingest_batch_size]
+            counters = neo4j_mgr.execute_autocommit_query(query, {"relations": batch})
+            total_rels_created += counters.relationships_created
+        logger.info(f"  Total SCOPE_CONTAINS relationships created: {total_rels_created}")
+
+    def _ingest_file_declarations(self, namespace_data_list: List[Dict], neo4j_mgr: Neo4jManager):
+        relations_data = [ns for ns in namespace_data_list if ns.get('path')]
+        if not relations_data:
+            return
+        logger.info(f"Creating {len(relations_data)} FILE-[:DECLARES]->NAMESPACE relationships...")
+        
+        query = """
+        UNWIND $relations AS rel
+        MATCH (f:FILE {path: rel.path})
+        MATCH (ns:NAMESPACE {id: rel.id})
         MERGE (f)-[:DECLARES]->(ns)
         """
         counters = neo4j_mgr.execute_autocommit_query(query, {"relations": relations_data})
         logger.info(f"  Total FILE-[:DECLARES]->NAMESPACE relationships created: {counters.relationships_created}")
-
-    def _ingest_symbol_containment(self, processed_symbols: Dict[str, List[Dict]], neo4j_mgr: Neo4jManager):
-        logger.info("Creating NAMESPACE-[:CONTAINS]->Symbol relationships...")
-        
-        # Collect all symbols with a scope
-        symbols_with_scope = []
-        for label, symbol_list in processed_symbols.items():
-            if label in ['FUNCTION', 'CLASS_STRUCTURE', 'DATA_STRUCTURE']:
-                for sym_data in symbol_list:
-                    if sym_data.get('scope'):
-                        symbols_with_scope.append({
-                            "id": sym_data['id'],
-                            "scope": sym_data['scope'],
-                            "label": label
-                        })
-        if not symbols_with_scope: return
-
-        query = """
-        UNWIND $symbols AS sym
-        MATCH (ns:NAMESPACE {qualified_name: sym.scope})
-        MATCH (s) WHERE s.id = sym.id AND sym.label IN labels(s)
-        MERGE (ns)-[:CONTAINS]->(s)
-        """
-        counters = neo4j_mgr.execute_autocommit_query(query, {"symbols": symbols_with_scope})
-        logger.info(f"  Total NAMESPACE-[:CONTAINS]->Symbol relationships created: {counters.relationships_created}")
 
 class PathProcessor:
     """Discovers and ingests file/folder structure into Neo4j."""
