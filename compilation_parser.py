@@ -10,6 +10,7 @@ import os
 import logging
 import subprocess
 import sys
+import hashlib
 from typing import List, Dict, Set, Tuple, Callable, Any, Optional
 from pathlib import Path
 from collections import defaultdict
@@ -36,29 +37,56 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# --- New SpanTree Data Structure ---
-@dataclass
-class SpanNode:
-    """A node in the SpanTree, representing a nested code structure."""
-    kind: str
-    name: str
-    name_span: RelativeLocation
-    body_span: RelativeLocation
-    children: List['SpanNode'] = field(default_factory=list)
 
-# --- Worker Implementations ---
-# These classes encapsulate the logic for a single unit of work.
+# ============================================================
+# Data classes for span representation
+# ============================================================
+@dataclass
+class SourceSpan:
+    name: str
+    kind: str
+    name_location: RelativeLocation
+    body_location: RelativeLocation
+    
+    @classmethod
+    def from_dict(cls, data: dict) -> 'SourceSpan':
+        return cls(
+            name=data['Name'],
+            kind=data['Kind'],
+            name_location=RelativeLocation.from_dict(data['NameLocation']),
+            body_location=RelativeLocation.from_dict(data['BodyLocation'])
+        )
+
+@dataclass
+class SpanTreeNode:
+    """Represents a node in the hierarchical span tree."""
+    span: SourceSpan
+    children: List['SpanTreeNode'] = field(default_factory=list)
+
+    def add_child(self, child: 'SpanTreeNode'):
+        self.children.append(child)
+
+# ============================================================
+# Core Clang worker
+# ============================================================
 
 class _ClangWorkerImpl:
-    """Contains the logic to parse one file using clang and build a SpanTree."""
+    """Parses a single compilation entry and extracts SourceSpans + include relations."""
 
-    _NODE_KIND_FOR_BODY_SPANS = {
+    # class-level cache to avoid re-processing header nodes in identical TU contexts
+    # keys are tuples: (file_path, node_spelling, node_line, node_col, tu_hash)
+    _parsed_header_nodes_cache: Set[Tuple[str, str, int, int, str]] = set()
+
+    _NODE_KIND_FUNCTIONS = {
         clang.cindex.CursorKind.FUNCTION_DECL,
         clang.cindex.CursorKind.CXX_METHOD,
         clang.cindex.CursorKind.CONSTRUCTOR,
         clang.cindex.CursorKind.DESTRUCTOR,
         clang.cindex.CursorKind.CONVERSION_FUNCTION,
         clang.cindex.CursorKind.FUNCTION_TEMPLATE,
+    }
+
+    _NODE_KIND_DATA = {
         clang.cindex.CursorKind.STRUCT_DECL,
         clang.cindex.CursorKind.UNION_DECL,
         clang.cindex.CursorKind.ENUM_DECL,
@@ -67,28 +95,42 @@ class _ClangWorkerImpl:
         clang.cindex.CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION,
     }
 
+    _NODE_KIND_FOR_BODY_SPANS = _NODE_KIND_FUNCTIONS | _NODE_KIND_DATA
+
     def __init__(self, project_path: str, clang_include_path: str):
-        self.project_path = project_path
+        self.project_path = os.path.abspath(project_path)
         self.clang_include_path = clang_include_path
         self.index = clang.cindex.Index.create()
         self.entry = None
+        self.span_results = None
         self.include_relations = None
-        self.processed_headers = None
+        self.tu_hash = None
 
-    def run(self, entry: Dict[str, Any]) -> Tuple[Optional[Tuple[str, List[SpanNode]]], Set[Tuple[str, str]]]:
+    # --------------------------------------------------------
+    # Main entry
+    # --------------------------------------------------------
+    def run(self, entry: Dict[str, Any]) -> Tuple[Dict[str, List[SourceSpan]], Set[Tuple[str, str]]]:
+        """
+        Parse the entry and return:
+          - list of (file_uri, [SourceSpan...])
+          - set of include relations (src_abs_path, include_abs_path)
+        """
         self.entry = entry
-        self.include_relations = set()
-        self.processed_headers = set()
+        self.span_results = defaultdict(list)   # file_uri → [SourceSpan]
+        self.include_relations = set()          # (src_file, included_file)
+        self.tu_hash = None
 
         file_path = self.entry['file']
         original_dir = os.getcwd()
-        span_tree_forest = []
         try:
             os.chdir(self.entry['directory'])
-            tu = self._parse_translation_unit(file_path)
-            if tu:
-                # The top-level cursor's children are the top-level declarations in the file.
-                span_tree_forest = self._walk_ast(tu.cursor)
+            args = self._sanitize_args(self.entry['arguments'], file_path)
+
+            # compute TU hash (based on relevant preprocessor flags)
+            self.tu_hash = self._get_tu_hash(args)
+
+            # proceed to parse with args
+            self._parse_translation_unit(file_path, args)
         except clang.cindex.TranslationUnitLoadError as e:
             logger.error(f"Clang worker failed to parse {file_path}: {e}")
         except Exception as e:
@@ -96,149 +138,196 @@ class _ClangWorkerImpl:
         finally:
             os.chdir(original_dir)
 
-        if not span_tree_forest:
-            return None, self.include_relations
 
-        result = (f"file://{os.path.abspath(file_path)}", span_tree_forest)
-        return result, self.include_relations
+        return self.span_results, self.include_relations
 
-    def _parse_translation_unit(self, file_path: str) -> Optional[clang.cindex.TranslationUnit]:
-        args = self.entry['arguments']
-        sanitized_args = []
-        skip_next = False
-        for a in args:
-            if skip_next: skip_next = False; continue
-            if a in {'-c', '-o', '-MMD', '-MF', '-MT', '-fcolor-diagnostics', '-fdiagnostics-color'}: 
-                skip_next = True; continue
-            if a == file_path or os.path.basename(a) == os.path.basename(file_path): continue
-            sanitized_args.append(a)
+    # --------------------------------------------------------
+    # TU Parsing and traversal
+    # --------------------------------------------------------
+    def _parse_translation_unit(self, file_path: str, args: List[str]):
+        # Add additional include path if provided
+        if self.clang_include_path:
+            args = args + [f"-I{self.clang_include_path}"]
 
-        if self.clang_include_path: sanitized_args.append(f"-I{self.clang_include_path}")
+        tu = self.index.parse(
+            file_path,
+            args=args,
+            options=clang.cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD
+        )
 
-        tu = self.index.parse(file_path, args=sanitized_args, options=clang.cindex.TranslationUnit.PARSE_DETAILED_PROCESSING_RECORD)
-        
+        # collect include relations
         for inc in tu.get_includes():
             if inc.source and inc.include:
-                self.include_relations.add((os.path.abspath(inc.source.name), os.path.abspath(inc.include.name)))
-        
-        return tu
-
-    def _walk_ast(self, node: clang.cindex.Cursor) -> List[SpanNode]:
-        """
-        Recursively walks the AST. For each node, it first gathers span nodes from its
-        children, then checks if it is a structure itself to be turned into a SpanNode.
-        Returns a list of SpanNodes found at the current level.
-        """
-        # This list will hold all SpanNodes found at the current level of the tree
-        # (either direct children that are structures, or grandchildren passed up).
-        found_spans = []
-
-        # Recurse on children first
-        for child in node.get_children():
-            # Only process nodes within the project directory
-            if child.location.file and child.location.file.name.startswith(self.project_path):
-                found_spans.extend(self._walk_ast(child))
-
-        # Now, process the current node
-        if node.is_definition() and node.kind in self._NODE_KIND_FOR_BODY_SPANS:
-            if self._should_process_node(node):
-                name_span = self._get_symbol_name_span(node)
-                body_span = RelativeLocation(
-                    start_line=node.extent.start.line - 1,
-                    start_column=node.extent.start.column - 1,
-                    end_line=node.extent.end.line - 1,
-                    end_column=node.extent.end.column - 1
+                self.include_relations.add(
+                    (os.path.abspath(inc.source.name), os.path.abspath(inc.include.name))
                 )
-                
-                # Create the node for the current structure
-                current_node_span = SpanNode(
-                    kind=node.kind.name,
-                    name=node.spelling or '(anonymous)',
-                    name_span=name_span,
-                    body_span=body_span,
-                    children=found_spans # Assign the collected children
-                )
-                # Since this node is a structure, it becomes the parent.
-                # We return a list containing just this node.
-                return [current_node_span]
 
-        # If the current node is not a structure, we just pass the list of
-        # spans found in its children up the call stack.
-        return found_spans
+        self._walk_ast(tu.cursor)
 
-    def _should_process_node(self, node) -> bool:
-        file_name = node.location.file.name if node.location.file else "unknown"
-        is_header = file_name.lower().endswith(CompilationParser.ALL_HEADER_EXTENSIONS)
-        node_sig = (file_name, node.spelling, node.location.line, node.location.column)
+    # --------------------------------------------------------
+    # AST walking
+    # --------------------------------------------------------
+    def _walk_ast(self, node):
+        file_name = node.location.file.name if node.location.file else node.translation_unit.spelling
+        if not file_name or not file_name.startswith(self.project_path):
+            return
 
-        if is_header and node_sig in self.processed_headers:
-            return False
+        if node.is_definition():
+            if node.kind in self._NODE_KIND_FOR_BODY_SPANS:
+                self._process_generic_node(node, file_name, node.kind.name)
+
+        for c in node.get_children():
+            self._walk_ast(c)
+
+    # --------------------------------------------------------
+    # Span processing
+    # --------------------------------------------------------
+    def _process_generic_node(self, node, file_name, kind_str):
+        if not self._should_process_node(node, file_name):
+            return
+
+        try:
+            name_start_line, name_start_col = self.get_symbol_name_location(node)
+        except Exception:
+            name_start_line, name_start_col = node.location.line - 1, node.location.column - 1
+
+        body_start_line, body_start_col = node.extent.start.line - 1, node.extent.start.column - 1
+        body_end_line, body_end_col = node.extent.end.line - 1, node.extent.end.column - 1
+
+        span = SourceSpan(
+            name=node.spelling,
+            kind=kind_str,
+            name_location=RelativeLocation(name_start_line, name_start_col, name_start_line, name_start_col + len(node.spelling)),
+            body_location=RelativeLocation(body_start_line, body_start_col, body_end_line, body_end_col)
+        )
+
+        file_uri = f"file://{os.path.abspath(file_name)}"
+        self.span_results[file_uri].append(span)
+
+    def _should_process_node(self, node, file_name) -> bool:
+        """Avoid redundant header node processing across identical TU contexts."""
+        is_header = file_name.lower().endswith(('.h', '.hpp', '.hh', '.hxx'))
+        node_sig = (file_name, node.spelling, node.location.line, node.location.column, self.tu_hash)
+
         if is_header:
-            self.processed_headers.add(node_sig)
+            if node_sig in _ClangWorkerImpl._parsed_header_nodes_cache:
+                # already processed in this TU-hash context
+                return False
+            # record in cache so subsequent visits (in same TU or other workers with same tu_hash) skip
+            _ClangWorkerImpl._parsed_header_nodes_cache.add(node_sig)
+
         return True
 
-    def _get_symbol_name_span(self, node) -> Optional[RelativeLocation]:
+    # --------------------------------------------------------
+    # Helpers
+    # --------------------------------------------------------
+    def _sanitize_args(self, args: List[str], file_path: str) -> List[str]:
+        """Remove irrelevant flags from compilation arguments."""
+        sanitized = []
+        skip_next = False
+        for a in args:
+            if skip_next:
+                skip_next = False
+                continue
+            if a in {'-c', '-o', '-MMD', '-MF', '-MT', '-fcolor-diagnostics', '-fdiagnostics-color'}:
+                skip_next = True
+                continue
+            if a == file_path or os.path.basename(a) == os.path.basename(file_path):
+                continue
+            sanitized.append(a)
+        return sanitized
+
+    def _get_tu_hash(self, args: List[str]) -> str:
         """
-        Returns a RelativeLocation for the symbol's name token (0-indexed, inclusive).
-        Uses get_expansion_location() for macro-safe name resolution.
-        Falls back to node.location if token parsing fails.
-
-        Rules:
-          - Lines/columns are 0-based (consistent with project convention).
-          - The returned span is inclusive of both start and end columns.
-          - Filters out spans that cross files (due to weird macros).
+        Compute a deterministic hash representing the TU preprocessing context.
+        By default we include -D and -U flags (macro defines/undefs). You can extend
+        this to include include paths (-I) or other flags if needed.
         """
-        try:
-            # Skip nodes without a spelling (e.g., anonymous structs/lambdas)
-            if not getattr(node, "spelling", None):
-                return None
+        relevant = [a for a in args if a.startswith("-D") or a.startswith("-U")]
+        # Sort for determinism across argument order variations
+        relevant_sorted = sorted(relevant)
+        # short md5 hex
+        h = hashlib.md5(" ".join(relevant_sorted).encode("utf-8")).hexdigest()
+        return h[:16]
 
-            # Iterate over tokens within the node's extent
-            for tok in node.get_tokens():
-                # Only consider identifier tokens whose spelling matches the node's
-                if tok.kind == clang.cindex.TokenKind.IDENTIFIER and tok.spelling == node.spelling:
-                    start_loc = tok.extent.start
-                    end_loc = tok.extent.end
-
-                    # Resolve macro expansions — map to where the token was actually expanded
-                    start_file, start_line, start_col, _ = start_loc.get_expansion_location()
-                    end_file, end_line, end_col, _ = end_loc.get_expansion_location()
-
-                    # Safety: ensure both ends of the token belong to the same file
-                    if start_file and end_file and start_file.name == end_file.name:
-                        return RelativeLocation(
-                            start_line=start_line - 1,
-                            start_column=start_col - 1,
-                            end_line=end_line - 1,
-                            end_column=end_col - 1
-                        )
-
-        except Exception as e:
-            logger.warning(
-                f"Could not parse tokens for symbol '{getattr(node, 'spelling', '?')}' "
-                f"to get name span; falling back. Error: {e}"
-            )
-
-        # --- Fallback ---
-        # Use node.location (less precise but reliable).
-        # This path is taken if token parsing fails or doesn't find a match.
+    def get_symbol_name_location(self, node):
+        """Return zero-based (line, column) for symbol's name."""
+        for tok in node.get_tokens():
+            if tok.spelling == node.spelling:
+                loc = tok.location
+                try:
+                    file, line, col, _ = loc.get_expansion_location()
+                except AttributeError:
+                    # older/newer libclang variations
+                    continue
+                if file and file.name.startswith(self.project_path):
+                    return (line - 1, col - 1)
         loc = node.location
-        
-        # Corrected Fallback: Do not call get_expansion_location() here. If token
-        # parsing failed, we can't reliably resolve macros anyway. Use direct properties.
-        if not loc or not loc.file:
-            return None
+        try:
+            file, line, col, _ = loc.get_expansion_location()
+            return (line - 1, col - 1)
+        except AttributeError:
+            return (node.location.line - 1, node.location.column - 1)
 
-        line = loc.line
-        col = loc.column
-        name_len = len(getattr(node, "spelling", "") or "")
+# ============================================================
+# Span forest construction utilities
+# ============================================================
 
-        return RelativeLocation(
-            start_line=line - 1,
-            start_column=col - 1,
-            end_line=line - 1,
-            end_column=(col - 1) + max(name_len, 1) - 1
+def build_span_forest(spans_per_file: List[Tuple[str, List[SourceSpan]]]) -> Dict[str, List[SpanTreeNode]]:
+    """
+    Build a hierarchical span forest (list of roots) for each file.
+
+    Args:
+        spans_per_file: Output from Clang worker [(file_uri, [SourceSpan, ...])]
+
+    Returns:
+        Dict[file_uri, List[SpanTreeNode]]
+    """
+    forests: Dict[str, List[SpanTreeNode]] = {}
+
+    for file_uri, spans in spans_per_file:
+        if not spans:
+            forests[file_uri] = []
+            continue
+
+        # Sort spans by start position, and then by end descending (outer before inner)
+        spans_sorted = sorted(
+            spans,
+            key=lambda s: (s.body_location.start_line, s.body_location.start_column,
+                           -s.body_location.end_line, -s.body_location.end_column)
         )
+
+        root_nodes: List[SpanTreeNode] = []
+        stack: List[SpanTreeNode] = []
+
+        for span in spans_sorted:
+            node = SpanTreeNode(span)
+            # pop stack until current node fits as child
+            while stack and not is_within(span, stack[-1].span):
+                stack.pop()
+
+            if stack:
+                stack[-1].add_child(node)
+            else:
+                root_nodes.append(node)
+
+            stack.append(node)
+
+        forests[file_uri] = root_nodes
+
+    return forests
+
+
+def is_within(inner: SourceSpan, outer: SourceSpan) -> bool:
+    """Check if 'inner' span is fully inside 'outer' span."""
+    s1, e1 = inner.body_location, outer.body_location
+    # inner.start >= outer.start AND inner.end <= outer.end
+    if (s1.start_line > e1.start_line or
+        (s1.start_line == e1.start_line and s1.start_column >= e1.start_column)):
+        if (s1.end_line < e1.end_line or
+            (s1.end_line == e1.end_line and s1.end_column <= e1.end_column)):
+            return True
+    return False
 
 class _TreesitterWorkerImpl:
     """Contains the logic to parse one file using tree-sitter."""
@@ -247,7 +336,7 @@ class _TreesitterWorkerImpl:
         self.language = Language(tsc.language())
         self.parser = TreeSitterParser(self.language)
 
-    def run(self, file_path: str) -> Tuple[Optional[Tuple[str, List[SpanNode]]], Set]:
+    def run(self, file_path: str) -> Tuple[Optional[Dict[str, List[SourceSpan]]], Set]:
         # Note: Tree-sitter parsing is not hierarchical and does not build a tree.
         # This implementation is kept for basic compatibility but does not support nesting.
         try:
@@ -302,7 +391,7 @@ def _worker_initializer(parser_type: str, init_args: Dict[str, Any]):
     else:
         raise ValueError(f"Unknown parser type: {parser_type}")
 
-def _parallel_worker(data: Any) -> Tuple[Optional[Tuple[str, List[SpanNode]]], Set]:
+def _parallel_worker(data: Any) -> Tuple[Optional[Tuple[str, List[SourceSpan]]], Set]:
     """Generic top-level worker function that uses the process-local worker object."""
     global _worker_impl_instance
     if _worker_impl_instance is None:
@@ -333,13 +422,13 @@ class CompilationParser:
 
     def __init__(self, project_path: str):
         self.project_path = project_path
-        self.source_spans: Dict[str, List[SpanNode]] = {} # Changed to Dict[FileURI, List[SpanNode]]
+        self.source_spans: Dict[str, List[SourceSpan]] = {} # Changed to Dict[FileURI, List[SpanNode]]
         self.include_relations: Set[Tuple[str, str]] = set()
 
     def parse(self, files_to_parse: List[str], num_workers: int = 1):
         raise NotImplementedError
 
-    def get_source_spans(self) -> Dict[str, List[SpanNode]]:
+    def get_source_spans(self) -> Dict[str, List[SourceSpan]]:
         return self.source_spans
 
     def get_include_relations(self) -> Set[Tuple[str, str]]:
@@ -362,9 +451,7 @@ class CompilationParser:
             for future in tqdm(as_completed(future_to_item), total=len(items_to_process), desc=desc):
                 try:
                     span_result, includes = future.result()
-                    if span_result:
-                        file_uri, span_forest = span_result
-                        all_spans[file_uri] = span_forest
+                    if span_result: all_spans.update(span_result)
                     if includes: all_includes.update(includes)
                 except Exception as e:
                     item = future_to_item[future]

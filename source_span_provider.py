@@ -13,9 +13,9 @@ from typing import List, Optional, Dict
 
 from urllib.parse import urlparse, unquote
 
-from clangd_index_yaml_parser import SymbolParser, SourceSpan, RelativeLocation
+from clangd_index_yaml_parser import SymbolParser
 from compilation_manager import CompilationManager
-from compilation_parser import SpanNode # Import the new SpanNode dataclass
+from compilation_parser import SourceSpan # Import the new SpanNode dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -33,21 +33,17 @@ class SourceSpanProvider:
         self.compilation_manager = compilation_manager
         self.matched_symbols_count = 0
 
-    def _build_lookup_from_tree(self, node: SpanNode, file_uri: str, lookup_table: Dict):
+    def _build_lookup_from_tree(self, node: SourceSpan, file_uri: str, lookup_table: Dict):
         """Recursively traverses a SpanNode tree to populate a flat lookup table."""
         # Key is (name, file_uri, name_start_line, name_start_column)
         key = (
             node.name,
             file_uri,
-            node.name_span.start_line,
-            node.name_span.start_column
+            node.name_location.start_line,
+            node.name_location.start_column
         )
         # The value is the body span, which is what the symbol needs
-        lookup_table[key] = node.body_span
-
-        # Recurse on children
-        for child in node.children:
-            self._build_lookup_from_tree(child, file_uri, lookup_table)
+        lookup_table[key] = node.body_location
 
     def enrich_symbols_with_span(self):
         """
@@ -66,9 +62,9 @@ class SourceSpanProvider:
         spans_lookup = {}
         logger.info(f"Processing SpanTrees from {len(span_tree_data)} files for enrichment.")
 
-        for file_uri, span_forest in span_tree_data.items():
-            for top_level_node in span_forest:
-                self._build_lookup_from_tree(top_level_node, file_uri, spans_lookup)
+        for file_uri, source_spans in span_tree_data.items():
+            for source_span in source_spans:
+                self._build_lookup_from_tree(source_span, file_uri, spans_lookup)
         
         # 3. Match symbols against the lookup table and enrich
         matched_count = 0
