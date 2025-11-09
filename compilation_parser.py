@@ -346,7 +346,7 @@ class ClangParser(CompilationParser):
         self.clang_include_path = self._get_clang_resource_dir()
 
     def _get_db_dir(self, compile_commands_path: str) -> str:
-        path = Path(compile_commands_path).resolve()
+        path = Path(compile_commands_path).expanduser().resolve()
         if path.is_dir():
             if not (path / "compile_commands.json").exists():
                 raise FileNotFoundError(f"No compile_commands.json found in directory {path}. Please put/link it there or use --compile-commands to specify the path.")

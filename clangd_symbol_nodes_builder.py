@@ -126,7 +126,7 @@ class SymbolProcessor:
                 if parent_id:
                     symbol_data["parent_id"] = parent_id
                 else:
-                    logger.info(f"Could not find parent ID for method '{sym.name}' with scope '{sym.scope}'")
+                    logger.debug(f"Could not find parent ID for method '{sym.name}' with scope '{sym.scope}'")
             else:
                 symbol_data["node_label"] = "FUNCTION"
             symbol_data.update({
@@ -160,7 +160,7 @@ class SymbolProcessor:
             if parent_id:
                 symbol_data["parent_id"] = parent_id
             else:
-                logger.info(f"Could not find parent ID for method '{sym.name}' with scope '{sym.scope}'")
+                logger.debug(f"Could not find parent ID for method '{sym.name}' with scope '{sym.scope}'")
 
         # Handle Struct/Class/Union/Enum
         elif sym.kind == "Class":
@@ -204,7 +204,7 @@ class SymbolProcessor:
                     "is_static": False
                 })
             else:
-                logger.info(f"Could not find parent ID for field '{sym.name}' with scope '{sym.scope}'")
+                logger.debug(f"Could not find parent ID for field '{sym.name}' with scope '{sym.scope}'")
 
         elif sym.kind == "Variable":
             # Exclude function-local variables
