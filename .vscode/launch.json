@@ -20,14 +20,14 @@
             "args": ["../wsl2-graph-built-clang20.1.8/linux-clangd.yaml", "~/Public/microsoft-WSL2-Linux-Kernel-427645e/"]
         },
         {
-            "name": "Python Debugger: Graph RAG builder",
+            "name": "Python Debugger: MiniJVM Graph RAG builder",
             "type": "debugpy",
             "request": "launch",
             "program": "clangd_graph_rag_builder.py",
             "args": ["../../mini-jvm/graphrag/original/korp_clangd_21.x.yaml", "../../mini-jvm", "--compile-commands", "../../mini-jvm/graphrag/update/update_compile_commands.json", "--generate-summary", "--llm-api", "fake", "--ingest-batch-size", "10", "--log-batch-size", "10"]
         },
         {
-            "name": "Python Debugger: Graph RAG updater",
+            "name": "Python Debugger: MiniJVM Graph RAG updater",
             "type": "debugpy",
             "request": "launch",
             "program": "clangd_graph_rag_updater.py",
