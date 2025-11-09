@@ -167,7 +167,7 @@ class CompilationManager:
         gc.collect()
         return
 
-    def get_source_spans(self) -> List[Dict]:
+    def get_source_spans(self) -> Dict[str, List]:
         if not hasattr(self, '_parser') or self._parser is None:
             raise RuntimeError("CompilationManager has not parsed any files yet.")
         return self._parser.get_source_spans()

@@ -9,12 +9,13 @@ enrich the in-memory Symbol objects with `body_location` data.
 
 import logging
 import os, gc
-from typing import List, Optional
+from typing import List, Optional, Dict
 
 from urllib.parse import urlparse, unquote
 
-from clangd_index_yaml_parser import SymbolParser, SourceSpan
+from clangd_index_yaml_parser import SymbolParser, SourceSpan, RelativeLocation
 from compilation_manager import CompilationManager
+from compilation_parser import SpanNode # Import the new SpanNode dataclass
 
 logger = logging.getLogger(__name__)
 
@@ -32,54 +33,69 @@ class SourceSpanProvider:
         self.compilation_manager = compilation_manager
         self.matched_symbols_count = 0
 
+    def _build_lookup_from_tree(self, node: SpanNode, file_uri: str, lookup_table: Dict):
+        """Recursively traverses a SpanNode tree to populate a flat lookup table."""
+        # Key is (name, file_uri, name_start_line, name_start_column)
+        key = (
+            node.name,
+            file_uri,
+            node.name_span.start_line,
+            node.name_span.start_column
+        )
+        # The value is the body span, which is what the symbol needs
+        lookup_table[key] = node.body_span
+
+        # Recurse on children
+        for child in node.children:
+            self._build_lookup_from_tree(child, file_uri, lookup_table)
+
     def enrich_symbols_with_span(self):
         """
-        Performs the main enrichment process. It gets function span data from the
-        compilation manager, matches it against the symbols in the symbol parser,
-        and attaches the `body_location` attribute to the matched Symbol objects.
+        Performs the main enrichment process. It gets the new SpanTree data from the
+        compilation manager, builds a lookup table by traversing the trees, and then
+        matches it against the symbols to attach the `body_location` attribute.
         """
         if not self.symbol_parser:
             logger.warning("No SymbolParser provided to SourceSpanProvider; cannot enrich symbols.")
             return
 
-        span_file_dicts = self.compilation_manager.get_source_spans()
+        # 1. Get the new SpanTree data structure
+        span_tree_data = self.compilation_manager.get_source_spans()
         
-        # 1. Process raw span dictionaries into a lookup table
+        # 2. Process the SpanTree into a flat lookup table for fast matching
         spans_lookup = {}
-        num_spans = sum(len(d.get('Spans', [])) for d in span_file_dicts)
-        logger.info(f"Processing {num_spans} symbol definitions from {len(span_file_dicts)} files for enrichment.")
+        logger.info(f"Processing SpanTrees from {len(span_tree_data)} files for enrichment.")
 
-        for file_dict in span_file_dicts:
-            file_uri = file_dict.get('FileURI')
-            if not file_uri or 'Spans' not in file_dict:
-                continue
-            
-            for span_data in file_dict['Spans']:
-                if not span_data: continue
-                span = SourceSpan.from_dict(span_data)
-                key = (span.name, file_uri, 
-                       span.name_location.start_line, span.name_location.start_column)
-                spans_lookup[key] = span
+        for file_uri, span_forest in span_tree_data.items():
+            for top_level_node in span_forest:
+                self._build_lookup_from_tree(top_level_node, file_uri, spans_lookup)
         
-        # 2. Match symbols against the lookup table and enrich
+        # 3. Match symbols against the lookup table and enrich
         matched_count = 0
         # Iterate through ALL symbols, not just functions
         for sym in self.symbol_parser.symbols.values():
-            if sym.definition:
-                key = (sym.name, sym.definition.file_uri,
-                       sym.definition.start_line, sym.definition.start_column)
+            # We can only match symbols that have a declaration/definition location
+            primary_location = sym.definition or sym.declaration
+            if primary_location:
+                key = (
+                    sym.name,
+                    primary_location.file_uri,
+                    primary_location.start_line,
+                    primary_location.start_column
+                )
                 
-                if key in spans_lookup:
+                body_span = spans_lookup.get(key)
+                if body_span:
                     # Enrich the Symbol object directly in-place
-                    sym.body_location = spans_lookup[key].body_location
+                    sym.body_location = body_span
                     matched_count += 1
         
         self.matched_symbols_count = matched_count
         logger.info(f"Matched and enriched {self.matched_symbols_count} symbols with body spans.")
 
-        # 3. Clean up references to free memory
+        # 4. Clean up references to free memory
         self.symbol_parser = None
-        del span_file_dicts, spans_lookup
+        del span_tree_data, spans_lookup
         gc.collect()
 
     def get_matched_count(self) -> int:
