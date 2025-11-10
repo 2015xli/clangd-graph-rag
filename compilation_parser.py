@@ -95,7 +95,9 @@ class _ClangWorkerImpl:
         clang.cindex.CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION,
     }
 
-    _NODE_KIND_FOR_BODY_SPANS = _NODE_KIND_FUNCTIONS | _NODE_KIND_DATA
+    _NODE_KIND_NAMESPACES = { clang.cindex.CursorKind.NAMESPACE }
+
+    _NODE_KIND_FOR_BODY_SPANS = _NODE_KIND_FUNCTIONS | _NODE_KIND_DATA | _NODE_KIND_NAMESPACES
 
     def __init__(self, project_path: str, clang_include_path: str):
         self.project_path = os.path.abspath(project_path)
@@ -303,7 +305,7 @@ def build_span_forest(spans_per_file: List[Tuple[str, List[SourceSpan]]]) -> Dic
         for span in spans_sorted:
             node = SpanTreeNode(span)
             # pop stack until current node fits as child
-            while stack and not is_within(span, stack[-1].span):
+            while stack and not span_is_within(span, stack[-1].span):
                 stack.pop()
 
             if stack:
@@ -318,7 +320,7 @@ def build_span_forest(spans_per_file: List[Tuple[str, List[SourceSpan]]]) -> Dic
     return forests
 
 
-def is_within(inner: SourceSpan, outer: SourceSpan) -> bool:
+def span_is_within(inner: SourceSpan, outer: SourceSpan) -> bool:
     """Check if 'inner' span is fully inside 'outer' span."""
     s1, e1 = inner.body_location, outer.body_location
     # inner.start >= outer.start AND inner.end <= outer.end
