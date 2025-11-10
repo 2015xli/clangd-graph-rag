@@ -32,7 +32,6 @@ def sanitize_special_tokens(text: str) -> str:
 from neo4j_manager import Neo4jManager
 from llm_client import get_llm_client, LlmClient, get_embedding_client, EmbeddingClient
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # --- Constants for Summarization ---

@@ -10,7 +10,7 @@ from typing import Dict, List, Tuple, Optional, Any, Set
 import logging
 import gc
 import os
-import argparse
+import sys, argparse
 import json
 import math
 from tqdm import tqdm
@@ -24,8 +24,8 @@ from clangd_index_yaml_parser import (
 )
 from neo4j_manager import Neo4jManager
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 # --- Base Extractor Class ---
 class BaseClangdCallGraphExtractor:
@@ -208,6 +208,8 @@ import input_params
 from pathlib import Path
 
 def main():
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
     """Main function to demonstrate usage."""
     parser = argparse.ArgumentParser(description='Extract call graph from clangd index YAML')
 

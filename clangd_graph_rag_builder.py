@@ -29,9 +29,57 @@ from memory_debugger import Debugger
 from git_manager import GitManager
 from compilation_manager import CompilationManager
 from include_relation_provider import IncludeRelationProvider
+import logging
+import sys
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# --- 1. Custom Filter Classes ---
+# --- 1. Custom Filter Classes for Level Separation ---
+
+class DebugOnlyFilter(logging.Filter):
+    """Passes ONLY messages with an exact level of DEBUG (levelno 10)."""
+    def filter(self, record):
+        return record.levelno == logging.DEBUG
+
+class InfoAndUpFilter(logging.Filter):
+    """Passes ONLY messages with a level of INFO (levelno 20) or higher."""
+    def filter(self, record):
+        return record.levelno >= logging.INFO
+
+# --- 2. Configure the Root Logger (The System Gatekeeper) ---
+
+# Get the Root Logger (the one named '')
+root_logger = logging.getLogger()
+# Set the Root Logger to INFO. This is CRITICAL: it prevents all third-party 
+# libraries from generating DEBUG logs, isolating your application.
+root_logger.setLevel(logging.INFO) 
+# Note: Handlers will be attached to the root logger.
+
+# --- 3. Configure YOUR Application Logger (Bypassing the Root's Restriction) ---
+
+# Get your specific main module logger (__main__)
+logger = logging.getLogger(__name__) 
+# Explicitly set your application's logger to DEBUG. This ensures your log messages
+# are created and processed, even though the root is set to INFO.
+logger.setLevel(logging.DEBUG) 
+
+# --- 4. Configure the STDOUT (Console) Handler ---
+
+stdout_handler = logging.StreamHandler(sys.stdout)
+stdout_handler.setLevel(logging.DEBUG) # Allow all messages (DEBUG and up) to reach the filter
+stdout_handler.addFilter(InfoAndUpFilter()) # Filter to pass only INFO, WARNING, ERROR, etc.
+stdout_handler.setFormatter(logging.Formatter('%(asctime)s - [%(levelname)s] %(message)s'))
+
+# --- 5. Configure the FILE Handler ---
+file_handler = logging.FileHandler('debug.log', mode='w') # 'w' overwrites on start
+file_handler.setLevel(logging.DEBUG) # Allow all messages (DEBUG and up) to reach the filter
+file_handler.addFilter(DebugOnlyFilter()) # CRITICAL: Filter to pass ONLY DEBUG messages
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - [%(levelname)s] %(message)s'))
+
+# --- 6. Add Handlers to the Root Logger ---
+
+# These handlers will process logs that propagate up from all your modules.
+root_logger.addHandler(stdout_handler)
+root_logger.addHandler(file_handler)
 
 class GraphBuilder:
     """Orchestrates the full build of the code graph from a clangd index."""
@@ -194,6 +242,7 @@ class GraphBuilder:
             num_local_workers=self.args.num_local_workers,
             num_remote_workers=self.args.num_remote_workers
         )
+
         rag_generator.summarize_code_graph()
         neo4j_mgr.create_vector_indices()
         logger.info("--- Finished Pass 7 ---")

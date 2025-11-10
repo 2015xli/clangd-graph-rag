@@ -23,6 +23,7 @@ from compilation_manager import CompilationManager
 from neo4j_manager import Neo4jManager
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 class PathManager:
     """Manages file paths and their relationships within the project."""
@@ -173,7 +174,6 @@ class SymbolProcessor:
                     sym.body_location.end_column
                 ]
         elif sym.kind == "Struct":
-            logger.debug(f"DEBUG: Processing Struct symbol: ID={sym.id}, Name={sym.name}, Language={sym.language}")
             if sym.language and sym.language.lower() == "cpp":
                 symbol_data["node_label"] = "CLASS_STRUCTURE"
             else:
@@ -1051,7 +1051,6 @@ import input_params
 
 def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    logger = logging.getLogger(__name__)
 
     parser = argparse.ArgumentParser(description='Import Clangd index symbols and file structure into Neo4j.')
 

@@ -36,7 +36,7 @@ except ImportError:
     TreeSitterParser = None
 
 logger = logging.getLogger(__name__)
-
+logger.setLevel(logging.DEBUG)
 
 # ============================================================
 # Data classes for span representation
