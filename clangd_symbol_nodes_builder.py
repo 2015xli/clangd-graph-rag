@@ -179,11 +179,7 @@ class SymbolProcessor:
             symbol_data["node_label"] = "FIELD"
             symbol_data.update({"type": sym.type, "is_static": False})
 
-        elif sym.kind == "Variable":
-            # Exclude function-local variables, which have parens in their scope
-            if '(' in sym.scope or ')' in sym.scope:
-                return None
-            
+        elif sym.kind == "Variable":            
             # Check if the parent is a Class/Struct, making this a static field
             parent_id = symbol_data.get("parent_id")
             if parent_id:
@@ -191,9 +187,12 @@ class SymbolProcessor:
                 if parent_sym and parent_sym.kind in ("Class", "Struct"):
                     symbol_data["node_label"] = "FIELD"
                     symbol_data.update({"type": sym.type, "is_static": True})
+                else: # parent is not a class/struct, can be namespace
+                    symbol_data["node_label"] = "VARIABLE"
+                    symbol_data.update({"type": sym.type})
 
             else:
-                # No parent, so it's a global or top-level namespace variable
+                # No parent, so it's a global variable
                 symbol_data["node_label"] = "VARIABLE"
                 symbol_data.update({"type": sym.type})
         else:
@@ -203,7 +202,9 @@ class SymbolProcessor:
             abs_file_path = unquote(urlparse(sym.definition.file_uri).path)
             if self.path_manager.is_within_project(abs_file_path):
                 symbol_data["file_path"] = self.path_manager.uri_to_relative_path(sym.definition.file_uri)
-        
+            else: # all symbols should be within project except namespace symbols
+                symbol_data["file_path"] = abs_file_path
+
         return symbol_data
 
     def _process_and_filter_symbols(self, symbols: Dict[str, Symbol], qualified_namespace_to_id: Dict[str, str]) -> Dict[str, List[Dict]]:
@@ -234,17 +235,47 @@ class SymbolProcessor:
 
         # --- Phase 3: Relationship Ingestion ---
         logger.info("Phase 3: Ingesting all relationships...")
-        
-        # Consolidate and ingest all SCOPE_CONTAINS relationships
+
+        # Consolidate and ingest all relationships derived from parent IDs
+
+        # Firstly, collect all relationships derived from parent IDs for SCOPE_CONTAINS and HAS_NESTED
+        # Temporarily create a quick lookup for node labels by ID for efficient filtering
+        id_to_label_map = {
+            data['id']: data['node_label']
+            for symbol_list in processed_symbols.values()
+            for data in symbol_list
+        }
+
         scope_contains_relations = []
+        has_nested_relations = []
         for symbol_list in processed_symbols.values():
             for symbol_data in symbol_list:
+                # Collect data for SCOPE_CONTAINS (parent is a Namespace)
                 if "namespace_id" in symbol_data:
                     scope_contains_relations.append({
                         "parent_id": symbol_data["namespace_id"],
                         "child_id": symbol_data["id"]
                     })
+
+                # Collect and pre-filter data for HAS_NESTED
+                if "parent_id" in symbol_data:
+                    parent_id = symbol_data["parent_id"]
+                    parent_label = id_to_label_map.get(parent_id)
+                    child_label = symbol_data["node_label"]
+                    child_id = symbol_data["id"]
+                            
+                    is_valid_parent = parent_label in ('CLASS_STRUCTURE', 'DATA_STRUCTURE','FUNCTION', 'METHOD')
+                    is_valid_child = child_label in ('CLASS_STRUCTURE', 'DATA_STRUCTURE', 'FUNCTION')
+
+                    if parent_label and is_valid_parent and is_valid_child:
+                        has_nested_relations.append({
+                            "parent_id": parent_id,
+                            "child_id": child_id
+                        })
+
         self._ingest_scope_contains_relationships(scope_contains_relations, neo4j_mgr)
+        self._ingest_nesting_relationships(has_nested_relations, neo4j_mgr)
+        del id_to_label_map
 
         # Ingest other relationships
         self._ingest_file_declarations(processed_symbols.get('NAMESPACE', []), neo4j_mgr)
@@ -887,6 +918,30 @@ class SymbolProcessor:
         """
         counters = neo4j_mgr.execute_autocommit_query(query, {"relations": relations_data})
         logger.info(f"  Total FILE-[:DECLARES]->NAMESPACE relationships created: {counters.relationships_created}")
+
+    def _ingest_nesting_relationships(self, relations: List[Dict], neo4j_mgr: Neo4jManager):
+        """
+        Creates HAS_NESTED relationships for lexically nested structures.
+        The list of relations is pre-filtered to ensure it only contains
+        valid parent/child node types.
+        """
+        if not relations:
+            return
+
+        logger.info(f"Creating {len(relations)} HAS_NESTED relationships...")
+        query = """
+        UNWIND $relations AS rel
+        MATCH (parent) WHERE parent.id = rel.parent_id
+        MATCH (child) WHERE child.id = rel.child_id
+        MERGE (parent)-[:HAS_NESTED]->(child)
+        """
+        total_rels_created = 0
+        for i in tqdm(range(0, len(relations), self.ingest_batch_size), desc="Ingesting HAS_NESTED relationships"):
+            batch = relations[i:i + self.ingest_batch_size]
+            counters = neo4j_mgr.execute_autocommit_query(query, {"relations": batch})
+            total_rels_created += counters.relationships_created
+
+        logger.info(f"  Total HAS_NESTED relationships created: {total_rels_created}")
 
 class PathProcessor:
     """Discovers and ingests file/folder structure into Neo4j."""
