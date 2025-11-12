@@ -54,28 +54,23 @@ class SymbolProcessor:
         self.log_batch_size = log_batch_size
         self.cypher_tx_size = cypher_tx_size
 
-    def _build_scope_maps(self, symbols: Dict[str, Symbol]) -> Tuple[Dict[str, str], Dict[str, str]]:
+    def _build_scope_maps(self, symbols: Dict[str, Symbol]) -> Dict[str, str]:
         """
-        Performs a single pass over all symbols to build essential lookup tables for
-        linking namespaces and structures.
+        Performs a single pass over all symbols to build a lookup table for
+        qualified namespace names to their symbol IDs.
         """
-        logger.info("Building scope-to-ID lookup maps for namespaces and structures...")
+        logger.info("Building scope-to-ID lookup maps for namespaces...")
         qualified_namespace_to_id = {}
-        scope_to_structure_id = {}
 
         for sym in tqdm(symbols.values(), desc="Building scope maps"):
             if sym.kind == 'Namespace':
                 qualified_name = sym.scope + sym.name + '::'
                 qualified_namespace_to_id[qualified_name] = sym.id
-            elif sym.kind in ('Struct', 'Class', 'Union'):
-                # Normalize the scope string by removing template arguments for parent lookups
-                normalized_scope = re.sub('<.*>', '', sym.scope)
-                key = normalized_scope + sym.name + '::'
-                scope_to_structure_id[key] = sym.id
-        logger.info(f"Built maps for {len(qualified_namespace_to_id)} namespaces and {len(scope_to_structure_id)} structures.")
-        return qualified_namespace_to_id, scope_to_structure_id
 
-    def process_symbol(self, sym: Symbol, scope_to_structure_id: Dict[str, str], qualified_namespace_to_id: Dict[str, str]) -> Optional[Dict]:
+        logger.info(f"Built map for {len(qualified_namespace_to_id)} namespaces.")
+        return qualified_namespace_to_id
+
+    def process_symbol(self, sym: Symbol, all_symbols: Dict[str, Symbol], qualified_namespace_to_id: Dict[str, str]) -> Optional[Dict]:
         if not sym.id or not sym.kind:
             return None
 
@@ -87,49 +82,38 @@ class SymbolProcessor:
             "language": sym.language,
             "has_definition": sym.definition is not None,
         }
-
+        
+        # Only process symbols that within the project path
         primary_location = sym.definition or sym.declaration
         if primary_location:
             abs_file_path = unquote(urlparse(primary_location.file_uri).path)
             if self.path_manager.is_within_project(abs_file_path):
                 symbol_data["path"] = self.path_manager.uri_to_relative_path(primary_location.file_uri)
             else:
-                # For namespaces, we might have a declaration without a file path
-                # but we still want to create the node.
                 if sym.kind != 'Namespace':
                     return None
             symbol_data["name_location"] = [primary_location.start_line, primary_location.start_column]
 
+        # --- Parent ID Check ---
+        # If the new provider added a parent_id, copy it over.
+        if hasattr(sym, 'parent_id') and sym.parent_id:
+            symbol_data["parent_id"] = sym.parent_id
+
+        if sym.kind in ("Method", "Field") and not sym.parent_id:
+            logger.debug(f"{sym.kind}: {sym.scope}{sym.name} ID: {sym.id} at {primary_location.file_uri}:{primary_location.start_line}:{primary_location.start_column} has no parent_id.")
+            
         # --- Namespace Parent Check ---
-        # For any symbol, check if its scope corresponds to a known namespace
         namespace_id = qualified_namespace_to_id.get(sym.scope)
         if namespace_id:
             symbol_data["namespace_id"] = namespace_id
 
-        # Normalize the scope string by removing template arguments for parent lookups
-        normalized_scope = re.sub('<.*>', '', sym.scope)
-
-        # Handle Namespace
+        # --- Symbol Kind Processing ---
         if sym.kind == "Namespace":
             symbol_data["node_label"] = "NAMESPACE"
-            # The qualified name is the full scope path including the symbol's own name
             symbol_data["qualified_name"] = sym.scope + sym.name + '::'
 
-        # Handle Function vs Method
         elif sym.kind == "Function":
-            # Check if it's actually a method by looking at its scope
-            # A simple heuristic: if scope ends with '::' and language is Cpp, it's likely a method
-            if sym.language and sym.language.lower() == "cpp" and sym.scope and sym.scope.endswith('::'):
-                symbol_data["node_label"] = "METHOD"
-                # Extract parent_id from scope
-                parent_scope_name = sym.scope.rsplit('::', 2)[0] + '::'
-                parent_id = scope_to_structure_id.get(parent_scope_name)
-                if parent_id:
-                    symbol_data["parent_id"] = parent_id
-                else:
-                    logger.debug(f"Could not find parent ID for method '{sym.name}' with scope '{sym.scope}'")
-            else:
-                symbol_data["node_label"] = "FUNCTION"
+            symbol_data["node_label"] = "FUNCTION"
             symbol_data.update({
                 "signature": sym.signature,
                 "return_type": sym.return_type,
@@ -142,6 +126,7 @@ class SymbolProcessor:
                     sym.body_location.end_line,
                     sym.body_location.end_column
                 ]
+
         elif sym.kind in ("InstanceMethod", "StaticMethod", "Constructor", "Destructor", "ConversionFunction"):
             symbol_data["node_label"] = "METHOD"
             symbol_data.update({
@@ -156,14 +141,7 @@ class SymbolProcessor:
                     sym.body_location.end_line,
                     sym.body_location.end_column
                 ]
-            # Extract parent_id from the NORMALIZED scope
-            parent_id = scope_to_structure_id.get(normalized_scope)
-            if parent_id:
-                symbol_data["parent_id"] = parent_id
-            else:
-                logger.debug(f"Could not find parent ID for method '{sym.name}' with scope '{sym.scope}'")
 
-        # Handle Struct/Class/Union/Enum
         elif sym.kind == "Class":
             symbol_data["node_label"] = "CLASS_STRUCTURE"
             if hasattr(sym, 'body_location') and sym.body_location:
@@ -173,6 +151,7 @@ class SymbolProcessor:
                     sym.body_location.end_line,
                     sym.body_location.end_column
                 ]
+        
         elif sym.kind == "Struct":
             if sym.language and sym.language.lower() == "cpp":
                 symbol_data["node_label"] = "CLASS_STRUCTURE"
@@ -185,6 +164,7 @@ class SymbolProcessor:
                     sym.body_location.end_line,
                     sym.body_location.end_column
                 ]
+
         elif sym.kind in ("Union", "Enum"):
             symbol_data["node_label"] = "DATA_STRUCTURE"
             if hasattr(sym, 'body_location') and sym.body_location:
@@ -194,40 +174,29 @@ class SymbolProcessor:
                     sym.body_location.end_line,
                     sym.body_location.end_column
                 ]
+        
         elif sym.kind == "Field":
             symbol_data["node_label"] = "FIELD"
-            parent_id = scope_to_structure_id.get(normalized_scope)
-            if parent_id:
-                symbol_data.update({
-                    "type": sym.type,
-                    "parent_id": parent_id,
-                    "is_static": False
-                })
-            else:
-                logger.debug(f"Could not find parent ID for field '{sym.name}' with scope '{sym.scope}'")
+            symbol_data.update({"type": sym.type, "is_static": False})
 
         elif sym.kind == "Variable":
-            # Exclude function-local variables
+            # Exclude function-local variables, which have parens in their scope
             if '(' in sym.scope or ')' in sym.scope:
                 return None
-
-            # Check if the scope belongs to a class/struct, making this a static field
-            parent_id = scope_to_structure_id.get(normalized_scope)
+            
+            # Check if the parent is a Class/Struct, making this a static field
+            parent_id = symbol_data.get("parent_id")
             if parent_id:
-                symbol_data["node_label"] = "FIELD"
-                symbol_data.update({
-                    "type": sym.type,
-                    "parent_id": parent_id,
-                    "is_static": True
-                })
+                parent_sym = all_symbols.get(parent_id)
+                if parent_sym and parent_sym.kind in ("Class", "Struct"):
+                    symbol_data["node_label"] = "FIELD"
+                    symbol_data.update({"type": sym.type, "is_static": True})
+
             else:
-                # It's a global or namespace-level variable
+                # No parent, so it's a global or top-level namespace variable
                 symbol_data["node_label"] = "VARIABLE"
-                symbol_data.update({
-                    "type": sym.type
-                })
+                symbol_data.update({"type": sym.type})
         else:
-            # For other kinds, we don't create nodes for now
             return None
 
         if sym.definition:
@@ -237,23 +206,85 @@ class SymbolProcessor:
         
         return symbol_data
 
-    def _process_and_filter_symbols(self, symbols: Dict[str, Symbol], scope_to_structure_id: Dict[str, str], qualified_namespace_to_id: Dict[str, str]) -> Dict[str, List[Dict]]:
+    def _process_and_filter_symbols(self, symbols: Dict[str, Symbol], qualified_namespace_to_id: Dict[str, str]) -> Dict[str, List[Dict]]:
         processed_symbols = defaultdict(list)
         logger.info("Processing symbols for ingestion...")
         for sym in tqdm(symbols.values(), desc="Processing and grouping symbols by kind"):
-            data = self.process_symbol(sym, scope_to_structure_id, qualified_namespace_to_id)
+            data = self.process_symbol(sym, symbols, qualified_namespace_to_id)
             if data and 'node_label' in data:
                 processed_symbols[data['node_label']].append(data)
         
-        # The 'kind' field in the original symbol data is preserved, but 'node_label' is used for dispatch
-        # No longer need to combine DATA_STRUCTURE here, as it's handled in process_symbol
         return processed_symbols
 
     def ingest_symbols_and_relationships(self, symbol_parser: SymbolParser, neo4j_mgr: Neo4jManager, defines_generation_strategy: str = "batched-parallel"):
         # --- Phase 1: Discovery and Map Building ---
         logger.info("Phase 1: Building scope maps and processing symbols...")
-        qualified_namespace_to_id, scope_to_structure_id = self._build_scope_maps(symbol_parser.symbols)
-        processed_symbols = self._process_and_filter_symbols(symbol_parser.symbols, scope_to_structure_id, qualified_namespace_to_id)
+        qualified_namespace_to_id = self._build_scope_maps(symbol_parser.symbols)
+        processed_symbols = self._process_and_filter_symbols(symbol_parser.symbols, qualified_namespace_to_id)
+
+        # --- Phase 2: Node Ingestion ---
+        logger.info("Phase 2: Ingesting all nodes...")
+        self._ingest_namespace_nodes(processed_symbols.get('NAMESPACE', []), neo4j_mgr)
+        self._ingest_data_structure_nodes(processed_symbols.get('DATA_STRUCTURE', []), neo4j_mgr)
+        self._ingest_class_nodes(processed_symbols.get('CLASS_STRUCTURE', []), neo4j_mgr)
+        self._ingest_function_nodes(processed_symbols.get('FUNCTION', []), neo4j_mgr)
+        self._ingest_method_nodes(processed_symbols.get('METHOD', []), neo4j_mgr)
+        self._ingest_field_nodes([f for f in processed_symbols.get('FIELD', []) if 'parent_id' in f], neo4j_mgr)
+        self._ingest_variable_nodes(processed_symbols.get('VARIABLE', []), neo4j_mgr)
+
+        # --- Phase 3: Relationship Ingestion ---
+        logger.info("Phase 3: Ingesting all relationships...")
+        
+        # Consolidate and ingest all SCOPE_CONTAINS relationships
+        scope_contains_relations = []
+        for symbol_list in processed_symbols.values():
+            for symbol_data in symbol_list:
+                if "namespace_id" in symbol_data:
+                    scope_contains_relations.append({
+                        "parent_id": symbol_data["namespace_id"],
+                        "child_id": symbol_data["id"]
+                    })
+        self._ingest_scope_contains_relationships(scope_contains_relations, neo4j_mgr)
+
+        # Ingest other relationships
+        self._ingest_file_declarations(processed_symbols.get('NAMESPACE', []), neo4j_mgr)
+
+        defines_function_list = [d for d in processed_symbols.get('FUNCTION', []) if 'file_path' in d]
+        defines_variable_list = [d for d in processed_symbols.get('VARIABLE', []) if 'file_path' in d]
+        defines_data_structure_list = [d for d in processed_symbols.get('DATA_STRUCTURE', []) if 'file_path' in d]
+        defines_class_list = [d for d in processed_symbols.get('CLASS_STRUCTURE', []) if 'file_path' in d]
+
+        if defines_generation_strategy == "unwind-sequential":
+            self._ingest_defines_relationships_unwind_sequential(defines_function_list, defines_variable_list, defines_data_structure_list, defines_class_list, neo4j_mgr)
+        elif defines_generation_strategy == "isolated-parallel":
+            self._ingest_defines_relationships_isolated_parallel(defines_function_list, defines_variable_list, defines_data_structure_list, defines_class_list, neo4j_mgr)
+        else: # batched-parallel
+            self._ingest_defines_relationships_batched_parallel(defines_function_list, defines_variable_list, defines_data_structure_list, defines_class_list, neo4j_mgr)
+
+        self._ingest_has_field_relationships([f for f in processed_symbols.get('FIELD', []) if 'parent_id' in f], neo4j_mgr)
+        self._ingest_has_method_relationships([m for m in processed_symbols.get('METHOD', []) if 'parent_id' in m], neo4j_mgr)
+
+        self._ingest_inheritance_relationships(symbol_parser.inheritance_relations, neo4j_mgr)
+        self._ingest_override_relationships(symbol_parser.override_relations, neo4j_mgr)
+
+        del processed_symbols
+        gc.collect()
+
+    def _process_and_filter_symbols(self, symbols: Dict[str, Symbol], qualified_namespace_to_id: Dict[str, str]) -> Dict[str, List[Dict]]:
+        processed_symbols = defaultdict(list)
+        logger.info("Processing symbols for ingestion...")
+        for sym in tqdm(symbols.values(), desc="Processing and grouping symbols by kind"):
+            data = self.process_symbol(sym, symbols, qualified_namespace_to_id)
+            if data and 'node_label' in data:
+                processed_symbols[data['node_label']].append(data)
+        
+        return processed_symbols
+
+    def ingest_symbols_and_relationships(self, symbol_parser: SymbolParser, neo4j_mgr: Neo4jManager, defines_generation_strategy: str = "batched-parallel"):
+        # --- Phase 1: Discovery and Map Building ---
+        logger.info("Phase 1: Building scope maps and processing symbols...")
+        qualified_namespace_to_id = self._build_scope_maps(symbol_parser.symbols)
+        processed_symbols = self._process_and_filter_symbols(symbol_parser.symbols, qualified_namespace_to_id)
 
         # --- Phase 2: Node Ingestion ---
         logger.info("Phase 2: Ingesting all nodes...")

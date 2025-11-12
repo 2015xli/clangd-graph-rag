@@ -90,6 +90,7 @@ class Symbol:
     return_type: str = ""
     type: str = ""
     body_location: Optional[RelativeLocation] = None
+    parent_id: Optional[str] = None
     
     def is_function(self) -> bool:
         return self.kind in ('Function', 'InstanceMethod', 'StaticMethod', 'Constructor', 'Destructor', 'ConversionFunction')

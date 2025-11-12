@@ -271,66 +271,6 @@ class _ClangWorkerImpl:
         except AttributeError:
             return (node.location.line - 1, node.location.column - 1)
 
-# ============================================================
-# Span forest construction utilities
-# ============================================================
-
-def build_span_forest(spans_per_file: List[Tuple[str, List[SourceSpan]]]) -> Dict[str, List[SpanTreeNode]]:
-    """
-    Build a hierarchical span forest (list of roots) for each file.
-
-    Args:
-        spans_per_file: Output from Clang worker [(file_uri, [SourceSpan, ...])]
-
-    Returns:
-        Dict[file_uri, List[SpanTreeNode]]
-    """
-    forests: Dict[str, List[SpanTreeNode]] = {}
-
-    for file_uri, spans in spans_per_file:
-        if not spans:
-            forests[file_uri] = []
-            continue
-
-        # Sort spans by start position, and then by end descending (outer before inner)
-        spans_sorted = sorted(
-            spans,
-            key=lambda s: (s.body_location.start_line, s.body_location.start_column,
-                           -s.body_location.end_line, -s.body_location.end_column)
-        )
-
-        root_nodes: List[SpanTreeNode] = []
-        stack: List[SpanTreeNode] = []
-
-        for span in spans_sorted:
-            node = SpanTreeNode(span)
-            # pop stack until current node fits as child
-            while stack and not span_is_within(span, stack[-1].span):
-                stack.pop()
-
-            if stack:
-                stack[-1].add_child(node)
-            else:
-                root_nodes.append(node)
-
-            stack.append(node)
-
-        forests[file_uri] = root_nodes
-
-    return forests
-
-
-def span_is_within(inner: SourceSpan, outer: SourceSpan) -> bool:
-    """Check if 'inner' span is fully inside 'outer' span."""
-    s1, e1 = inner.body_location, outer.body_location
-    # inner.start >= outer.start AND inner.end <= outer.end
-    if (s1.start_line > e1.start_line or
-        (s1.start_line == e1.start_line and s1.start_column >= e1.start_column)):
-        if (s1.end_line < e1.end_line or
-            (s1.end_line == e1.end_line and s1.end_column <= e1.end_column)):
-            return True
-    return False
-
 class _TreesitterWorkerImpl:
     """Contains the logic to parse one file using tree-sitter."""
     def __init__(self):
@@ -532,9 +472,7 @@ class ClangParser(CompilationParser):
             worker = _ClangWorkerImpl(project_path=self.project_path, clang_include_path=self.clang_include_path)
             for entry in tqdm(compile_entries, desc="Parsing TUs (clang)"):
                 span_result, includes = worker.run(entry)
-                if span_result:
-                    file_uri, span_forest = span_result
-                    self.source_spans[file_uri] = span_forest
+                if span_result: self.source_spans.update(span_result)
                 if includes: self.include_relations.update(includes)
 
 class TreesitterParser(CompilationParser):
@@ -556,9 +494,7 @@ class TreesitterParser(CompilationParser):
             worker = _TreesitterWorkerImpl()
             for file_path in tqdm(valid_files, desc="Parsing spans (treesitter)"):
                 span_result, _ = worker.run(file_path)
-                if span_result:
-                    file_uri, span_forest = span_result
-                    self.source_spans[file_uri] = span_forest
+                if span_result: self.source_spans.update(span_result)
 
     def get_include_relations(self) -> Set[Tuple[str, str]]:
         logger.warning("Include relation extraction is not supported by TreesitterParser.")
