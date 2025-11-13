@@ -124,7 +124,7 @@ def main():
     include_graph = build_include_graph(compile_db)
 
     print("\n=== Include Graph Summary (first 3 entries) ===")
-    for k, v in list(include_graph.items())[:3]:
+    for k, v in list(include_graph.items()): #[:3]:
         print(f"{k} <- {len(v)} files")
         for inc in v:
             print(f"<-----------{inc}")

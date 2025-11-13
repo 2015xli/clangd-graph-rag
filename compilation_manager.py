@@ -128,6 +128,28 @@ class CompilationManager:
                 raise ValueError("Clang parser requires a path to compile_commands.json via --compile-commands")
             self.compile_commands_path = inferred_path
 
+    @classmethod
+    def clang_parser_kind_to_clangd_index_kind(cls, kind: str, lang: str) -> str:
+        """Converts a Clang parser kind to a Clangd index kind."""
+
+        if kind in ClangParser.NODE_KIND_FUNCTIONS:
+            return "Function"
+        elif kind in ClangParser.NODE_KIND_METHODS:
+            return "Method"
+        elif kind in ClangParser.NODE_KIND_STRUCT:
+            return "Struct"
+        elif kind in ClangParser.NODE_KIND_UNION:
+            return "Union"
+        elif kind in ClangParser.NODE_KIND_ENUM:
+            return "Enum"
+        elif kind in ClangParser.NODE_KIND_CLASSES:
+            return "Class"
+        elif kind in ClangParser.NODE_KIND_NAMESPACE:
+            return "Namespace"
+        else:
+            logger.error(f"Unknown Clang parser kind: {kind}")
+            return "Unknown"
+
     def _create_parser(self) -> CompilationParser:
         """Factory method to create the appropriate parser instance."""
         if self._parser is not None:

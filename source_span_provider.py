@@ -63,11 +63,11 @@ class SourceSpanProvider:
             
             # Use the location from the symbol to find the corresponding span
             key = (sym.name, loc.file_uri, loc.start_line, loc.start_column)
-            pair = spans_and_ids_lookup.get(key)
-            if not pair:
+            synth_id_and_span = spans_and_ids_lookup.get(key)
+            if not synth_id_and_span:
                 continue
 
-            synth_id, span = pair
+            synth_id, span = synth_id_and_span
             # Enrich the existing symbol with its body location
             sym.body_location = span.body_location
             # Map the synthetic ID to the real symbol ID
@@ -92,13 +92,15 @@ class SourceSpanProvider:
             loc = sym.definition or sym.declaration
             if not loc:
                 continue
-            
+
             key = (sym.name, loc.file_uri, loc.start_line, loc.start_column)
 
             # Fields: assign parent via enclosing container
             if sym.kind in ("Field", "Variable"):
+                parent_synth_id = ''
+                parent_id = ''
                 field_name = RelativeLocation(loc.start_line, loc.start_column, loc.end_line, loc.end_column)
-                field_span = SourceSpan(sym.name, "Field", field_name, field_name)
+                field_span = SourceSpan(sym.name, "Field", sym.language, field_name, field_name)
                 span_tree = span_tree_data.get(loc.file_uri, [])
                 container = self._find_innermost_container(span_tree, field_span)
                 if container:
@@ -116,6 +118,10 @@ class SourceSpanProvider:
 
             # Resolve the parent's ID (use the real ID if it exists, otherwise the synthetic one)
             parent_id = synthetic_id_to_index_id.get(parent_synth_id, parent_synth_id)
+            if parent_id == sym.id:
+                logger.warning(f"Found same parent id {parent_id} for {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                continue
+
             sym.parent_id = parent_id
             assigned_count += 1
 
@@ -225,7 +231,7 @@ class SourceSpanProvider:
         return spans_and_ids_lookup, parent_lookup
 
     def _collect_span_and_parent_info(self, node: SourceSpan, file_uri: str, spans_lookup, parent_lookup, parent_id: Optional[str]):
-        """Recursively populates the lookup tables from a SourceSpane."""
+        """Recursively populates the lookup tables from a SourceSpan."""
         span = node.span
         # The key uniquely identifies a symbol declaration based on its name and location
         key = (span.name, file_uri, span.name_location.start_line, span.name_location.start_column)
@@ -255,21 +261,15 @@ class SourceSpanProvider:
             end_column=span.name_location.end_column
         )
 
-        # Embed span info in the name for easier debugging in the graph
-        display_name = (
-            span.name
-            if not span.name.startswith("(anonymous")
-            else f"{span.name} [{span.body_location.start_line}:{span.body_location.start_column}]"
-        )
-
         return Symbol(
             id=synthetic_id,
-            name=display_name,
-            kind=span.kind,
+            name=span.name,
+            kind=CompilationManager.clang_parser_kind_to_clangd_index_kind(span.kind, span.lang),
             declaration=loc,
             definition=loc,
             references=[],
             scope="", # Scope is now handled by the parent_id relationship
-            language="cpp", # Assume C++ for structures discovered this way
+            language=span.lang,
             body_location=span.body_location
         )
+

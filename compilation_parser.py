@@ -11,7 +11,7 @@ import logging
 import subprocess
 import sys
 import hashlib
-from typing import List, Dict, Set, Tuple, Callable, Any, Optional
+from typing import List, Dict, Set, Tuple, Union, Any, Optional
 from pathlib import Path
 from collections import defaultdict
 from tqdm import tqdm
@@ -45,6 +45,7 @@ logger.setLevel(logging.DEBUG)
 class SourceSpan:
     name: str
     kind: str
+    lang: str
     name_location: RelativeLocation
     body_location: RelativeLocation
     
@@ -53,6 +54,7 @@ class SourceSpan:
         return cls(
             name=data['Name'],
             kind=data['Kind'],
+            lang=data['Lang'],
             name_location=RelativeLocation.from_dict(data['NameLocation']),
             body_location=RelativeLocation.from_dict(data['BodyLocation'])
         )
@@ -75,29 +77,11 @@ class _ClangWorkerImpl:
 
     # class-level cache to avoid re-processing header nodes in identical TU contexts
     # keys are tuples: (file_path, node_spelling, node_line, node_col, tu_hash)
-    _parsed_header_nodes_cache: Set[Tuple[str, str, int, int, str]] = set()
-
-    _NODE_KIND_FUNCTIONS = {
-        clang.cindex.CursorKind.FUNCTION_DECL,
-        clang.cindex.CursorKind.CXX_METHOD,
-        clang.cindex.CursorKind.CONSTRUCTOR,
-        clang.cindex.CursorKind.DESTRUCTOR,
-        clang.cindex.CursorKind.CONVERSION_FUNCTION,
-        clang.cindex.CursorKind.FUNCTION_TEMPLATE,
-    }
-
-    _NODE_KIND_DATA = {
-        clang.cindex.CursorKind.STRUCT_DECL,
-        clang.cindex.CursorKind.UNION_DECL,
-        clang.cindex.CursorKind.ENUM_DECL,
-        clang.cindex.CursorKind.CLASS_DECL,
-        clang.cindex.CursorKind.CLASS_TEMPLATE,
-        clang.cindex.CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION,
-    }
-
-    _NODE_KIND_NAMESPACES = { clang.cindex.CursorKind.NAMESPACE }
-
-    _NODE_KIND_FOR_BODY_SPANS = _NODE_KIND_FUNCTIONS | _NODE_KIND_DATA | _NODE_KIND_NAMESPACES
+    _parsed_nodes_cache: Set[
+        Union[
+            Tuple[str, str], 
+            Tuple[str, str, int, int, str]]
+    ] = set()
 
     def __init__(self, project_path: str, clang_include_path: str):
         self.project_path = os.path.abspath(project_path)
@@ -130,6 +114,7 @@ class _ClangWorkerImpl:
 
             # compute TU hash (based on relevant preprocessor flags)
             self.tu_hash = self._get_tu_hash(args)
+            self.lang = CompilationParser.get_language(file_path)
 
             # proceed to parse with args
             self._parse_translation_unit(file_path, args)
@@ -173,10 +158,10 @@ class _ClangWorkerImpl:
         file_name = node.location.file.name if node.location.file else node.translation_unit.spelling
         if not file_name or not file_name.startswith(self.project_path):
             return
-
+        
         if node.is_definition():
-            if node.kind in self._NODE_KIND_FOR_BODY_SPANS:
-                self._process_generic_node(node, file_name, node.kind.name)
+            if node.kind.name in ClangParser.NODE_KIND_FOR_BODY_SPANS:
+                self._process_generic_node(node, file_name)
 
         for c in node.get_children():
             self._walk_ast(c)
@@ -184,7 +169,7 @@ class _ClangWorkerImpl:
     # --------------------------------------------------------
     # Span processing
     # --------------------------------------------------------
-    def _process_generic_node(self, node, file_name, kind_str):
+    def _process_generic_node(self, node, file_name):
         if not self._should_process_node(node, file_name):
             return
 
@@ -198,7 +183,8 @@ class _ClangWorkerImpl:
 
         span = SourceSpan(
             name=node.spelling,
-            kind=kind_str,
+            kind=node.kind.name,
+            lang=self.lang,
             name_location=RelativeLocation(name_start_line, name_start_col, name_start_line, name_start_col + len(node.spelling)),
             body_location=RelativeLocation(body_start_line, body_start_col, body_end_line, body_end_col)
         )
@@ -207,17 +193,27 @@ class _ClangWorkerImpl:
         self.span_results[file_uri].append(span)
 
     def _should_process_node(self, node, file_name) -> bool:
-        """Avoid redundant header node processing across identical TU contexts."""
-        is_header = file_name.lower().endswith(('.h', '.hpp', '.hh', '.hxx'))
-        node_sig = (file_name, node.spelling, node.location.line, node.location.column, self.tu_hash)
+        """
+        Avoid redundant node processing across identical TU contexts
+        using Clang USR (Unified Symbol Resolution) + TU hash.
+        """
 
-        if is_header:
-            if node_sig in _ClangWorkerImpl._parsed_header_nodes_cache:
-                # already processed in this TU-hash context
-                return False
-            # record in cache so subsequent visits (in same TU or other workers with same tu_hash) skip
-            _ClangWorkerImpl._parsed_header_nodes_cache.add(node_sig)
+        # Get a stable symbol identifier
+        usr = node.get_usr() or None
 
+        # Build a compact key (USR is unique even across files if same symbol)
+        if usr:
+            node_sig = (usr, self.tu_hash)
+        else:
+            # Fallback for anonymous or macro-generated nodes
+            node_sig = (file_name, node.spelling, node.location.line, node.location.column, self.tu_hash)
+
+        cache = _ClangWorkerImpl._parsed_nodes_cache
+
+        if node_sig in cache:
+            return False
+
+        cache.add(node_sig)
         return True
 
     # --------------------------------------------------------
@@ -361,6 +357,7 @@ class CompilationParser:
     ALL_SOURCE_EXTENSIONS = C_SOURCE_EXTENSIONS + CPP_SOURCE_EXTENSIONS + CPP20_MODULE_EXTENSIONS
     ALL_HEADER_EXTENSIONS = C_HEADER_EXTENSIONS + CPP_HEADER_EXTENSIONS
     ALL_C_CPP_EXTENSIONS = ALL_SOURCE_EXTENSIONS + ALL_HEADER_EXTENSIONS
+    ALL_CPP_SOURCE_EXTENSIONS = CPP_SOURCE_EXTENSIONS + CPP20_MODULE_EXTENSIONS
 
     def __init__(self, project_path: str):
         self.project_path = project_path
@@ -375,6 +372,17 @@ class CompilationParser:
 
     def get_include_relations(self) -> Set[Tuple[str, str]]:
         return self.include_relations
+
+    @classmethod
+    def get_language(cls, file_name: str) -> str:
+        if file_name.endswith(cls.ALL_CPP_SOURCE_EXTENSIONS):
+            lang = "Cpp"
+        elif file_name.endswith(".c"):
+            lang = "C"
+        else:
+            logger.error(f"Unknown language for file: {file_name}")
+            lang = "Unknown"
+        return lang
 
     def _parallel_parse(self, items_to_process: List, parser_type: str, num_workers: int, desc: str, worker_init_args: Dict[str, Any] = None):
         """Generic parallel processing framework."""
@@ -408,6 +416,41 @@ class CompilationParser:
 
 class ClangParser(CompilationParser):
     """A parser that uses clang.cindex for semantic analysis."""
+
+    NODE_KIND_FUNCTIONS = {
+        clang.cindex.CursorKind.FUNCTION_DECL.name,
+        clang.cindex.CursorKind.FUNCTION_TEMPLATE.name,
+    }
+
+    NODE_KIND_METHODS = {
+        clang.cindex.CursorKind.CXX_METHOD.name,
+        clang.cindex.CursorKind.CONSTRUCTOR.name,
+        clang.cindex.CursorKind.DESTRUCTOR.name,
+        clang.cindex.CursorKind.CONVERSION_FUNCTION.name,
+    }
+
+    NODE_KIND_UNION = {
+        clang.cindex.CursorKind.UNION_DECL.name,
+    }
+
+    NODE_KIND_ENUM = {
+        clang.cindex.CursorKind.ENUM_DECL.name,
+    }
+
+    NODE_KIND_STRUCT = {
+        clang.cindex.CursorKind.STRUCT_DECL.name,
+    }
+
+    NODE_KIND_CLASSES = {
+        clang.cindex.CursorKind.CLASS_DECL.name,
+        clang.cindex.CursorKind.CLASS_TEMPLATE.name,
+        clang.cindex.CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION.name,
+    }
+
+    NODE_KIND_NAMESPACE = { clang.cindex.CursorKind.NAMESPACE.name }
+
+    NODE_KIND_FOR_BODY_SPANS = NODE_KIND_FUNCTIONS | NODE_KIND_METHODS | NODE_KIND_UNION | NODE_KIND_ENUM | NODE_KIND_STRUCT | NODE_KIND_CLASSES | NODE_KIND_NAMESPACE
+
     def __init__(self, project_path: str, compile_commands_path: str):
         super().__init__(project_path)
         if not clang: raise ImportError("clang library is not installed.")

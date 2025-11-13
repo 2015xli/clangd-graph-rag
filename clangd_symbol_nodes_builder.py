@@ -311,60 +311,6 @@ class SymbolProcessor:
         
         return processed_symbols
 
-    def ingest_symbols_and_relationships(self, symbol_parser: SymbolParser, neo4j_mgr: Neo4jManager, defines_generation_strategy: str = "batched-parallel"):
-        # --- Phase 1: Discovery and Map Building ---
-        logger.info("Phase 1: Building scope maps and processing symbols...")
-        qualified_namespace_to_id = self._build_scope_maps(symbol_parser.symbols)
-        processed_symbols = self._process_and_filter_symbols(symbol_parser.symbols, qualified_namespace_to_id)
-
-        # --- Phase 2: Node Ingestion ---
-        logger.info("Phase 2: Ingesting all nodes...")
-        self._ingest_namespace_nodes(processed_symbols.get('NAMESPACE', []), neo4j_mgr)
-        self._ingest_data_structure_nodes(processed_symbols.get('DATA_STRUCTURE', []), neo4j_mgr)
-        self._ingest_class_nodes(processed_symbols.get('CLASS_STRUCTURE', []), neo4j_mgr)
-        self._ingest_function_nodes(processed_symbols.get('FUNCTION', []), neo4j_mgr)
-        self._ingest_method_nodes(processed_symbols.get('METHOD', []), neo4j_mgr)
-        self._ingest_field_nodes([f for f in processed_symbols.get('FIELD', []) if 'parent_id' in f], neo4j_mgr)
-        self._ingest_variable_nodes(processed_symbols.get('VARIABLE', []), neo4j_mgr)
-
-        # --- Phase 3: Relationship Ingestion ---
-        logger.info("Phase 3: Ingesting all relationships...")
-        
-        # Consolidate and ingest all SCOPE_CONTAINS relationships
-        scope_contains_relations = []
-        for symbol_list in processed_symbols.values():
-            for symbol_data in symbol_list:
-                if "namespace_id" in symbol_data:
-                    scope_contains_relations.append({
-                        "parent_id": symbol_data["namespace_id"],
-                        "child_id": symbol_data["id"]
-                    })
-        self._ingest_scope_contains_relationships(scope_contains_relations, neo4j_mgr)
-
-        # Ingest other relationships
-        self._ingest_file_declarations(processed_symbols.get('NAMESPACE', []), neo4j_mgr)
-
-        defines_function_list = [d for d in processed_symbols.get('FUNCTION', []) if 'file_path' in d]
-        defines_variable_list = [d for d in processed_symbols.get('VARIABLE', []) if 'file_path' in d]
-        defines_data_structure_list = [d for d in processed_symbols.get('DATA_STRUCTURE', []) if 'file_path' in d]
-        defines_class_list = [d for d in processed_symbols.get('CLASS_STRUCTURE', []) if 'file_path' in d]
-
-        if defines_generation_strategy == "unwind-sequential":
-            self._ingest_defines_relationships_unwind_sequential(defines_function_list, defines_variable_list, defines_data_structure_list, defines_class_list, neo4j_mgr)
-        elif defines_generation_strategy == "isolated-parallel":
-            self._ingest_defines_relationships_isolated_parallel(defines_function_list, defines_variable_list, defines_data_structure_list, defines_class_list, neo4j_mgr)
-        else: # batched-parallel
-            self._ingest_defines_relationships_batched_parallel(defines_function_list, defines_variable_list, defines_data_structure_list, defines_class_list, neo4j_mgr)
-
-        self._ingest_has_field_relationships([f for f in processed_symbols.get('FIELD', []) if 'parent_id' in f], neo4j_mgr)
-        self._ingest_has_method_relationships([m for m in processed_symbols.get('METHOD', []) if 'parent_id' in m], neo4j_mgr)
-
-        self._ingest_inheritance_relationships(symbol_parser.inheritance_relations, neo4j_mgr)
-        self._ingest_override_relationships(symbol_parser.override_relations, neo4j_mgr)
-
-        del processed_symbols
-        gc.collect()
-
     def _ingest_function_nodes(self, function_data_list: List[Dict], neo4j_mgr: Neo4jManager):
         if not function_data_list:
             return
