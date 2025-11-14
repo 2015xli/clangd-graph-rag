@@ -48,13 +48,13 @@ class SourceSpanProvider:
         span_tree_data = self._build_span_forest(flat_span_tree_data)
 
         # 1. Build span and parent lookup tables from the SpanTree data
-        spans_and_ids_lookup, parent_synthetic_id_lookup = self._build_span_and_parent_lookups(span_tree_data)
+        spans_lookup = self._build_span_and_parent_lookups(span_tree_data)
 
         # 2. Pass 1 — Enrich existing symbols and synthesize new ones
         synthetic_symbols = {}
         synthetic_id_to_index_id = {}
         matched_count = 0
-        spans_and_ids_lookup_copy = spans_and_ids_lookup.copy()
+        spans_lookup_copy = spans_lookup.copy()
 
         for sym_id, sym in self.symbol_parser.symbols.items():
             loc = sym.definition or sym.declaration
@@ -63,21 +63,21 @@ class SourceSpanProvider:
             
             # Use the location from the symbol to find the corresponding span
             key = (sym.name, loc.file_uri, loc.start_line, loc.start_column)
-            synth_id_and_span = spans_and_ids_lookup.get(key)
-            if not synth_id_and_span:
+            id_span_parent = spans_lookup.get(key)
+            if not id_span_parent:
                 continue
 
-            synth_id, span = synth_id_and_span
+            synth_id, span, parent_id = id_span_parent
             # Enrich the existing symbol with its body location
             sym.body_location = span.body_location
             # Map the synthetic ID to the real symbol ID
             synthetic_id_to_index_id[synth_id] = sym_id
             matched_count += 1
             # Remove the span from the lookup since it's been matched
-            del spans_and_ids_lookup[key]
+            del spans_lookup[key]
 
         # Any remaining spans in the lookup are anonymous structures
-        for key, (synth_id, span) in spans_and_ids_lookup.items():
+        for key, (synth_id, span, _) in spans_lookup.items():
             file_uri = key[1]
             synthetic_symbols[synth_id] = self._create_synthetic_symbol(synth_id, span, file_uri)
 
@@ -93,12 +93,12 @@ class SourceSpanProvider:
             if not loc:
                 continue
 
+            parent_synth_id = None
+            parent_id = None
             key = (sym.name, loc.file_uri, loc.start_line, loc.start_column)
 
             # Fields: assign parent via enclosing container
             if sym.kind in ("Field", "Variable"):
-                parent_synth_id = ''
-                parent_id = ''
                 field_name = RelativeLocation(loc.start_line, loc.start_column, loc.end_line, loc.end_column)
                 field_span = SourceSpan(sym.name, "Field", sym.language, field_name, field_name)
                 span_tree = span_tree_data.get(loc.file_uri, [])
@@ -106,15 +106,19 @@ class SourceSpanProvider:
                 if container:
                     #parent_synth_id = self._make_synthetic_id(loc.file_uri, container)
                     container_key = (container.name, loc.file_uri, container.name_location.start_line, container.name_location.start_column)
-                    parent_synth_id = spans_and_ids_lookup_copy.get(container_key)[0]
+                    id_span_parent = spans_lookup_copy.get(container_key)
+                    # A container should always have a synthetic id, so no checking
+                    parent_synth_id = id_span_parent[0]
                 else:
                     logger.debug(f"Could not find container for field {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
             else:
-                parent_synth_id = parent_synthetic_id_lookup.get(key)
-
-            if not parent_synth_id:
-                logger.debug(f"Could not find parent container for {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
-                continue
+                # Other symbols: find parent id from span lookup
+                id_span_parent = spans_lookup_copy.get(key)
+                if not id_span_parent:  # No matching container found.
+                    continue
+                parent_synth_id = id_span_parent[2]
+                if not parent_synth_id: # Matching container has no parent container
+                    continue
 
             # Resolve the parent's ID (use the real ID if it exists, otherwise the synthetic one)
             parent_id = synthetic_id_to_index_id.get(parent_synth_id, parent_synth_id)
@@ -130,7 +134,7 @@ class SourceSpanProvider:
         self.matched_count = matched_count
         self.assigned_count = assigned_count
         # Cleanup
-        del span_tree_data, spans_and_ids_lookup, parent_synthetic_id_lookup, synthetic_symbols
+        del span_tree_data, spans_lookup, spans_lookup_copy, synthetic_id_to_index_id, synthetic_symbols
         gc.collect()
 
     def get_matched_count(self) -> int:
@@ -170,6 +174,7 @@ class SourceSpanProvider:
             root_nodes: List[SpanTreeNode] = []
             stack: List[SpanTreeNode] = []
 
+            debug_stack_set = set()
             for span in spans_sorted:
                 node = SpanTreeNode(span)
                 # pop stack until current node fits as child
@@ -180,8 +185,15 @@ class SourceSpanProvider:
                     stack[-1].add_child(node)
                 else:
                     root_nodes.append(node)
+                    debug_stack_set.clear()
 
                 stack.append(node)
+                
+                if False:
+                    debug_key = (span.name, span.name_location.start_line, span.name_location.start_column, span.name_location.end_line, span.name_location.end_column)
+                    if debug_key in debug_stack_set:
+                        logger.warning(f"Duplicate span found when building span forest for {file_uri}: {debug_key}")
+                    debug_stack_set.add(debug_key)
 
             forests[file_uri] = root_nodes
 
@@ -190,7 +202,16 @@ class SourceSpanProvider:
     def _span_is_within(self, inner: SourceSpan, outer: SourceSpan) -> bool:
         """Check if 'inner' span is fully inside 'outer' span."""
         s1, e1 = inner.body_location, outer.body_location
-        # inner.start >= outer.start AND inner.end <= outer.end
+
+        # Condition: inner.start >= outer.start AND inner.end <= outer.end
+
+        # If outer and inner are completely overlapping, they are not nested.
+        if s1.start_line == e1.start_line and s1.start_column == e1.start_column and s1.end_line == e1.end_line and s1.end_column == e1.end_column:
+            return False
+        # If outer span is a single line, it cannot contain inner span
+        if e1.start_line == e1.end_line: 
+            return False
+
         if (s1.start_line > e1.start_line or
             (s1.start_line == e1.start_line and s1.start_column >= e1.start_column)):
             if (s1.end_line < e1.end_line or
@@ -222,33 +243,33 @@ class SourceSpanProvider:
         1) spans_and_ids_lookup: (name, file_uri, name_line, name_col) -> (synthetic_id, SourceSpan)
         2) parent_lookup: (child_key) -> parent_synthetic_id
         """
-        spans_and_ids_lookup = {}
-        parent_lookup = {}
-
+        spans_lookup = {}
         for file_uri, span_forest in span_tree_data.items():
             for node in span_forest:
-                self._collect_span_and_parent_info(node, file_uri, spans_and_ids_lookup, parent_lookup, parent_id=None)
-        return spans_and_ids_lookup, parent_lookup
+                self._collect_span_and_parent_info(node, file_uri, spans_lookup, parent_id=None)
+        return spans_lookup
 
-    def _collect_span_and_parent_info(self, node: SourceSpan, file_uri: str, spans_lookup, parent_lookup, parent_id: Optional[str]):
+    def _collect_span_and_parent_info(self, node: SpanTreeNode, file_uri: str, spans_lookup: Dict, parent_id: Optional[str]):
         """Recursively populates the lookup tables from a SourceSpan."""
         span = node.span
         # The key uniquely identifies a symbol declaration based on its name and location
         key = (span.name, file_uri, span.name_location.start_line, span.name_location.start_column)
         
-        synth_id = self._make_synthetic_id(file_uri, span)
-        spans_lookup[key] = (synth_id, span)
-        
+        synth_id = self._make_synthetic_id(file_uri, span)     
         if parent_id:
-            parent_lookup[key] = parent_id
+            spans_lookup[key] = (synth_id, span, parent_id)
+        else:
+            spans_lookup[key] = (synth_id, span, None)
 
         # Recurse for children, passing the current node's synthetic ID as their parent_id
         for child in node.children:
-            self._collect_span_and_parent_info(child, file_uri, spans_lookup, parent_lookup, parent_id=synth_id)
+            self._collect_span_and_parent_info(child, file_uri, spans_lookup, parent_id=synth_id)
 
     def _make_synthetic_id(self, file_uri: str, span: SourceSpan) -> str:
         """Generates a deterministic synthetic ID for any structure span."""
-        id_str = f"{file_uri}#{span.body_location.start_line}_{span.body_location.start_column}"
+        id_str = (f"{file_uri}#"
+        f"{span.name_location.start_line}_{span.name_location.start_column}_{span.name_location.end_line}_{span.name_location.end_column}"
+        f"{span.body_location.start_line}_{span.body_location.start_column}_{span.body_location.end_line}_{span.body_location.end_column}")
         return hashlib.md5(id_str.encode()).hexdigest()
 
     def _create_synthetic_symbol(self, synthetic_id: str, span: SourceSpan, file_uri: str) -> Symbol:

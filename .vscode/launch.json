@@ -12,6 +12,13 @@
             "args": ["~/Public/llama.cpp/llama_cpp_clangd_index.yaml", "~/Public/llama.cpp/", "--compile-commands", "~/Public/llama.cpp/compile_commands.json", "--generate-summary"]
         },
         {
+            "name": "Python Debugger: WSL2 Graph RAG builder",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "clangd_graph_rag_builder.py",
+            "args": ["../wsl2-graph-built-clang21.1.2/linux-clangd.yaml", "~/Public/microsoft-WSL2-Linux-Kernel-427645e/", "--generate-summary"]
+        },
+        {
             "name": "Python Debugger: Call graph builder",
             "type": "debugpy",
             "request": "launch",

@@ -56,11 +56,11 @@ The final implementation uses a purely spatial, span-based approach, with the `S
     *   **Pass 1 (Enrich & Synthesize):** It iterates through the real symbols from the `clangd` index. For each symbol, it finds its corresponding span in the lookup table, enriches the symbol with its `body_location`, and creates a mapping from the `synthetic_id` to the real symbol's `id`. Any spans left in the lookup table are identified as **anonymous structures**, and new "synthetic" `Symbol` objects are created for them and added to the main symbol list.
     *   **Pass 2 (Link Parents):** With a complete list of all symbols (real and synthetic), it iterates through them again. Using the parent lookup map, it finds the resolved ID of the lexical parent for each symbol and attaches it as a `parent_id` attribute to the symbol object.
 
-3.  **`clangd_symbol_nodes_builder.py` - Ingestion:**
-    *   The main `ingest_symbols_and_relationships` method was updated to be the final assembly point.
-    *   It now contains a loop that prepares data for all relationship types in a single pass. For every symbol with a `parent_id`, it adds a `(parent_id, child_id)` pair to a `has_nested_relations` list.
-    *   Crucially, this loop **pre-filters** the pairs based on the parent and child node labels to ensure they conform to the strict rules for the `:HAS_NESTED` relationship.
-    *   A new method, `_ingest_nesting_relationships`, was added to efficiently batch-ingest these pre-filtered pairs, creating the final `(parent)-[:HAS_NESTED]->(child)` relationships in the graph.
+3.  **`clangd_symbol_nodes_builder.py` - Optimized Relationship Ingestion:**
+    *   The main `ingest_symbols_and_relationships` method was updated to efficiently prepare relationship data.
+    *   Instead of just creating a flat list, the data collection loop now creates a **dictionary that groups the `:HAS_NESTED` relationship pairs by their `(parent_label, child_label)` combination**. This pre-filtering is done in Python for efficiency.
+    *   The new `_ingest_nesting_relationships` method receives this grouped dictionary. It then iterates through each group and executes a separate, highly-optimized Cypher query for that specific label combination.
+    *   By including the labels directly in the `MATCH` clause (e.g., `MATCH (parent:CLASS_STRUCTURE {id: ...})`), the query can make full use of Neo4j's indexes, avoiding slow database scans and dramatically improving ingestion performance.
 
 ### 3.3. Other Implementation Details
 
