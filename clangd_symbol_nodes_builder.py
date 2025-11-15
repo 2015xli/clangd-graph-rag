@@ -175,26 +175,17 @@ class SymbolProcessor:
                     sym.body_location.end_column
                 ]
         
-        elif sym.kind == "Field":
+        elif sym.kind in ("Field"):
             symbol_data["node_label"] = "FIELD"
             symbol_data.update({"type": sym.type, "is_static": False})
 
-        elif sym.kind == "Variable":            
-            # Check if the parent is a Class/Struct, making this a static field
-            parent_id = symbol_data.get("parent_id")
-            if parent_id:
-                parent_sym = all_symbols.get(parent_id)
-                if parent_sym and parent_sym.kind in ("Class", "Struct"):
-                    symbol_data["node_label"] = "FIELD"
-                    symbol_data.update({"type": sym.type, "is_static": True})
-                else: # parent is not a class/struct, can be namespace
-                    symbol_data["node_label"] = "VARIABLE"
-                    symbol_data.update({"type": sym.type})
+        elif sym.kind in ("StaticProperty", "EnumConstant"):
+            symbol_data["node_label"] = "FIELD"
+            symbol_data.update({"type": sym.type, "is_static": True})
 
-            else:
-                # No parent, so it's a global variable
-                symbol_data["node_label"] = "VARIABLE"
-                symbol_data.update({"type": sym.type})
+        elif sym.kind == "Variable":            
+            symbol_data["node_label"] = "VARIABLE"
+            symbol_data.update({"type": sym.type})
         else:
             return None
 

@@ -11,13 +11,15 @@ synthesizing new Symbol objects for anonymous entities.
 import logging
 import gc
 import hashlib
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Set
+from urllib.parse import urlparse, unquote
 
 from clangd_index_yaml_parser import SymbolParser, Symbol, Location, RelativeLocation
 from compilation_manager import CompilationManager
 from compilation_parser import SourceSpan, SpanTreeNode
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 class SourceSpanProvider:
     """
@@ -43,10 +45,32 @@ class SourceSpanProvider:
             logger.warning("No SymbolParser provided; cannot enrich symbols.")
             return
 
+        logger.info("Filtering symbols to only include those in the project path.")
+        project_path = self.compilation_manager.project_path
+        new_symbols = {}
+        for sym_id, sym in self.symbol_parser.symbols.items():
+            loc = sym.definition or sym.declaration
+            if not loc:
+                continue
+            sym_abs_path = unquote(urlparse(loc.file_uri).path)
+            if not sym_abs_path.startswith(project_path):
+                if sym.kind not in ("Namespace"):
+                    continue
+            
+            new_symbols[sym_id] = sym
+
+        logger.info(f"Filtered {len(self.symbol_parser.symbols)} symbols to {len(new_symbols)} symbols.")
+        del self.symbol_parser.symbols
+        gc.collect()
+
+        self.symbol_parser.symbols = new_symbols
+
+        # 0. Get span data
         flat_span_tree_data = self.compilation_manager.get_source_spans()
         logger.info(f"Processing SpanTrees from {len(flat_span_tree_data)} files for enrichment.")
         span_tree_data = self._build_span_forest(flat_span_tree_data)
-
+        del flat_span_tree_data
+        gc.collect()
         # 1. Build span and parent lookup tables from the SpanTree data
         spans_lookup = self._build_span_and_parent_lookups(span_tree_data)
 
@@ -98,9 +122,9 @@ class SourceSpanProvider:
             key = (sym.name, loc.file_uri, loc.start_line, loc.start_column)
 
             # Fields: assign parent via enclosing container
-            if sym.kind in ("Field", "Variable"):
+            if sym.kind in ("Field", "Variable", "EnumConstant", "StaticProperty"):
                 field_name = RelativeLocation(loc.start_line, loc.start_column, loc.end_line, loc.end_column)
-                field_span = SourceSpan(sym.name, "Field", sym.language, field_name, field_name)
+                field_span = SourceSpan(sym.name, "Variable", sym.language, field_name, field_name)
                 span_tree = span_tree_data.get(loc.file_uri, [])
                 container = self._find_innermost_container(span_tree, field_span)
                 if container:
@@ -110,14 +134,15 @@ class SourceSpanProvider:
                     # A container should always have a synthetic id, so no checking
                     parent_synth_id = id_span_parent[0]
                 else:
-                    logger.debug(f"Could not find container for field {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                    logger.debug(f"Could not find container for {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
             else:
                 # Other symbols: find parent id from span lookup
                 id_span_parent = spans_lookup_copy.get(key)
-                if not id_span_parent:  # No matching container found.
+                if not id_span_parent:  # No matching container found. Can be non-container symbols.
+                    logger.debug(f"Could not find container for {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
                     continue
                 parent_synth_id = id_span_parent[2]
-                if not parent_synth_id: # Matching container has no parent container
+                if not parent_synth_id: # Matching container has no parent container. Is top level.
                     continue
 
             # Resolve the parent's ID (use the real ID if it exists, otherwise the synthetic one)
@@ -147,7 +172,7 @@ class SourceSpanProvider:
     # Span forest construction utilities
     # ============================================================
 
-    def _build_span_forest(self, spans_per_file: Dict[str, List[SourceSpan]]) -> Dict[str, List[SpanTreeNode]]:
+    def _build_span_forest(self, spans_per_file: Dict[str, Set[SourceSpan]]) -> Dict[str, List[SpanTreeNode]]:
         """
         Build a hierarchical span forest (list of roots) for each file.
 
@@ -208,8 +233,9 @@ class SourceSpanProvider:
         # If outer and inner are completely overlapping, they are not nested.
         if s1.start_line == e1.start_line and s1.start_column == e1.start_column and s1.end_line == e1.end_line and s1.end_column == e1.end_column:
             return False
-        # If outer span is a single line, it cannot contain inner span
-        if e1.start_line == e1.end_line: 
+        # If outer span is a single line, it cannot contain inner span, unless inner span is just a variable (Variable or Field)
+        # We only compare with Variable because we create fake variable spans for both fields and variables
+        if inner.kind != "Variable" and e1.start_line == e1.end_line: 
             return False
 
         if (s1.start_line > e1.start_line or
@@ -267,8 +293,8 @@ class SourceSpanProvider:
 
     def _make_synthetic_id(self, file_uri: str, span: SourceSpan) -> str:
         """Generates a deterministic synthetic ID for any structure span."""
-        id_str = (f"{file_uri}#"
-        f"{span.name_location.start_line}_{span.name_location.start_column}_{span.name_location.end_line}_{span.name_location.end_column}"
+        id_str = (f"{file_uri}#{span.name}#{span.kind}#{span.lang}"
+        f"{span.name_location.start_line}_{span.name_location.start_column}"
         f"{span.body_location.start_line}_{span.body_location.start_column}_{span.body_location.end_line}_{span.body_location.end_column}")
         return hashlib.md5(id_str.encode()).hexdigest()
 
@@ -285,7 +311,7 @@ class SourceSpanProvider:
         return Symbol(
             id=synthetic_id,
             name=span.name,
-            kind=CompilationManager.clang_parser_kind_to_clangd_index_kind(span.kind, span.lang),
+            kind=self.compilation_manager.parser_kind_to_index_kind(span.kind, span.lang),
             declaration=loc,
             definition=loc,
             references=[],
