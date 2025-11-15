@@ -9,7 +9,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "clangd_graph_rag_builder.py",
-            "args": ["~/Public/llama.cpp/llama_cpp_clangd_index.yaml", "~/Public/llama.cpp/", "--compile-commands", "~/Public/llama.cpp/compile_commands.json", "--generate-summary"]
+            "args": ["~/Public/llama.cpp/llama_cpp_clangd_index.yaml", "~/Public/llama.cpp/", "--compile-commands", "~/Public/llama.cpp/compile_commands.json", "--num-parse-workers", "1"]
         },
         {
             "name": "Python Debugger: WSL2 Graph RAG builder",
@@ -31,7 +31,14 @@
             "type": "debugpy",
             "request": "launch",
             "program": "clangd_graph_rag_builder.py",
-            "args": ["../../mini-jvm/graphrag/original/korp_clangd_21.x.yaml", "../../mini-jvm", "--compile-commands", "../../mini-jvm/graphrag/update/update_compile_commands.json", "--generate-summary", "--llm-api", "fake", "--ingest-batch-size", "10", "--log-batch-size", "10"]
+            "args": ["../../mini-jvm/graphrag/original/korp_clangd_21.x.yaml", "../../mini-jvm", "--compile-commands", "../../mini-jvm/graphrag/original/original_compile_commands.json", "--generate-summary", "--llm-api", "fake", "--ingest-batch-size", "10", "--log-batch-size", "10"]
+        },
+        {
+            "name": "Python Debugger: MiniJVM (header) Graph RAG builder",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "clangd_graph_rag_builder.py",
+            "args": ["../../mini-jvm/graphrag/original/korp_clangd_21.x.yaml", "../../mini-jvm", "--compile-commands", "../../mini-jvm/graphrag/original/original_compile_commands.json", "--num-parse-workers", "1"]
         },
         {
             "name": "Python Debugger: MiniJVM Graph RAG updater",

@@ -17,7 +17,7 @@ try:
 except ImportError:
     git = None
 
-from compilation_parser import CompilationParser, ClangParser, TreesitterParser
+from compilation_parser import CompilationParser, ClangParser, TreesitterParser, SourceSpan
 from git_manager import get_git_repo
 
 logger = logging.getLogger(__name__)
@@ -128,27 +128,8 @@ class CompilationManager:
                 raise ValueError("Clang parser requires a path to compile_commands.json via --compile-commands")
             self.compile_commands_path = inferred_path
 
-    @classmethod
-    def clang_parser_kind_to_clangd_index_kind(cls, kind: str, lang: str) -> str:
-        """Converts a Clang parser kind to a Clangd index kind."""
-
-        if kind in ClangParser.NODE_KIND_FUNCTIONS:
-            return "Function"
-        elif kind in ClangParser.NODE_KIND_METHODS:
-            return "Method"
-        elif kind in ClangParser.NODE_KIND_STRUCT:
-            return "Struct"
-        elif kind in ClangParser.NODE_KIND_UNION:
-            return "Union"
-        elif kind in ClangParser.NODE_KIND_ENUM:
-            return "Enum"
-        elif kind in ClangParser.NODE_KIND_CLASSES:
-            return "Class"
-        elif kind in ClangParser.NODE_KIND_NAMESPACE:
-            return "Namespace"
-        else:
-            logger.error(f"Unknown Clang parser kind: {kind}")
-            return "Unknown"
+    def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
+        return self._parser.parser_kind_to_index_kind(kind, lang)
 
     def _create_parser(self) -> CompilationParser:
         """Factory method to create the appropriate parser instance."""
@@ -189,7 +170,7 @@ class CompilationManager:
         gc.collect()
         return
 
-    def get_source_spans(self) -> Dict[str, List]:
+    def get_source_spans(self) -> Dict[str, Set[SourceSpan]]:
         if not hasattr(self, '_parser') or self._parser is None:
             raise RuntimeError("CompilationManager has not parsed any files yet.")
         return self._parser.get_source_spans()

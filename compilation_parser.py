@@ -41,7 +41,7 @@ logger.setLevel(logging.DEBUG)
 # ============================================================
 # Data classes for span representation
 # ============================================================
-@dataclass
+@dataclass(frozen=True)
 class SourceSpan:
     name: str
     kind: str
@@ -75,14 +75,6 @@ class SpanTreeNode:
 class _ClangWorkerImpl:
     """Parses a single compilation entry and extracts SourceSpans + include relations."""
 
-    # class-level cache to avoid re-processing header nodes in identical TU contexts
-    # keys are tuples: (file_path, node_spelling, node_line, node_col, tu_hash)
-    _parsed_nodes_cache: Set[
-        Union[
-            Tuple[str, str], 
-            Tuple[str, str, int, int, str]]
-    ] = set()
-
     def __init__(self, project_path: str, clang_include_path: str):
         self.project_path = os.path.abspath(project_path)
         self.clang_include_path = clang_include_path
@@ -91,6 +83,15 @@ class _ClangWorkerImpl:
         self.span_results = None
         self.include_relations = None
         self.tu_hash = None
+
+        # Object-level cache to avoid re-processing header nodes in identical TU contexts
+        # Since we use since _ClangWorkerImpl as a singleton in a worker process, this cache is shared across all invocations
+        # keys are tuples: (file_path, node_spelling, node_line, node_col, tu_hash)
+        self._parsed_nodes_cache: Set[
+            Union[
+                Tuple[str, str], 
+                Tuple[str, str, int, int, str]]
+        ] = set()
 
     # --------------------------------------------------------
     # Main entry
@@ -102,7 +103,7 @@ class _ClangWorkerImpl:
           - set of include relations (src_abs_path, include_abs_path)
         """
         self.entry = entry
-        self.span_results = defaultdict(list)   # file_uri → [SourceSpan]
+        self.span_results = defaultdict(set)   # file_uri → [SourceSpan]
         self.include_relations = set()          # (src_file, included_file)
         self.tu_hash = None
 
@@ -145,9 +146,10 @@ class _ClangWorkerImpl:
         # collect include relations
         for inc in tu.get_includes():
             if inc.source and inc.include:
-                self.include_relations.add(
-                    (os.path.abspath(inc.source.name), os.path.abspath(inc.include.name))
-                )
+                src_file = os.path.abspath(inc.source.name)
+                include_file = os.path.abspath(inc.include.name)
+                if src_file.startswith(self.project_path) and include_file.startswith(self.project_path):
+                    self.include_relations.add((src_file, include_file))
 
         self._walk_ast(tu.cursor)
 
@@ -156,11 +158,15 @@ class _ClangWorkerImpl:
     # --------------------------------------------------------
     def _walk_ast(self, node):
         file_name = node.location.file.name if node.location.file else node.translation_unit.spelling
+        file_name = os.path.abspath(file_name) if file_name else None
+        
         if not file_name or not file_name.startswith(self.project_path):
             return
         
         if node.is_definition():
             if node.kind.name in ClangParser.NODE_KIND_FOR_BODY_SPANS:
+                if not self._should_process_node(node, file_name):
+                    return
                 self._process_generic_node(node, file_name)
 
         for c in node.get_children():
@@ -170,11 +176,8 @@ class _ClangWorkerImpl:
     # Span processing
     # --------------------------------------------------------
     def _process_generic_node(self, node, file_name):
-        if not self._should_process_node(node, file_name):
-            return
-
         try:
-            name_start_line, name_start_col = self.get_symbol_name_location(node)
+            name_start_line, name_start_col = self._get_symbol_name_location(node)
         except Exception:
             name_start_line, name_start_col = node.location.line - 1, node.location.column - 1
 
@@ -190,29 +193,23 @@ class _ClangWorkerImpl:
         )
 
         file_uri = f"file://{os.path.abspath(file_name)}"
-        self.span_results[file_uri].append(span)
+        self.span_results[file_uri].add(span)
+
+        if False:
+            if file_name.endswith("minja/minja.hpp"):
+                if node.spelling == "ForTemplateToken":
+                    logger.info(f"Processing {file_uri}, {span}")
+
+
 
     def _should_process_node(self, node, file_name) -> bool:
         """
-        Avoid redundant node processing across identical TU contexts
-        using Clang USR (Unified Symbol Resolution) + TU hash.
+        Avoid redundant node processing across identical TU contexts using TU hash and exact location.
         """
-
-        # Get a stable symbol identifier
-        usr = node.get_usr() or None
-
-        # Build a compact key (USR is unique even across files if same symbol)
-        if usr:
-            node_sig = (usr, self.tu_hash)
-        else:
-            # Fallback for anonymous or macro-generated nodes
-            node_sig = (file_name, node.spelling, node.location.line, node.location.column, self.tu_hash)
-
-        cache = _ClangWorkerImpl._parsed_nodes_cache
-
+        node_sig = (file_name, node.spelling, node.location.line, node.location.column, node.extent.start.line, node.extent.start.column, node.extent.end.line, node.extent.end.column, self.tu_hash)
+        cache = self._parsed_nodes_cache
         if node_sig in cache:
             return False
-
         cache.add(node_sig)
         return True
 
@@ -248,7 +245,7 @@ class _ClangWorkerImpl:
         h = hashlib.md5(" ".join(relevant_sorted).encode("utf-8")).hexdigest()
         return h[:16]
 
-    def get_symbol_name_location(self, node):
+    def _get_symbol_name_location(self, node):
         """Return zero-based (line, column) for symbol's name."""
         for tok in node.get_tokens():
             if tok.spelling == node.spelling:
@@ -361,7 +358,7 @@ class CompilationParser:
 
     def __init__(self, project_path: str):
         self.project_path = project_path
-        self.source_spans: Dict[str, List[SourceSpan]] = {} # Changed to Dict[FileURI, List[SpanNode]]
+        self.source_spans: Dict[str, Set[SourceSpan]] = defaultdict(set) # Changed to Dict[FileURI, Set[SpanNode]]
         self.include_relations: Set[Tuple[str, str]] = set()
 
     def parse(self, files_to_parse: List[str], num_workers: int = 1):
@@ -372,6 +369,9 @@ class CompilationParser:
 
     def get_include_relations(self) -> Set[Tuple[str, str]]:
         return self.include_relations
+
+    def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
+        raise NotImplementedError
 
     @classmethod
     def get_language(cls, file_name: str) -> str:
@@ -386,7 +386,7 @@ class CompilationParser:
 
     def _parallel_parse(self, items_to_process: List, parser_type: str, num_workers: int, desc: str, worker_init_args: Dict[str, Any] = None):
         """Generic parallel processing framework."""
-        all_spans = {}
+        all_spans = defaultdict(set)
         all_includes = set()
         
         initargs = (parser_type, worker_init_args or {})
@@ -401,8 +401,11 @@ class CompilationParser:
             for future in tqdm(as_completed(future_to_item), total=len(items_to_process), desc=desc):
                 try:
                     span_result, includes = future.result()
-                    if span_result: all_spans.update(span_result)
                     if includes: all_includes.update(includes)
+                    if not span_result: continue
+                    for file_uri, spans in span_result.items():
+                        all_spans[file_uri].update(spans)
+
                 except Exception as e:
                     item = future_to_item[future]
                     file_path = item if isinstance(item, str) else item.get('file', 'unknown')
@@ -515,8 +518,39 @@ class ClangParser(CompilationParser):
             worker = _ClangWorkerImpl(project_path=self.project_path, clang_include_path=self.clang_include_path)
             for entry in tqdm(compile_entries, desc="Parsing TUs (clang)"):
                 span_result, includes = worker.run(entry)
-                if span_result: self.source_spans.update(span_result)
                 if includes: self.include_relations.update(includes)
+                if not span_result: continue
+                for file_uri, spans in span_result.items():
+                    self.source_spans[file_uri].update(spans)
+
+        if False:        
+            debug_file = "file:///home/xli/Public/llama.cpp/vendor/minja/minja.hpp"
+            span_result = self.source_spans.get(debug_file)
+            if span_result:
+                logger.info(f"================ Processing {debug_file}=============")
+                for span in span_result:
+                    logger.info(f"Processing {span}")
+        
+    def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
+        """Converts a Clang parser kind to a Clangd index kind."""
+
+        if kind in ClangParser.NODE_KIND_FUNCTIONS:
+            return "Function"
+        elif kind in ClangParser.NODE_KIND_METHODS:
+            return "Method"
+        elif kind in ClangParser.NODE_KIND_STRUCT:
+            return "Struct"
+        elif kind in ClangParser.NODE_KIND_UNION:
+            return "Union"
+        elif kind in ClangParser.NODE_KIND_ENUM:
+            return "Enum"
+        elif kind in ClangParser.NODE_KIND_CLASSES:
+            return "Class"
+        elif kind in ClangParser.NODE_KIND_NAMESPACE:
+            return "Namespace"
+        else:
+            logger.error(f"Unknown Clang parser kind: {kind}")
+            return "Unknown"
 
 class TreesitterParser(CompilationParser):
     """A parser that uses Tree-sitter for syntactic analysis."""
@@ -538,6 +572,10 @@ class TreesitterParser(CompilationParser):
             for file_path in tqdm(valid_files, desc="Parsing spans (treesitter)"):
                 span_result, _ = worker.run(file_path)
                 if span_result: self.source_spans.update(span_result)
+
+    def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
+        logger.warning("Node kind conversion is not supported by TreesitterParser.")
+        return kind
 
     def get_include_relations(self) -> Set[Tuple[str, str]]:
         logger.warning("Include relation extraction is not supported by TreesitterParser.")
