@@ -103,8 +103,13 @@ class _ClangWorkerImpl:
           - set of include relations (src_abs_path, include_abs_path)
         """
         self.entry = entry
+<<<<<<< HEAD
         self.span_results = defaultdict(set)   # file_uri → {SourceSpan}
         self.include_relations = set()          # set {(src_file, included_file)}
+=======
+        self.span_results = defaultdict(set)   # file_uri → [SourceSpan]
+        self.include_relations = set()          # (src_file, included_file)
+>>>>>>> 75a1ad53990d1738561375bfc5dd44ea8c75c3f1
         self.tu_hash = None
 
         file_path = self.entry['file']
