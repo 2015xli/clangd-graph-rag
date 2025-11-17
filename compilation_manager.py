@@ -27,8 +27,9 @@ logger = logging.getLogger(__name__)
 class ParserCache:
     """Handles caching of extracted data (function spans and include relations)."""
     def __init__(self, folder: str, cache_path_spec: Optional[str] = None):
-        self.folder = folder
-        self.repo = get_git_repo(folder)
+        abs_folder = os.path.abspath(folder)
+        self.folder = abs_folder
+        self.repo = get_git_repo(abs_folder)
         self.cache_path = self._get_cache_path(cache_path_spec)
         self.source_files: Optional[list[str]] = None
 

@@ -122,7 +122,9 @@ class SourceSpanProvider:
             key = (sym.name, loc.file_uri, loc.start_line, loc.start_column)
 
             # Fields: assign parent via enclosing container
-            if sym.kind in ("Field", "Variable", "EnumConstant", "StaticProperty"):
+            variable_kind = {"Field", "Variable", "EnumConstant", "StaticProperty"}
+            function_kind = {"Constructor", "Destructor", "InstanceMethod", "ConversionFunction"}
+            if sym.kind in variable_kind or sym.kind in function_kind and not sym.definition:
                 field_name = RelativeLocation(loc.start_line, loc.start_column, loc.end_line, loc.end_column)
                 field_span = SourceSpan(sym.name, "Variable", sym.language, field_name, field_name)
                 span_tree = span_tree_data.get(loc.file_uri, [])
@@ -137,8 +139,12 @@ class SourceSpanProvider:
                     logger.debug(f"Could not find container for {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
             else:
                 # Other symbols: find parent id from span lookup
+                if True:
+                    if sym.scope == "llama_memory_i::":
+                        logger.debug(f"Found structure for {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+
                 id_span_parent = spans_lookup_copy.get(key)
-                if not id_span_parent:  # No matching container found. Can be non-container symbols.
+                if not id_span_parent:  # No matching container found. Can be non-container symbols like TypeAlias.
                     logger.debug(f"Could not find container for {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
                     continue
                 parent_synth_id = id_span_parent[2]

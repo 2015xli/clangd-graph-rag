@@ -82,16 +82,11 @@ class _ClangWorkerImpl:
         self.entry = None
         self.span_results = None
         self.include_relations = None
-        self.tu_hash = None
 
-        # Object-level cache to avoid re-processing header nodes in identical TU contexts
+        # file-level cache to avoid re-processing header nodes in identical TU contexts
         # Since we use since _ClangWorkerImpl as a singleton in a worker process, this cache is shared across all invocations
-        # keys are tuples: (file_path, node_spelling, node_line, node_col, tu_hash)
-        self._parsed_nodes_cache: Set[
-            Union[
-                Tuple[str, str], 
-                Tuple[str, str, int, int, str]]
-        ] = set()
+        # type: Dict[tu_hash, Set[header_filepath_hash]]
+        self._global_header_cache:Dict[str, Set[str]] = defaultdict(set)
 
     # --------------------------------------------------------
     # Main entry
@@ -105,7 +100,11 @@ class _ClangWorkerImpl:
         self.entry = entry
         self.span_results = defaultdict(set)   # file_uri → {SourceSpan}
         self.include_relations = set()          # set {(src_file, included_file)}
-        self.tu_hash = None
+        self._tu_hash = None
+        # Local per-TU header cache
+        self._local_header_cache: Set[str] = set()
+        # previously processed global headers
+        self._processed_global_headers: Optional[Set[str]] = None
 
         file_path = self.entry['file']
         original_dir = os.getcwd()
@@ -114,11 +113,14 @@ class _ClangWorkerImpl:
             args = self._sanitize_args(self.entry['arguments'], file_path)
 
             # compute TU hash (based on relevant preprocessor flags)
-            self.tu_hash = self._get_tu_hash(args)
+            self._tu_hash = self._get_tu_hash(args)
+            self._processed_global_headers = self._global_header_cache.get(self._tu_hash, None)
+
             self.lang = CompilationParser.get_language(file_path)
 
             # proceed to parse with args
             self._parse_translation_unit(file_path, args)
+
         except clang.cindex.TranslationUnitLoadError as e:
             logger.error(f"Clang worker failed to parse {file_path}: {e}")
         except Exception as e:
@@ -126,6 +128,10 @@ class _ClangWorkerImpl:
         finally:
             os.chdir(original_dir)
 
+        # -----------------------------
+        # Merge local header cache → global header cache
+        # -----------------------------
+        self._global_header_cache[self._tu_hash].update(self._local_header_cache)
 
         return self.span_results, self.include_relations
 
@@ -159,16 +165,16 @@ class _ClangWorkerImpl:
     def _walk_ast(self, node):
         file_name = node.location.file.name if node.location.file else node.translation_unit.spelling
         file_name = os.path.abspath(file_name) if file_name else None
-        
         if not file_name or not file_name.startswith(self.project_path):
             return
-        
-        if node.is_definition():
-            if node.kind.name in ClangParser.NODE_KIND_FOR_BODY_SPANS:
-                if not self._should_process_node(node, file_name):
-                    return
-                self._process_generic_node(node, file_name)
 
+        # Now process this node normally
+        if node.is_definition() and node.kind.name in ClangParser.NODE_KIND_FOR_BODY_SPANS:
+            if not self._should_process_node(node, file_name):
+                return
+            self._process_generic_node(node, file_name)
+
+        # Recurse
         for c in node.get_children():
             self._walk_ast(c)
 
@@ -204,46 +210,101 @@ class _ClangWorkerImpl:
 
     def _should_process_node(self, node, file_name) -> bool:
         """
-        Avoid redundant node processing across identical TU contexts using TU hash and exact location.
+        Avoid redundant node processing across identical TU contexts using TU hash and exact header file path.
         """
-        node_sig = (file_name, node.spelling, node.location.line, node.location.column, node.extent.start.line, node.extent.start.column, node.extent.end.line, node.extent.end.column, self.tu_hash)
-        cache = self._parsed_nodes_cache
-        if node_sig in cache:
-            return False
-        cache.add(node_sig)
+        return True
+        # Don't skip main file, the rest are headers
+        if file_name != self.entry['file']:              
+            if self._processed_global_headers and file_name in self._processed_global_headers:
+                return False
+
+            # For this TU, we record the header that is not in the global header cache. 
+            # We don't use local header cache to avoid redundant processing, since this header has not been processed yet.
+            self._local_header_cache.add(file_name)
+
         return True
 
     # --------------------------------------------------------
     # Helpers
     # --------------------------------------------------------
+    def _get_tu_hash(self, args: List[str]) -> str:
+        """
+        Compute a deterministic hash representing the complete TU preprocessing and
+        language context. This is crucial for accurate caching.
+
+        We include flags that affect:
+        1. Preprocessor macros (-D, -U, -include)
+        2. Header search paths (-I, -isystem, -iquote)
+        3. Language dialect (-std=, -x, -f)
+        """
+        relevant = []
+        # Iterate through arguments, using index to handle two-part flags
+        i = 0
+        while i < len(args):
+            a = args[i]
+            # --- 1. Flags that are *always* relevant ---
+            # Preprocessor (Defines/Undefines)
+            if a.startswith(("-D", "-U")):
+                relevant.append(a)
+            # Language/Target Dialects (often prefix-value: -std=c++17)
+            elif a.startswith(("-std=", "-x", "--target=", "-f")):
+                relevant.append(a)
+            # --- 2. Flags that can be one-part or two-part (Include Paths) ---
+            # Include Path and Forced Include Flags (e.g., -I, -isystem, -iquote, -include)
+            elif a in ('-I', '-isystem', '-iquote', '-include'):
+                # Append the flag itself
+                relevant.append(a)
+                # Check for the value part (the path/filename), which is the next argument
+                if i + 1 < len(args):
+                    relevant.append(args[i + 1])
+                    i += 1  # Skip the next iteration since we just consumed args[i+1]
+            
+            # Include Path Flags that are one-part (e.g., -I/path/to/dir)
+            elif a.startswith(("-I", "-isystem", "-iquote")):
+                relevant.append(a)
+            # Move to the next argument
+            i += 1
+
+        # Sort for determinism across argument order variations
+        relevant_sorted = sorted(relevant)
+        
+        # Combine into a single string for hashing
+        hash_input = " ".join(relevant_sorted)
+        
+        # Compute the MD5 hash and return a short hex string
+        h = hashlib.md5(hash_input.encode("utf-8")).hexdigest()
+        return h[:16]
+        
     def _sanitize_args(self, args: List[str], file_path: str) -> List[str]:
-        """Remove irrelevant flags from compilation arguments."""
+        """
+        Remove irrelevant flags from compilation arguments.
+        Assumes the compiler executable path (args[0]) has already been removed by the caller.
+        """
         sanitized = []
         skip_next = False
-        for a in args:
+        
+        # Loop over all arguments since the executable has been removed.
+        for a in args: 
             if skip_next:
                 skip_next = False
                 continue
-            if a in {'-c', '-o', '-MMD', '-MF', '-MT', '-fcolor-diagnostics', '-fdiagnostics-color'}:
-                skip_next = True
+                
+            # These flags are NOT relevant for parsing, and their values must be skipped
+            # These are often two-part flags (e.g., -o followed by the file name)
+            # The -c flag is also often used, though it doesn't usually take a value.
+            if a in {'-c', '-o', '-MMD', '-MF', '-MT', '-MQ', '-fcolor-diagnostics', '-fdiagnostics-color'}:
+                # If it's a two-part flag like -o, we skip the next argument (the output filename)
+                if a in {'-o', '-MF', '-MT', '-MQ'}:
+                    skip_next = True
                 continue
+            
+            # Skip the main source file path itself
             if a == file_path or os.path.basename(a) == os.path.basename(file_path):
                 continue
+                
             sanitized.append(a)
+            
         return sanitized
-
-    def _get_tu_hash(self, args: List[str]) -> str:
-        """
-        Compute a deterministic hash representing the TU preprocessing context.
-        By default we include -D and -U flags (macro defines/undefs). You can extend
-        this to include include paths (-I) or other flags if needed.
-        """
-        relevant = [a for a in args if a.startswith("-D") or a.startswith("-U")]
-        # Sort for determinism across argument order variations
-        relevant_sorted = sorted(relevant)
-        # short md5 hex
-        h = hashlib.md5(" ".join(relevant_sorted).encode("utf-8")).hexdigest()
-        return h[:16]
 
     def _get_symbol_name_location(self, node):
         """Return zero-based (line, column) for symbol's name."""
@@ -329,7 +390,7 @@ def _worker_initializer(parser_type: str, init_args: Dict[str, Any]):
     else:
         raise ValueError(f"Unknown parser type: {parser_type}")
 
-def _parallel_worker(data: Any) -> Tuple[Optional[Tuple[str, Set[SourceSpan]]], Set]:
+def _parallel_worker(data: Any) -> Tuple[Optional[Dict[str, Set[SourceSpan]]], Set]:
     """Generic top-level worker function that uses the process-local worker object."""
     global _worker_impl_instance
     global _count_processed_tus
