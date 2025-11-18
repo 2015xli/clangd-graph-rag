@@ -168,6 +168,11 @@ class _ClangWorkerImpl:
         if not file_name or not file_name.startswith(self.project_path):
             return
 
+        if False:
+            if file_name.endswith("tests/test-backend-ops.cpp"):
+                if node.spelling == "testing_start_info":
+                    logger.info(f"Processing {file_name}, {node}")
+
         # Now process this node normally
         if node.is_definition() and node.kind.name in ClangParser.NODE_KIND_FOR_BODY_SPANS:
             if not self._should_process_node(node, file_name):
@@ -182,6 +187,7 @@ class _ClangWorkerImpl:
     # Span processing
     # --------------------------------------------------------
     def _process_generic_node(self, node, file_name):
+
         try:
             name_start_line, name_start_col = self._get_symbol_name_location(node)
         except Exception:
@@ -201,18 +207,12 @@ class _ClangWorkerImpl:
         file_uri = f"file://{os.path.abspath(file_name)}"
         self.span_results[file_uri].add(span)
 
-        if False:
-            if file_name.endswith("minja/minja.hpp"):
-                if node.spelling == "ForTemplateToken":
-                    logger.info(f"Processing {file_uri}, {span}")
-
-
 
     def _should_process_node(self, node, file_name) -> bool:
         """
         Avoid redundant node processing across identical TU contexts using TU hash and exact header file path.
         """
-        return True
+        #return True
         # Don't skip main file, the rest are headers
         if file_name != self.entry['file']:              
             if self._processed_global_headers and file_name in self._processed_global_headers:

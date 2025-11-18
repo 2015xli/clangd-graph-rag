@@ -110,21 +110,51 @@ class SourceSpanProvider:
         logger.info(f"Matched and enriched {matched_count} existing symbols; added {len(synthetic_symbols)} synthetic symbols for anonymous structures.")
 
         # 3. Pass 2 — Assign parent IDs to all symbols
-        assigned_count = 0
+        assigned_parent_in_sym = 0
+        assigned_parent_no_def = 0
+        assigned_parent_with_def = 0
+
         for sym_id, sym in self.symbol_parser.symbols.items():
+            if False:
+                if sym_id == '3C6AD8457679DEAB':
+                    logger.info(f"Found symbol: {sym}")
+
             # Use the symbol's location to find its parent in the lookup
+            # We prioritize definition over declaration, but fall back to declaration if needed
+            # Declaration is needed for pure virtual functions
             loc = sym.definition or sym.declaration
             if not loc:
                 continue
+
+            # ==== Step 1: Use existing symbol's reference container id for parent symbol
+            # Most symbols can find parent id here.
+            found_parent_id = False
+            for ref in sym.references:
+                # ref.kind: declaration (1)| definition (2)| reference (4) | spelled (8) | call (16)
+                # We check if the reference is not a reference to the symbol, but either a definition or a declaration
+                # Hopefully we only want symbols with definition. But pure virtual function has only declaration.
+                # So we use both definition and declaration, but ensure it is not a reference and has a container_id
+                if ref.location == loc and ref.kind & 3 and not ref.kind & 4 and ref.container_id != '0000000000000000':
+                    sym.parent_id = ref.container_id 
+                    assigned_parent_in_sym += 1
+                    found_parent_id = True
+                    break    
+            if found_parent_id:
+                continue
+
+            # ==== Step 2: Use lexical scope lookup for parent symbol
+            # For symbols 
 
             parent_synth_id = None
             parent_id = None
             key = (sym.name, loc.file_uri, loc.start_line, loc.start_column)
 
-            # Fields: assign parent via enclosing container
+            # Fields: assign parent via enclosing container to names that have no body (just a name).
             variable_kind = {"Field", "Variable", "EnumConstant", "StaticProperty"}
+            # This is for the functions that are not defined in the code, like constructor() = 0;
+            # For this kind of functions, we ensure they don't have body definition.
             function_kind = {"Constructor", "Destructor", "InstanceMethod", "ConversionFunction"}
-            if sym.kind in variable_kind or sym.kind in function_kind and not sym.definition:
+            if sym.kind in variable_kind or sym.kind in function_kind and not sym.body_location:
                 field_name = RelativeLocation(loc.start_line, loc.start_column, loc.end_line, loc.end_column)
                 field_span = SourceSpan(sym.name, "Variable", sym.language, field_name, field_name)
                 span_tree = span_tree_data.get(loc.file_uri, [])
@@ -135,21 +165,34 @@ class SourceSpanProvider:
                     id_span_parent = spans_lookup_copy.get(container_key)
                     # A container should always have a synthetic id, so no checking
                     parent_synth_id = id_span_parent[0]
+                    assigned_parent_no_def += 1
+
                 else:
-                    logger.debug(f"Could not find container for {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                    if sym.kind in {"Variable"}:
+                        # TODO: make sure they are top level Variables
+                        continue
+
+                    logger.debug(f"Could not find container for no-definition {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
             else:
                 # Other symbols: find parent id from span lookup
-                if True:
-                    if sym.scope == "llama_memory_i::":
-                        logger.debug(f"Found structure for {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                if sym.kind in {"TypeAlias"}:
+                    # We don't support TypeAlias symbols at the moment.
+                    continue
+
+                if False:
+                    if sym.name == "testing_start_info":
+                        logger.info(f"Found structure for {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
 
                 id_span_parent = spans_lookup_copy.get(key)
                 if not id_span_parent:  # No matching container found. Can be non-container symbols like TypeAlias.
-                    logger.debug(f"Could not find container for {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                    logger.debug(f"Could not find container for with-definition {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
                     continue
+
                 parent_synth_id = id_span_parent[2]
                 if not parent_synth_id: # Matching container has no parent container. Is top level.
                     continue
+
+                assigned_parent_with_def += 1
 
             # Resolve the parent's ID (use the real ID if it exists, otherwise the synthetic one)
             parent_id = synthetic_id_to_index_id.get(parent_synth_id, parent_synth_id)
@@ -158,9 +201,10 @@ class SourceSpanProvider:
                 continue
 
             sym.parent_id = parent_id
-            assigned_count += 1
+            assigned_parent_in_sym += 1
 
-        logger.info(f"Assigned parent_id to {assigned_count} symbols based on lexical nesting.")
+        assigned_count = assigned_parent_in_sym + assigned_parent_with_def + assigned_parent_no_def
+        logger.info(f"Assigned parent_id to {assigned_count} symbols: by sym ref: {assigned_parent_in_sym}, by lexical nesting: {assigned_parent_with_def} with definition, {assigned_parent_no_def} without definition.")
 
         self.matched_count = matched_count
         self.assigned_count = assigned_count
@@ -207,6 +251,10 @@ class SourceSpanProvider:
 
             debug_stack_set = set()
             for span in spans_sorted:
+                if False:
+                    if span.name == "testing_start_info":
+                        logger.info(f"Found span for {span.name} at {file_uri}:{span.name_location.start_line}:{span.name_location.start_column}")
+                
                 node = SpanTreeNode(span)
                 # pop stack until current node fits as child
                 while stack and not self._span_is_within(span, stack[-1].span):
@@ -287,6 +335,10 @@ class SourceSpanProvider:
         # The key uniquely identifies a symbol declaration based on its name and location
         key = (span.name, file_uri, span.name_location.start_line, span.name_location.start_column)
         
+        if False:
+            if span.name == "testing_start_info":
+                logger.info(f"Found span for {span.name} at {file_uri}:{span.name_location.start_line}:{span.name_location.start_column}")
+
         synth_id = self._make_synthetic_id(file_uri, span)     
         if parent_id:
             spans_lookup[key] = (synth_id, span, parent_id)
