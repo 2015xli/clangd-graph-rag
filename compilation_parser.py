@@ -48,7 +48,9 @@ class SourceSpan:
     lang: str
     name_location: RelativeLocation
     body_location: RelativeLocation
-    
+    id: str
+    parent_id: Optional[str]
+
     @classmethod
     def from_dict(cls, data: dict) -> 'SourceSpan':
         return cls(
@@ -56,7 +58,9 @@ class SourceSpan:
             kind=data['Kind'],
             lang=data['Lang'],
             name_location=RelativeLocation.from_dict(data['NameLocation']),
-            body_location=RelativeLocation.from_dict(data['BodyLocation'])
+            body_location=RelativeLocation.from_dict(data['BodyLocation']),
+            id=data['Id'],
+            parent_id=data['ParentId']
         )
 
 @dataclass
@@ -82,6 +86,9 @@ class _ClangWorkerImpl:
         self.entry = None
         self.span_results = None
         self.include_relations = None
+        
+        # maintain a map from node key string to SourceSpan
+        self.key_to_span: Dict[str, SourceSpan] = {}
 
         # file-level cache to avoid re-processing header nodes in identical TU contexts
         # Since we use since _ClangWorkerImpl as a singleton in a worker process, this cache is shared across all invocations
@@ -107,10 +114,12 @@ class _ClangWorkerImpl:
         self._processed_global_headers: Optional[Set[str]] = None
 
         file_path = self.entry['file']
+        dir_path = self.entry['directory']
+        args = self.entry['arguments']
         original_dir = os.getcwd()
         try:
-            os.chdir(self.entry['directory'])
-            args = self._sanitize_args(self.entry['arguments'], file_path)
+            os.chdir(dir_path)
+            args = self._sanitize_args(args, file_path)
 
             # compute TU hash (based on relevant preprocessor flags)
             self._tu_hash = self._get_tu_hash(args)
@@ -169,8 +178,8 @@ class _ClangWorkerImpl:
             return
 
         if False:
-            if file_name.endswith("tests/test-backend-ops.cpp"):
-                if node.spelling == "testing_start_info":
+            if file_name.endswith("ggml-rpc/ggml-rpc.cpp"):
+                if node.spelling == "deserialize_tensor":
                     logger.info(f"Processing {file_name}, {node}")
 
         # Now process this node normally
@@ -188,25 +197,33 @@ class _ClangWorkerImpl:
     # --------------------------------------------------------
     def _process_generic_node(self, node, file_name):
 
-        try:
-            name_start_line, name_start_col = self._get_symbol_name_location(node)
-        except Exception:
-            name_start_line, name_start_col = node.location.line - 1, node.location.column - 1
-
+        name_start_line, name_start_col = self._get_symbol_name_location(node)
         body_start_line, body_start_col = node.extent.start.line - 1, node.extent.start.column - 1
         body_end_line, body_end_col = node.extent.end.line - 1, node.extent.end.column - 1
+        file_uri = f"file://{file_name}"
+
+        node_key = CompilationParser.make_symbol_key(node.spelling, file_uri, name_start_line, name_start_col)
+        if node_key in self.key_to_span: 
+            # Same node can be defined in same header file of multiple TUs that have different TU hash, but we only want to keep one copy - for our purpose.
+            # In the same TU, it is also possible to meet same node more than once, e.g., typedef struct { ... } A;
+            #logger.warning(f"Duplicate node key: {node_key} for span {self.key_to_span[node_key]} when parsing {node.translation_unit.spelling}")
+            #pass
+            return  
+
+        synthetic_id = CompilationParser.make_synthetic_id(node_key)        
+        parent_id = self._get_parent_id(node)
 
         span = SourceSpan(
             name=node.spelling,
             kind=node.kind.name,
             lang=self.lang,
             name_location=RelativeLocation(name_start_line, name_start_col, name_start_line, name_start_col + len(node.spelling)),
-            body_location=RelativeLocation(body_start_line, body_start_col, body_end_line, body_end_col)
+            body_location=RelativeLocation(body_start_line, body_start_col, body_end_line, body_end_col),
+            id=synthetic_id,
+            parent_id=parent_id
         )
-
-        file_uri = f"file://{os.path.abspath(file_name)}"
+        self.key_to_span[node_key] = span
         self.span_results[file_uri].add(span)
-
 
     def _should_process_node(self, node, file_name) -> bool:
         """
@@ -227,6 +244,39 @@ class _ClangWorkerImpl:
     # --------------------------------------------------------
     # Helpers
     # --------------------------------------------------------
+    
+    def _get_parent_id(self, node) -> Optional[str]:
+        """
+        Get parent_id based on semantic parent.
+        Uses the same span-key system so that parent IDs match real SourceSpan IDs.
+        
+        Examples:
+        - CXX_METHOD   → class
+        - FIELD_DECL   → class/struct
+        - FUNCTION_DECL outside class → TU → no parent_id
+        - NAMESPACE    → parent namespace or none
+        """
+        parent = node.semantic_parent
+        if not parent or parent.kind == clang.cindex.CursorKind.TRANSLATION_UNIT or parent.kind == clang.cindex.CursorKind.LINKAGE_SPEC:
+            return None
+            
+        file_name = parent.location.file.name if parent.location.file else parent.translation_unit.spelling
+        if not file_name:
+            return None
+
+        if parent.kind.name not in ClangParser.NODE_KIND_FOR_BODY_SPANS:
+            logger.warning(f"Parent {parent.kind.name} ({parent.spelling} at {parent.location}) of node {node.spelling} at {node.location} is not in NODE_KIND_FOR_BODY_SPANS")
+            return None
+
+        file_uri = f"file://{os.path.abspath(file_name)}"
+        line, col = self._get_symbol_name_location(parent)
+        parent_key = CompilationParser.make_symbol_key(parent.spelling, file_uri, line, col)
+        # Return existing ID to its semantic children as parent id. Otherwise, return None.
+        parent_span = self.key_to_span.get(parent_key)
+        if not parent_span:
+            return None
+        return parent_span.id
+        
     def _get_tu_hash(self, args: List[str]) -> str:
         """
         Compute a deterministic hash representing the complete TU preprocessing and
@@ -408,7 +458,6 @@ def _parallel_worker(data: Any) -> Tuple[Optional[Dict[str, Set[SourceSpan]]], S
         logger.error(f"Hit recursion limit while parsing {file_path}. The file's AST is likely too deep.")
         return None, set()
 
-
 # --- Abstract Base Class ---
 
 class CompilationParser:
@@ -443,6 +492,23 @@ class CompilationParser:
         raise NotImplementedError
 
     @classmethod
+    def make_symbol_key(cls, name: str, file_uri: str, line: int, col: int) -> str:
+        """
+        Deterministic symbol key.
+        Format: symbol name::file URI:line:col
+        """
+        key = f"{name}::{file_uri}:{line}:{col}"
+        return key
+
+    @classmethod
+    def make_synthetic_id(cls, key: str) -> str:
+        """
+        Deterministic synthetic ID. 
+        Key: normally symbol name::file URI:line:col
+        """
+        return hashlib.md5(key.encode()).hexdigest()
+
+    @classmethod
     def get_language(cls, file_name: str) -> str:
         if file_name.endswith(cls.ALL_CPP_SOURCE_EXTENSIONS):
             lang = "Cpp"
@@ -471,6 +537,7 @@ class CompilationParser:
                 try:
                     span_result, includes = future.result()
                     if includes: all_includes.update(includes)
+                    
                     if not span_result: continue
                     for file_uri, spans in span_result.items():
                         all_spans[file_uri].update(spans)
@@ -575,31 +642,17 @@ class ClangParser(CompilationParser):
                 'arguments': list(cmds[0].arguments)[1:],
             })
 
-        if num_workers and num_workers > 1:
-            logger.info(f"Parsing {len(compile_entries)} TUs with clang using {num_workers} workers...")
-            init_args = {
-                'project_path': self.project_path,
-                'clang_include_path': self.clang_include_path
-            }
-            self._parallel_parse(compile_entries, 'clang', num_workers, "Parsing TUs (clang)", worker_init_args=init_args)
-        else:
-            logger.info(f"Parsing {len(compile_entries)} TUs with clang sequentially...")
-            worker = _ClangWorkerImpl(project_path=self.project_path, clang_include_path=self.clang_include_path)
-            for entry in tqdm(compile_entries, desc="Parsing TUs (clang)"):
-                span_result, includes = worker.run(entry)
-                if includes: self.include_relations.update(includes)
-                if not span_result: continue
-                for file_uri, spans in span_result.items():
-                    self.source_spans[file_uri].update(spans)
-
-        if False:        
-            debug_file = "file:///home/xli/Public/llama.cpp/vendor/minja/minja.hpp"
-            span_result = self.source_spans.get(debug_file)
-            if span_result:
-                logger.info(f"================ Processing {debug_file}=============")
-                for span in span_result:
-                    logger.info(f"Processing {span}")
-        
+        if num_workers < 1:
+            logger.error(f"Invalid number of num_parse_workers specified: {num_workers}")
+            sys.exit(1)
+       
+        logger.info(f"Parsing {len(compile_entries)} TUs with clang using {num_workers} workers...")
+        init_args = {
+            'project_path': self.project_path,
+            'clang_include_path': self.clang_include_path
+        }
+        self._parallel_parse(compile_entries, 'clang', num_workers, "Parsing TUs (clang)", worker_init_args=init_args)
+    
     def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
         """Converts a Clang parser kind to a Clangd index kind."""
 
@@ -632,15 +685,12 @@ class TreesitterParser(CompilationParser):
 
         valid_files = [f for f in files_to_parse if os.path.isfile(f)]
 
-        if num_workers and num_workers > 1:
-            logger.info(f"Parsing {len(valid_files)} files with tree-sitter using {num_workers} workers...")
-            self._parallel_parse(valid_files, 'treesitter', num_workers, "Parsing spans (treesitter)", worker_init_args={})
-        else:
-            logger.info(f"Parsing {len(valid_files)} files with tree-sitter sequentially...")
-            worker = _TreesitterWorkerImpl()
-            for file_path in tqdm(valid_files, desc="Parsing spans (treesitter)"):
-                span_result, _ = worker.run(file_path)
-                if span_result: self.source_spans.update(span_result)
+        if num_workers < 1:
+            logger.error(f"Invalid number of num_parse_workers specified: {num_workers}")
+            sys.exit(1)
+        
+        logger.info(f"Parsing {len(valid_files)} files with tree-sitter using {num_workers} workers...")
+        self._parallel_parse(valid_files, 'treesitter', num_workers, "Parsing spans (treesitter)", worker_init_args={})
 
     def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
         logger.warning("Node kind conversion is not supported by TreesitterParser.")

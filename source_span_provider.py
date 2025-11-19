@@ -16,7 +16,7 @@ from urllib.parse import urlparse, unquote
 
 from clangd_index_yaml_parser import SymbolParser, Symbol, Location, RelativeLocation
 from compilation_manager import CompilationManager
-from compilation_parser import SourceSpan, SpanTreeNode
+from compilation_parser import SourceSpan, SpanTreeNode, CompilationParser
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -143,7 +143,8 @@ class SourceSpanProvider:
                 continue
 
             # ==== Step 2: Use lexical scope lookup for parent symbol
-            # For symbols 
+            # For symbols that has body spans, get parent id from its span.parent_id
+            # For symbols that don't have body spans, try to find the innermost container span's id
 
             parent_synth_id = None
             parent_id = None
@@ -156,7 +157,7 @@ class SourceSpanProvider:
             function_kind = {"Constructor", "Destructor", "InstanceMethod", "ConversionFunction"}
             if sym.kind in variable_kind or sym.kind in function_kind and not sym.body_location:
                 field_name = RelativeLocation(loc.start_line, loc.start_column, loc.end_line, loc.end_column)
-                field_span = SourceSpan(sym.name, "Variable", sym.language, field_name, field_name)
+                field_span = SourceSpan(sym.name, "Variable", sym.language, field_name, field_name, 0, 0)
                 span_tree = span_tree_data.get(loc.file_uri, [])
                 container = self._find_innermost_container(span_tree, field_span)
                 if container:
@@ -191,6 +192,13 @@ class SourceSpanProvider:
                 parent_synth_id = id_span_parent[2]
                 if not parent_synth_id: # Matching container has no parent container. Is top level.
                     continue
+
+                parent_synth_id_2 = id_span_parent[1].parent_id
+                if parent_synth_id_2 != None:
+                    if parent_synth_id != parent_synth_id_2:
+                        logger.debug(f"Found different parent id {parent_synth_id} and {parent_synth_id_2} for {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                
+                parent_synth_id =parent_synth_id_2
 
                 assigned_parent_with_def += 1
 
@@ -319,9 +327,9 @@ class SourceSpanProvider:
 
     def _build_span_and_parent_lookups(self, span_tree_data):
         """
-        Builds two lookup tables by traversing the span tree data.
-        1) spans_and_ids_lookup: (name, file_uri, name_line, name_col) -> (synthetic_id, SourceSpan)
-        2) parent_lookup: (child_key) -> parent_synthetic_id
+        Builds two lookup supports in one table by traversing the span tree data.
+        1) symbol key -> synthetic_id, SourceSpan
+        2) symbol key -> parent synthetic_id
         """
         spans_lookup = {}
         for file_uri, span_forest in span_tree_data.items():
@@ -339,7 +347,9 @@ class SourceSpanProvider:
             if span.name == "testing_start_info":
                 logger.info(f"Found span for {span.name} at {file_uri}:{span.name_location.start_line}:{span.name_location.start_column}")
 
-        synth_id = self._make_synthetic_id(file_uri, span)     
+        #synth_id = self._make_synthetic_id(file_uri, span) 
+        sym_key = CompilationParser.make_symbol_key(span.name, file_uri, span.name_location.start_line, span.name_location.start_column)    
+        synth_id = CompilationParser.make_synthetic_id(sym_key)    
         if parent_id:
             spans_lookup[key] = (synth_id, span, parent_id)
         else:
