@@ -84,16 +84,16 @@ class _ClangWorkerImpl:
         self.clang_include_path = clang_include_path
         self.index = clang.cindex.Index.create()
         self.entry = None
-        self.span_results = None
-        self.include_relations = None
-        
-        # maintain a map from node key string to SourceSpan
-        self.key_to_span: Dict[str, SourceSpan] = {}
+        # Data strucutures to return
+        self.span_results: Dict[str, Dict[str, SourceSpan]] = None
+        self.include_relations: Set[Tuple[str, str]] = None        
 
         # file-level cache to avoid re-processing header nodes in identical TU contexts
         # Since we use since _ClangWorkerImpl as a singleton in a worker process, this cache is shared across all invocations
         # type: Dict[tu_hash, Set[header_filepath_hash]]
         self._global_header_cache:Dict[str, Set[str]] = defaultdict(set)
+        # previously processed global headers
+        self._processed_global_headers: Optional[Set[str]] = None
 
     # --------------------------------------------------------
     # Main entry
@@ -105,13 +105,11 @@ class _ClangWorkerImpl:
           - set of include relations (src_abs_path, include_abs_path)
         """
         self.entry = entry
-        self.span_results = defaultdict(set)   # file_uri → {SourceSpan}
+        self.span_results = defaultdict(dict)   # file_uri → {key → SourceSpan}
         self.include_relations = set()          # set {(src_file, included_file)}
         self._tu_hash = None
         # Local per-TU header cache
         self._local_header_cache: Set[str] = set()
-        # previously processed global headers
-        self._processed_global_headers: Optional[Set[str]] = None
 
         file_path = self.entry['file']
         dir_path = self.entry['directory']
@@ -141,6 +139,7 @@ class _ClangWorkerImpl:
         # Merge local header cache → global header cache
         # -----------------------------
         self._global_header_cache[self._tu_hash].update(self._local_header_cache)
+
 
         return self.span_results, self.include_relations
 
@@ -179,7 +178,7 @@ class _ClangWorkerImpl:
 
         if False:
             if file_name.endswith("ggml-rpc/ggml-rpc.cpp"):
-                if node.spelling == "deserialize_tensor":
+                if node.spelling == "rpc_server":
                     logger.info(f"Processing {file_name}, {node}")
 
         # Now process this node normally
@@ -203,7 +202,7 @@ class _ClangWorkerImpl:
         file_uri = f"file://{file_name}"
 
         node_key = CompilationParser.make_symbol_key(node.spelling, file_uri, name_start_line, name_start_col)
-        if node_key in self.key_to_span: 
+        if node_key in self.span_results[file_uri]: 
             # Same node can be defined in same header file of multiple TUs that have different TU hash, but we only want to keep one copy - for our purpose.
             # In the same TU, it is also possible to meet same node more than once, e.g., typedef struct { ... } A;
             #logger.warning(f"Duplicate node key: {node_key} for span {self.key_to_span[node_key]} when parsing {node.translation_unit.spelling}")
@@ -213,17 +212,18 @@ class _ClangWorkerImpl:
         synthetic_id = CompilationParser.make_synthetic_id(node_key)        
         parent_id = self._get_parent_id(node)
 
+        kind = self._convert_node_kind_to_index_kind(node)
+
         span = SourceSpan(
             name=node.spelling,
-            kind=node.kind.name,
+            kind=kind,
             lang=self.lang,
             name_location=RelativeLocation(name_start_line, name_start_col, name_start_line, name_start_col + len(node.spelling)),
             body_location=RelativeLocation(body_start_line, body_start_col, body_end_line, body_end_col),
             id=synthetic_id,
             parent_id=parent_id
         )
-        self.key_to_span[node_key] = span
-        self.span_results[file_uri].add(span)
+        self.span_results[file_uri][node_key] = span
 
     def _should_process_node(self, node, file_name) -> bool:
         """
@@ -272,11 +272,60 @@ class _ClangWorkerImpl:
         line, col = self._get_symbol_name_location(parent)
         parent_key = CompilationParser.make_symbol_key(parent.spelling, file_uri, line, col)
         # Return existing ID to its semantic children as parent id. Otherwise, return None.
-        parent_span = self.key_to_span.get(parent_key)
+        parent_span = self.span_results[file_uri].get(parent_key)
         if not parent_span:
             return None
         return parent_span.id
         
+
+    def _get_symbol_name_location(self, node):
+        """Return zero-based (line, column) for symbol's name."""
+        for tok in node.get_tokens():
+            if tok.spelling == node.spelling:
+                loc = tok.location
+                try:
+                    file, line, col, _ = loc.get_expansion_location()
+                except AttributeError:
+                    # older/newer libclang variations
+                    continue
+                if file and file.name.startswith(self.project_path):
+                    return (line - 1, col - 1)
+        loc = node.location
+        try:
+            file, line, col, _ = loc.get_expansion_location()
+            return (line - 1, col - 1)
+        except AttributeError:
+            return (node.location.line - 1, node.location.column - 1)
+
+    def _convert_node_kind_to_index_kind(self, node):
+        """Converts a Clang parser kind to a Clangd index kind."""
+
+        if node.kind.name in ClangParser.NODE_KIND_FUNCTIONS:
+            return "Function"
+        elif node.kind.name in ClangParser.NODE_KIND_CONSTRUCTOR:
+            return "Constructor"
+        elif node.kind.name in ClangParser.NODE_KIND_DESTRUCTOR:
+            return "Destructor"
+        elif node.kind.name in ClangParser.NODE_KIND_CONVERSION_FUNCTION:
+            return "ConversionFunction"
+        elif node.kind.name in ClangParser.NODE_KIND_CXX_METHOD:
+            if node.is_static_method():
+                return "StaticMethod"
+            return "InstanceMethod"
+        elif node.kind.name in ClangParser.NODE_KIND_STRUCT:
+            return "Struct"
+        elif node.kind.name in ClangParser.NODE_KIND_UNION:
+            return "Union"
+        elif node.kind.name in ClangParser.NODE_KIND_ENUM:
+            return "Enum"
+        elif node.kind.name in ClangParser.NODE_KIND_CLASSES:
+            return "Class"
+        elif node.kind.name in ClangParser.NODE_KIND_NAMESPACE:
+            return "Namespace"
+        else:
+            logger.error(f"Unknown Clang parser kind: {node.kind.name}")
+            return "Unknown"
+
     def _get_tu_hash(self, args: List[str]) -> str:
         """
         Compute a deterministic hash representing the complete TU preprocessing and
@@ -355,25 +404,6 @@ class _ClangWorkerImpl:
             sanitized.append(a)
             
         return sanitized
-
-    def _get_symbol_name_location(self, node):
-        """Return zero-based (line, column) for symbol's name."""
-        for tok in node.get_tokens():
-            if tok.spelling == node.spelling:
-                loc = tok.location
-                try:
-                    file, line, col, _ = loc.get_expansion_location()
-                except AttributeError:
-                    # older/newer libclang variations
-                    continue
-                if file and file.name.startswith(self.project_path):
-                    return (line - 1, col - 1)
-        loc = node.location
-        try:
-            file, line, col, _ = loc.get_expansion_location()
-            return (line - 1, col - 1)
-        except AttributeError:
-            return (node.location.line - 1, node.location.column - 1)
 
 class _TreesitterWorkerImpl:
     """Contains the logic to parse one file using tree-sitter."""
@@ -476,13 +506,13 @@ class CompilationParser:
 
     def __init__(self, project_path: str):
         self.project_path = project_path
-        self.source_spans: Dict[str, Set[SourceSpan]] = defaultdict(set) # Changed to Dict[FileURI, Set[SpanNode]]
+        self.source_spans: Dict[str, Dict[str, SourceSpan]] = defaultdict(dict) # Changed to Dict[FileURI, Dict[Key, SourceSpan]]
         self.include_relations: Set[Tuple[str, str]] = set()
 
     def parse(self, files_to_parse: List[str], num_workers: int = 1):
         raise NotImplementedError
 
-    def get_source_spans(self) -> Dict[str, Set[SourceSpan]]:
+    def get_source_spans(self) -> Dict[str, Dict[str, SourceSpan]]:
         return self.source_spans
 
     def get_include_relations(self) -> Set[Tuple[str, str]]:
@@ -521,7 +551,7 @@ class CompilationParser:
 
     def _parallel_parse(self, items_to_process: List, parser_type: str, num_workers: int, desc: str, worker_init_args: Dict[str, Any] = None):
         """Generic parallel processing framework."""
-        all_spans = defaultdict(set)
+        all_spans = defaultdict(dict)
         all_includes = set()
         
         initargs = (parser_type, worker_init_args or {})
@@ -539,8 +569,8 @@ class CompilationParser:
                     if includes: all_includes.update(includes)
                     
                     if not span_result: continue
-                    for file_uri, spans in span_result.items():
-                        all_spans[file_uri].update(spans)
+                    for file_uri, key_to_span_dict in span_result.items():
+                        all_spans[file_uri].update(key_to_span_dict)
 
                 except Exception as e:
                     item = future_to_item[future]
@@ -561,12 +591,21 @@ class ClangParser(CompilationParser):
         clang.cindex.CursorKind.FUNCTION_TEMPLATE.name,
     }
 
-    NODE_KIND_METHODS = {
-        clang.cindex.CursorKind.CXX_METHOD.name,
+    NODE_KIND_CONSTRUCTOR = {
         clang.cindex.CursorKind.CONSTRUCTOR.name,
+    }
+    NODE_KIND_DESTRUCTOR = {
         clang.cindex.CursorKind.DESTRUCTOR.name,
+    }
+    NODE_KIND_CONVERSION_FUNCTION = {
         clang.cindex.CursorKind.CONVERSION_FUNCTION.name,
     }
+
+    NODE_KIND_CXX_METHOD = {
+        clang.cindex.CursorKind.CXX_METHOD.name,
+    }
+    
+    NODE_KIND_METHODS = NODE_KIND_CXX_METHOD | NODE_KIND_CONSTRUCTOR | NODE_KIND_DESTRUCTOR | NODE_KIND_CONVERSION_FUNCTION
 
     NODE_KIND_UNION = {
         clang.cindex.CursorKind.UNION_DECL.name,
@@ -653,26 +692,6 @@ class ClangParser(CompilationParser):
         }
         self._parallel_parse(compile_entries, 'clang', num_workers, "Parsing TUs (clang)", worker_init_args=init_args)
     
-    def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
-        """Converts a Clang parser kind to a Clangd index kind."""
-
-        if kind in ClangParser.NODE_KIND_FUNCTIONS:
-            return "Function"
-        elif kind in ClangParser.NODE_KIND_METHODS:
-            return "Method"
-        elif kind in ClangParser.NODE_KIND_STRUCT:
-            return "Struct"
-        elif kind in ClangParser.NODE_KIND_UNION:
-            return "Union"
-        elif kind in ClangParser.NODE_KIND_ENUM:
-            return "Enum"
-        elif kind in ClangParser.NODE_KIND_CLASSES:
-            return "Class"
-        elif kind in ClangParser.NODE_KIND_NAMESPACE:
-            return "Namespace"
-        else:
-            logger.error(f"Unknown Clang parser kind: {kind}")
-            return "Unknown"
 
 class TreesitterParser(CompilationParser):
     """A parser that uses Tree-sitter for syntactic analysis."""

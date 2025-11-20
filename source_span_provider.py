@@ -9,7 +9,7 @@ synthesizing new Symbol objects for anonymous entities.
 """
 
 import logging
-import gc
+import gc, copy
 import hashlib
 from typing import Optional, Dict, List, Set
 from urllib.parse import urlparse, unquote
@@ -65,70 +65,26 @@ class SourceSpanProvider:
 
         self.symbol_parser.symbols = new_symbols
 
-        # 0. Get span data
-        flat_span_tree_data = self.compilation_manager.get_source_spans()
-        logger.info(f"Processing SpanTrees from {len(flat_span_tree_data)} files for enrichment.")
-        span_tree_data = self._build_span_forest(flat_span_tree_data)
-        del flat_span_tree_data
-        gc.collect()
-        # 1. Build span and parent lookup tables from the SpanTree data
-        spans_lookup = self._build_span_and_parent_lookups(span_tree_data)
+        # Pass 0: Get span data
+        # file_span_data: Dict[file_uri → Dict[key → SourceSpan]}
+        file_span_data = self.compilation_manager.get_source_spans()
+        logger.info(f"Processing SpanTrees from {len(file_span_data)} files for enrichment.")
 
-        # 2. Pass 1 — Enrich existing symbols and synthesize new ones
-        synthetic_symbols = {}
+        # Pass 1: Enrich existing symbols and synthesize new ones
         synthetic_id_to_index_id = {}
-        matched_count = 0
-        spans_lookup_copy = spans_lookup.copy()
-
-        for sym_id, sym in self.symbol_parser.symbols.items():
-            loc = sym.definition or sym.declaration
-            if not loc:
-                continue
-            
-            # Use the location from the symbol to find the corresponding span
-            key = (sym.name, loc.file_uri, loc.start_line, loc.start_column)
-            id_span_parent = spans_lookup.get(key)
-            if not id_span_parent:
-                continue
-
-            synth_id, span, parent_id = id_span_parent
-            # Enrich the existing symbol with its body location
-            sym.body_location = span.body_location
-            # Map the synthetic ID to the real symbol ID
-            synthetic_id_to_index_id[synth_id] = sym_id
-            matched_count += 1
-            # Remove the span from the lookup since it's been matched
-            del spans_lookup[key]
-
-        # Any remaining spans in the lookup are anonymous structures
-        for key, (synth_id, span, _) in spans_lookup.items():
-            file_uri = key[1]
-            synthetic_symbols[synth_id] = self._create_synthetic_symbol(synth_id, span, file_uri)
-
-        # Add the new synthetic symbols to the main symbol parser
-        self.symbol_parser.symbols.update(synthetic_symbols)
-        logger.info(f"Matched and enriched {matched_count} existing symbols; added {len(synthetic_symbols)} synthetic symbols for anonymous structures.")
-
-        # 3. Pass 2 — Assign parent IDs to all symbols
+        matched_body_count = 0
         assigned_parent_in_sym = 0
-        assigned_parent_no_def = 0
-        assigned_parent_with_def = 0
+
+        # Copy the file span data to avoid modifying the original data
+        file_span_data_copy = copy.deepcopy(file_span_data)
 
         for sym_id, sym in self.symbol_parser.symbols.items():
-            if False:
-                if sym_id == '3C6AD8457679DEAB':
-                    logger.info(f"Found symbol: {sym}")
-
-            # Use the symbol's location to find its parent in the lookup
-            # We prioritize definition over declaration, but fall back to declaration if needed
-            # Declaration is needed for pure virtual functions
             loc = sym.definition or sym.declaration
             if not loc:
                 continue
 
-            # ==== Step 1: Use existing symbol's reference container id for parent symbol
-            # Most symbols can find parent id here.
-            found_parent_id = False
+            # Step 1: Assign parent id from symbol's references    
+            # Most symbols can find parent id in their references.
             for ref in sym.references:
                 # ref.kind: declaration (1)| definition (2)| reference (4) | spelled (8) | call (16)
                 # We check if the reference is not a reference to the symbol, but either a definition or a declaration
@@ -137,43 +93,102 @@ class SourceSpanProvider:
                 if ref.location == loc and ref.kind & 3 and not ref.kind & 4 and ref.container_id != '0000000000000000':
                     sym.parent_id = ref.container_id 
                     assigned_parent_in_sym += 1
-                    found_parent_id = True
                     break    
-            if found_parent_id:
+            
+            # Step 2: Find body spans for symbols from span data            
+            key = CompilationParser.make_symbol_key(sym.name, loc.file_uri, loc.start_line, loc.start_column)
+            source_span = file_span_data_copy[loc.file_uri].get(key)
+            if not source_span:
                 continue
 
-            # ==== Step 2: Use lexical scope lookup for parent symbol
-            # For symbols that has body spans, get parent id from its span.parent_id
-            # For symbols that don't have body spans, try to find the innermost container span's id
+            # Enrich the existing symbol with its body location
+            sym.body_location = source_span.body_location
+            # So far we can only match symbols that have body span. Our purpose with body span is:
+            # 1. Find entity's body code for graphRAG, 2. Find parent relationships for symbols.
+            # Purpose 1 is served well. Purpose 2 is fine too, if pass 1 already found parent id for most symbols. 
+            synthetic_id_to_index_id[source_span.id] = sym_id
+            matched_body_count += 1
+            # Remove the span from the lookup in order to use the remaining spans for synthetic symbols
+            del file_span_data_copy[loc.file_uri][key]
 
+        # Pass 2: Any remaining spans in the lookup are not clangd-indexed (such as anonymous structures or unused symbols)
+        # Note we add parent id for the synthetic symbols if they have one in their source span
+        synthetic_symbols = {}
+        assigned_sym_parent_in_span = 0
+        assigned_syn_parent_in_span = 0
+        for file_uri, key_spans in file_span_data_copy.items():
+            for key, source_span in key_spans.items():
+                synth_parent_id = source_span.parent_id
+                parent_id = synthetic_id_to_index_id.get(synth_parent_id, synth_parent_id)
+                if parent_id != synth_parent_id:
+                    assigned_sym_parent_in_span += 1
+                elif parent_id:
+                    assigned_syn_parent_in_span += 1
+
+                synthetic_symbols[source_span.id] = self._create_synthetic_symbol(source_span, file_uri, parent_id)
+
+        # Add the new synthetic symbols to the main symbol parser
+        self.symbol_parser.symbols.update(synthetic_symbols)
+        logger.info(f"Matched and enriched {matched_body_count} existing symbols; added {len(synthetic_symbols)} synthetic symbols.")
+        logger.info(f"Assigned parent_id to symbols: {assigned_parent_in_sym} by ref, {assigned_sym_parent_in_span} by span sym id, {assigned_syn_parent_in_span} by span syn id.")
+        del file_span_data_copy, synthetic_symbols
+        gc.collect()
+
+        # Pass 3: Assign parent IDs to remaining symbols that don't have parent id from clangd-index and clang.cinde
+        # Top level symbols have no parent id. 
+        # TODO: May give parent id with file path to top level symbols, so that we don't need to manually extract (FILE) -[:DEFINES]-> (<symbol>) relationships.
+        assigned_parent_no_span = 0
+        assigned_parent_by_span = 0
+        for sym_id, sym in self.symbol_parser.symbols.items():
+            # Skip symbols that already assigned parent id in pass 1
+            if sym.parent_id:
+                continue
+
+            if False:
+                if sym_id == '3C6AD8457679DEAB':
+                    logger.info(f"Found symbol: {sym}")
+
+            # Use the symbol's location to find its parent symbol by lexical scope container id lookup
+            # We prioritize definition over declaration, but fall back to declaration if needed
+            # Declaration is needed for pure virtual functions
+            loc = sym.definition or sym.declaration
+            if not loc:
+                continue
+            
+            # Namespace symbols are allowed to not be in the project path
+            sym_abs_path = unquote(urlparse(loc.file_uri).path)
+            if not sym_abs_path.startswith(project_path):
+                continue
+
+            # For symbols that don't have parent id, try to find the innermost container span's id
+            # ==== Step 1: Find parent id for single name symbols that have no body
             parent_synth_id = None
             parent_id = None
-            key = (sym.name, loc.file_uri, loc.start_line, loc.start_column)
 
             # Fields: assign parent via enclosing container to names that have no body (just a name).
             variable_kind = {"Field", "Variable", "EnumConstant", "StaticProperty"}
             # This is for the functions that are not defined in the code, like constructor() = 0;
             # For this kind of functions, we ensure they don't have body definition.
             function_kind = {"Constructor", "Destructor", "InstanceMethod", "ConversionFunction"}
-            if sym.kind in variable_kind or sym.kind in function_kind and not sym.body_location:
+            if sym.kind in variable_kind or (sym.kind in function_kind and not sym.body_location):
                 field_name = RelativeLocation(loc.start_line, loc.start_column, loc.end_line, loc.end_column)
-                field_span = SourceSpan(sym.name, "Variable", sym.language, field_name, field_name, 0, 0)
-                span_tree = span_tree_data.get(loc.file_uri, [])
+                field_span = SourceSpan(sym.name, "Variable", sym.language, field_name, field_name, '', '')
+                span_tree = file_span_data.get(loc.file_uri, {}) 
                 container = self._find_innermost_container(span_tree, field_span)
                 if container:
                     #parent_synth_id = self._make_synthetic_id(loc.file_uri, container)
-                    container_key = (container.name, loc.file_uri, container.name_location.start_line, container.name_location.start_column)
-                    id_span_parent = spans_lookup_copy.get(container_key)
+                    container_key = CompilationParser.make_symbol_key(container.name, loc.file_uri, container.name_location.start_line, container.name_location.start_column)
+                    parent_span = span_tree.get(container_key)
                     # A container should always have a synthetic id, so no checking
-                    parent_synth_id = id_span_parent[0]
-                    assigned_parent_no_def += 1
+                    parent_synth_id = parent_span.id
+                    assigned_parent_no_span += 1
 
                 else:
                     if sym.kind in {"Variable"}:
                         # TODO: make sure they are top level Variables
                         continue
 
-                    logger.debug(f"Could not find container for no-definition {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                    logger.debug(f"Could not find container for no-body {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
             else:
                 # Other symbols: find parent id from span lookup
                 if sym.kind in {"TypeAlias"}:
@@ -182,25 +197,23 @@ class SourceSpanProvider:
 
                 if False:
                     if sym.name == "testing_start_info":
-                        logger.info(f"Found structure for {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                        logger.info(f"Symbol with body: {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
 
-                id_span_parent = spans_lookup_copy.get(key)
-                if not id_span_parent:  # No matching container found. Can be non-container symbols like TypeAlias.
-                    logger.debug(f"Could not find container for with-definition {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                key = CompilationParser.make_symbol_key(sym.name, loc.file_uri, loc.start_line, loc.start_column)
+                span_tree = file_span_data.get(loc.file_uri, {})
+                if not span_tree:
+                    logger.debug(f"Could not find span tree for file {loc.file_uri}, symbol {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
                     continue
 
-                parent_synth_id = id_span_parent[2]
-                if not parent_synth_id: # Matching container has no parent container. Is top level.
+                span = span_tree.get(key)
+                if not span:  # No matching container found. Can be non-container symbols like TypeAlias.
+                    logger.debug(f"Could not find body span for with-body {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
                     continue
 
-                parent_synth_id_2 = id_span_parent[1].parent_id
-                if parent_synth_id_2 != None:
-                    if parent_synth_id != parent_synth_id_2:
-                        logger.debug(f"Found different parent id {parent_synth_id} and {parent_synth_id_2} for {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
-                
-                parent_synth_id =parent_synth_id_2
-
-                assigned_parent_with_def += 1
+                parent_synth_id = span.parent_id
+                if not parent_synth_id: # Matching body span has no parent container. Is top level.
+                    continue
+                assigned_parent_by_span += 1
 
             # Resolve the parent's ID (use the real ID if it exists, otherwise the synthetic one)
             parent_id = synthetic_id_to_index_id.get(parent_synth_id, parent_synth_id)
@@ -209,15 +222,14 @@ class SourceSpanProvider:
                 continue
 
             sym.parent_id = parent_id
-            assigned_parent_in_sym += 1
 
-        assigned_count = assigned_parent_in_sym + assigned_parent_with_def + assigned_parent_no_def
-        logger.info(f"Assigned parent_id to {assigned_count} symbols: by sym ref: {assigned_parent_in_sym}, by lexical nesting: {assigned_parent_with_def} with definition, {assigned_parent_no_def} without definition.")
-
-        self.matched_count = matched_count
+        logger.info(f"Found remaining symbols' parent with lexical scope: {assigned_parent_no_span} without body, {assigned_parent_by_span} with body.")
+        assigned_count = assigned_parent_in_sym + assigned_sym_parent_in_span + assigned_syn_parent_in_span + assigned_parent_no_span + assigned_parent_by_span
+        logger.info(f"Total parent_id assigned to {assigned_count} symbols.")
+        self.matched_count = matched_body_count
         self.assigned_count = assigned_count
         # Cleanup
-        del span_tree_data, spans_lookup, spans_lookup_copy, synthetic_id_to_index_id, synthetic_symbols
+        del file_span_data, synthetic_id_to_index_id
         gc.collect()
 
     def get_matched_count(self) -> int:
@@ -226,66 +238,10 @@ class SourceSpanProvider:
     def get_assigned_count(self) -> int:
         return self.assigned_count
 
+
     # ============================================================
-    # Span forest construction utilities
+    # Span utilities
     # ============================================================
-
-    def _build_span_forest(self, spans_per_file: Dict[str, Set[SourceSpan]]) -> Dict[str, List[SpanTreeNode]]:
-        """
-        Build a hierarchical span forest (list of roots) for each file.
-
-        Args:
-            spans_per_file: Output from Clang worker [(file_uri, [SourceSpan, ...])]
-
-        Returns:
-            Dict[file_uri, List[SpanTreeNode]]
-        """
-        forests: Dict[str, List[SpanTreeNode]] = {}
-
-        for file_uri, spans in spans_per_file.items():
-            if not spans:
-                forests[file_uri] = []
-                continue
-
-            # Sort spans by start position, and then by end descending (outer before inner)
-            spans_sorted = sorted(
-                spans,
-                key=lambda s: (s.body_location.start_line, s.body_location.start_column,
-                            -s.body_location.end_line, -s.body_location.end_column)
-            )
-
-            root_nodes: List[SpanTreeNode] = []
-            stack: List[SpanTreeNode] = []
-
-            debug_stack_set = set()
-            for span in spans_sorted:
-                if False:
-                    if span.name == "testing_start_info":
-                        logger.info(f"Found span for {span.name} at {file_uri}:{span.name_location.start_line}:{span.name_location.start_column}")
-                
-                node = SpanTreeNode(span)
-                # pop stack until current node fits as child
-                while stack and not self._span_is_within(span, stack[-1].span):
-                    stack.pop()
-
-                if stack:
-                    stack[-1].add_child(node)
-                else:
-                    root_nodes.append(node)
-                    debug_stack_set.clear()
-
-                stack.append(node)
-                
-                if False:
-                    debug_key = (span.name, span.name_location.start_line, span.name_location.start_column, span.name_location.end_line, span.name_location.end_column)
-                    if debug_key in debug_stack_set:
-                        logger.warning(f"Duplicate span found when building span forest for {file_uri}: {debug_key}")
-                    debug_stack_set.add(debug_key)
-
-            forests[file_uri] = root_nodes
-
-        return forests
-
     def _span_is_within(self, inner: SourceSpan, outer: SourceSpan) -> bool:
         """Check if 'inner' span is fully inside 'outer' span."""
         s1, e1 = inner.body_location, outer.body_location
@@ -308,65 +264,18 @@ class SourceSpanProvider:
         return False
 
     # -------------------------------------------------------------------------
-    def _find_innermost_container(self, span_tree: List[SpanTreeNode], span: SourceSpan):
+    def _find_innermost_container(self, span_tree: dict[str, SourceSpan], span: SourceSpan):
         """Find the smallest enclosing SourceSpan node for a given position."""
         candidates = []
-        for node in span_tree:
-            self._collect_enclosing_nodes(node, span, candidates)
+        for node in span_tree.values():
+            if self._span_is_within(span, node):
+                candidates.append(node)
         if not candidates:
             return None
         # Return the most deeply nested one
         return min(candidates, key=lambda s: (s.body_location.end_line - s.body_location.start_line))
 
-    def _collect_enclosing_nodes(self, node: SpanTreeNode, span: SourceSpan, candidates: List[SourceSpan]):
-        """Recursively collect all enclosing nodes."""
-        if self._span_is_within(span, node.span):
-            candidates.append(node.span)
-        for child in node.children:
-            self._collect_enclosing_nodes(child, span, candidates)
-
-    def _build_span_and_parent_lookups(self, span_tree_data):
-        """
-        Builds two lookup supports in one table by traversing the span tree data.
-        1) symbol key -> synthetic_id, SourceSpan
-        2) symbol key -> parent synthetic_id
-        """
-        spans_lookup = {}
-        for file_uri, span_forest in span_tree_data.items():
-            for node in span_forest:
-                self._collect_span_and_parent_info(node, file_uri, spans_lookup, parent_id=None)
-        return spans_lookup
-
-    def _collect_span_and_parent_info(self, node: SpanTreeNode, file_uri: str, spans_lookup: Dict, parent_id: Optional[str]):
-        """Recursively populates the lookup tables from a SourceSpan."""
-        span = node.span
-        # The key uniquely identifies a symbol declaration based on its name and location
-        key = (span.name, file_uri, span.name_location.start_line, span.name_location.start_column)
-        
-        if False:
-            if span.name == "testing_start_info":
-                logger.info(f"Found span for {span.name} at {file_uri}:{span.name_location.start_line}:{span.name_location.start_column}")
-
-        #synth_id = self._make_synthetic_id(file_uri, span) 
-        sym_key = CompilationParser.make_symbol_key(span.name, file_uri, span.name_location.start_line, span.name_location.start_column)    
-        synth_id = CompilationParser.make_synthetic_id(sym_key)    
-        if parent_id:
-            spans_lookup[key] = (synth_id, span, parent_id)
-        else:
-            spans_lookup[key] = (synth_id, span, None)
-
-        # Recurse for children, passing the current node's synthetic ID as their parent_id
-        for child in node.children:
-            self._collect_span_and_parent_info(child, file_uri, spans_lookup, parent_id=synth_id)
-
-    def _make_synthetic_id(self, file_uri: str, span: SourceSpan) -> str:
-        """Generates a deterministic synthetic ID for any structure span."""
-        id_str = (f"{file_uri}#{span.name}#{span.kind}#{span.lang}"
-        f"{span.name_location.start_line}_{span.name_location.start_column}"
-        f"{span.body_location.start_line}_{span.body_location.start_column}_{span.body_location.end_line}_{span.body_location.end_column}")
-        return hashlib.md5(id_str.encode()).hexdigest()
-
-    def _create_synthetic_symbol(self, synthetic_id: str, span: SourceSpan, file_uri: str) -> Symbol:
+    def _create_synthetic_symbol(self, span: SourceSpan, file_uri: str, parent_id: Optional[str]) -> Symbol:
         """Constructs a minimal Symbol object for synthetic entities (anonymous structures)."""
         loc = Location(
             file_uri=file_uri,
@@ -377,14 +286,15 @@ class SourceSpanProvider:
         )
 
         return Symbol(
-            id=synthetic_id,
+            id=span.id, 
             name=span.name,
-            kind=self.compilation_manager.parser_kind_to_index_kind(span.kind, span.lang),
+            kind=span.kind,
             declaration=loc,
             definition=loc,
             references=[],
             scope="", # Scope is now handled by the parent_id relationship
             language=span.lang,
-            body_location=span.body_location
+            body_location=span.body_location,
+            parent_id=parent_id
         )
 
