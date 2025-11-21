@@ -6,8 +6,7 @@ the file, folder, and symbol nodes in a Neo4j graph.
 import os
 import sys
 import argparse
-import math
-import re # Import re for scope normalization
+import math, json
 from pathlib import Path
 from urllib.parse import urlparse, unquote
 from typing import List, Dict, Any, Tuple, Optional
@@ -475,13 +474,14 @@ class SymbolProcessor:
         total_rels_merged = 0
         if defines_function_list:
             logger.info(f"  Ingesting {len(defines_function_list)} FUNCTION DEFINES relationships in batches (1 batch = {self.ingest_batch_size} relationships)...")
+
             for i in tqdm(range(0, len(defines_function_list), self.ingest_batch_size), desc="DEFINES (Functions)"):
                 batch = defines_function_list[i:i + self.ingest_batch_size]
                 defines_rel_query = """
                 CALL apoc.periodic.iterate(
                     "UNWIND $defines_data AS data RETURN data",
                     "MATCH (f:FILE {path: data.file_path}) MATCH (n:FUNCTION {id: data.id}) MERGE (f)-[:DEFINES]->(n)",
-                    {batchSize: $cypher_tx_size, parallel: true, params: {defines_data: $defines_data}}
+                    {batchSize: $cypher_tx_size, parallel: false, params: {defines_data: $defines_data}}
                 )
                 YIELD updateStatistics
                 RETURN
@@ -508,7 +508,7 @@ class SymbolProcessor:
                 CALL apoc.periodic.iterate(
                     "UNWIND $defines_data AS data RETURN data",
                     "MATCH (f:FILE {path: data.file_path}) MATCH (n:DATA_STRUCTURE {id: data.id}) MERGE (f)-[:DEFINES]->(n)",
-                    {batchSize: $cypher_tx_size, parallel: true, params: {defines_data: $defines_data}}
+                    {batchSize: $cypher_tx_size, parallel: false, params: {defines_data: $defines_data}}
                 )
                 YIELD updateStatistics
                 RETURN
@@ -535,7 +535,7 @@ class SymbolProcessor:
                 CALL apoc.periodic.iterate(
                     "UNWIND $defines_data AS data RETURN data",
                     "MATCH (f:FILE {path: data.file_path}) MATCH (n:CLASS_STRUCTURE {id: data.id}) MERGE (f)-[:DEFINES]->(n)",
-                    {batchSize: $cypher_tx_size, parallel: true, params: {defines_data: $defines_data}}
+                    {batchSize: $cypher_tx_size, parallel: false, params: {defines_data: $defines_data}}
                 )
                 YIELD updateStatistics
                 RETURN
@@ -562,7 +562,7 @@ class SymbolProcessor:
                 CALL apoc.periodic.iterate(
                     "UNWIND $defines_data AS data RETURN data",
                     "MATCH (f:FILE {path: data.file_path}) MATCH (n:VARIABLE {id: data.id}) MERGE (f)-[:DEFINES]->(n)",
-                    {batchSize: $cypher_tx_size, parallel: true, params: {defines_data: $defines_data}}
+                    {batchSize: $cypher_tx_size, parallel: false, params: {defines_data: $defines_data}}
                 )
                 YIELD updateStatistics
                 RETURN
