@@ -28,7 +28,7 @@ yaml.SafeLoader.add_multi_constructor("!", unknown_tag)
 
 # --- Common Data Classes ---
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Location:
     file_uri: str
     start_line: int
@@ -46,7 +46,7 @@ class Location:
             end_column=data['End']['Column']
         )
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class RelativeLocation:
     start_line: int
     start_column: int
@@ -62,7 +62,7 @@ class RelativeLocation:
             end_column=data['End']['Column']
         )
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class Reference:
     kind: int
     location: Location

@@ -103,9 +103,13 @@ class SourceSpanProvider:
 
             # Enrich the existing symbol with its body location
             sym.body_location = source_span.body_location
-            # So far we can only match symbols that have body span. Our purpose with body span is:
+            # So far we can only match symbols that have body span, since we don't return nodes from clang.cindex that have no body span.
+            # Our purpose with body span is:
             # 1. Find entity's body code for graphRAG, 2. Find parent relationships for symbols.
-            # Purpose 1 is served well. Purpose 2 is fine too, if pass 1 already found parent id for most symbols. 
+            # Purpose 1 is served well. 
+            # Purpose 2 is fine too, since for symbols without body span, they either have parent id from their references, or we can find parent id from their lexical scope in pass 3.
+            # The following map is critical for pass 2 and 3, since we need real matched symbol id as parent id to build graph relationships.
+            # That is why we need separate passes for pass 2 and 3, only after pass 1 that has built the map.
             synthetic_id_to_index_id[source_span.id] = sym_id
             matched_body_count += 1
             # Remove the span from the lookup in order to use the remaining spans for synthetic symbols
@@ -134,7 +138,7 @@ class SourceSpanProvider:
         del file_span_data_copy, synthetic_symbols
         gc.collect()
 
-        # Pass 3: Assign parent IDs to remaining symbols that don't have parent id from clangd-index and clang.cinde
+        # Pass 3: Assign parent IDs to remaining symbols that don't have parent id from clangd-index and clang.cindex
         # Top level symbols have no parent id. 
         # TODO: May give parent id with file path to top level symbols, so that we don't need to manually extract (FILE) -[:DEFINES]-> (<symbol>) relationships.
         assigned_parent_no_span = 0

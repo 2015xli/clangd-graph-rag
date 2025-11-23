@@ -15,7 +15,7 @@ from typing import List, Dict, Set, Tuple, Union, Any, Optional
 from pathlib import Path
 from collections import defaultdict
 from tqdm import tqdm
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
 import gc
 from dataclasses import dataclass, field
 
@@ -41,7 +41,7 @@ logger.setLevel(logging.DEBUG)
 # ============================================================
 # Data classes for span representation
 # ============================================================
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class SourceSpan:
     name: str
     kind: str
@@ -84,8 +84,10 @@ class _ClangWorkerImpl:
         self.clang_include_path = clang_include_path
         self.index = clang.cindex.Index.create()
         self.entry = None
-        # Data strucutures to return
-        self.span_results: Dict[str, Dict[str, SourceSpan]] = None
+        # Data strucutures to return: 
+        #   - {(file_uri, tu_hash) → {key → SourceSpan}}
+        self.span_results: Dict[Tuple[str, str], Dict[str, SourceSpan]] = None
+        #   - {(including_file, included_file)}
         self.include_relations: Set[Tuple[str, str]] = None        
 
         # file-level cache to avoid re-processing header nodes in identical TU contexts
@@ -98,14 +100,14 @@ class _ClangWorkerImpl:
     # --------------------------------------------------------
     # Main entry
     # --------------------------------------------------------
-    def run(self, entry: Dict[str, Any]) -> Tuple[Dict[str, Set[SourceSpan]], Set[Tuple[str, str]]]:
+    def run(self, entry: Dict[str, Any]) -> Tuple[Dict[Tuple[str, str], Dict[str, SourceSpan]], Set[Tuple[str, str]]]:
         """
         Parse the entry and return:
-          - list of (file_uri, [SourceSpan...])
-          - set of include relations (src_abs_path, include_abs_path)
+          - {(file_uri, tu_hash) → {key → SourceSpan}}
+          - {(including_file, included_file)}
         """
         self.entry = entry
-        self.span_results = defaultdict(dict)   # file_uri → {key → SourceSpan}
+        self.span_results = defaultdict(dict)   # dict {(file_uri, tu_hash) → {key → SourceSpan}}
         self.include_relations = set()          # set {(src_file, included_file)}
         self._tu_hash = None
         # Local per-TU header cache
@@ -118,12 +120,13 @@ class _ClangWorkerImpl:
         try:
             os.chdir(dir_path)
             args = self._sanitize_args(args, file_path)
+            #logger.debug(f"{args}")
 
             # compute TU hash (based on relevant preprocessor flags)
-            self._tu_hash = self._get_tu_hash(args)
+            self._tu_hash = sys.intern(self._get_tu_hash(args))
             self._processed_global_headers = self._global_header_cache.get(self._tu_hash, None)
 
-            self.lang = CompilationParser.get_language(file_path)
+            self.lang = sys.intern(CompilationParser.get_language(file_path))
 
             # proceed to parse with args
             self._parse_translation_unit(file_path, args)
@@ -139,7 +142,6 @@ class _ClangWorkerImpl:
         # Merge local header cache → global header cache
         # -----------------------------
         self._global_header_cache[self._tu_hash].update(self._local_header_cache)
-
 
         return self.span_results, self.include_relations
 
@@ -163,7 +165,7 @@ class _ClangWorkerImpl:
                 src_file = os.path.abspath(inc.source.name)
                 include_file = os.path.abspath(inc.include.name)
                 if src_file.startswith(self.project_path) and include_file.startswith(self.project_path):
-                    self.include_relations.add((src_file, include_file))
+                    self.include_relations.add((sys.intern(src_file), sys.intern(include_file)))
 
         self._walk_ast(tu.cursor)
 
@@ -202,7 +204,7 @@ class _ClangWorkerImpl:
         file_uri = f"file://{file_name}"
 
         node_key = CompilationParser.make_symbol_key(node.spelling, file_uri, name_start_line, name_start_col)
-        if node_key in self.span_results[file_uri]: 
+        if node_key in self.span_results[(file_uri, self._tu_hash)]: 
             # Same node can be defined in same header file of multiple TUs that have different TU hash, but we only want to keep one copy - for our purpose.
             # In the same TU, it is also possible to meet same node more than once, e.g., typedef struct { ... } A;
             #logger.warning(f"Duplicate node key: {node_key} for span {self.key_to_span[node_key]} when parsing {node.translation_unit.spelling}")
@@ -215,15 +217,15 @@ class _ClangWorkerImpl:
         kind = self._convert_node_kind_to_index_kind(node)
 
         span = SourceSpan(
-            name=node.spelling,
-            kind=kind,
+            name=sys.intern(node.spelling),
+            kind=sys.intern(kind),
             lang=self.lang,
             name_location=RelativeLocation(name_start_line, name_start_col, name_start_line, name_start_col + len(node.spelling)),
             body_location=RelativeLocation(body_start_line, body_start_col, body_end_line, body_end_col),
             id=synthetic_id,
             parent_id=parent_id
         )
-        self.span_results[file_uri][node_key] = span
+        self.span_results[(sys.intern(file_uri), self._tu_hash)][node_key] = span
 
     def _should_process_node(self, node, file_name) -> bool:
         """
@@ -272,7 +274,9 @@ class _ClangWorkerImpl:
         line, col = self._get_symbol_name_location(parent)
         parent_key = CompilationParser.make_symbol_key(parent.spelling, file_uri, line, col)
         # Return existing ID to its semantic children as parent id. Otherwise, return None.
-        parent_span = self.span_results[file_uri].get(parent_key)
+        if (file_uri, self._tu_hash) not in self.span_results:
+            return None
+        parent_span = self.span_results[(file_uri, self._tu_hash)].get(parent_key)
         if not parent_span:
             return None
         return parent_span.id
@@ -326,84 +330,109 @@ class _ClangWorkerImpl:
             logger.error(f"Unknown Clang parser kind: {node.kind.name}")
             return "Unknown"
 
+    def _sanitize_args(self, args: List[str], file_path: str) -> List[str]:
+            """
+            Remove irrelevant flags from compilation arguments.
+            Assumes the compiler executable path (args[0]) has already been removed by the caller.
+            """
+            sanitized = []
+            skip_next = False
+            # Loop over all arguments since the executable has been removed.
+            for a in args:
+                if skip_next:
+                    skip_next = False
+                    continue
+                # 1. Skip the command-line separator
+                if a == '--':
+                    continue
+                # 2. Skip Warning and Optimization flags
+                # These control compiler output/behavior but do not change the AST structure.
+                if a.startswith(('-W', '-O')):
+                    continue
+                # 3. Skip build-specific flags
+                # These flags are NOT relevant for parsing, and their values must be skipped
+                if a in {'-c', '-o', '-MMD', '-MF', '-MT', '-MQ', '-fcolor-diagnostics', '-fdiagnostics-color'}:
+                    # If it's a two-part flag like -o, we skip the next argument (the output filename)
+                    if a in {'-o', '-MF', '-MT', '-MQ'}:
+                        skip_next = True
+                    continue
+
+                # 4. Skip the main source file path itself
+                # We skip this because we pass the file path explicitly as the first argument to index.parse()
+                if a == file_path or os.path.basename(a) == os.path.basename(file_path):
+                    continue
+                sanitized.append(a)
+
+            return sanitized
+
     def _get_tu_hash(self, args: List[str]) -> str:
         """
-        Compute a deterministic hash representing the complete TU preprocessing and
-        language context. This is crucial for accurate caching.
-
-        We include flags that affect:
-        1. Preprocessor macros (-D, -U, -include)
-        2. Header search paths (-I, -isystem, -iquote)
-        3. Language dialect (-std=, -x, -f)
+        Computes a deterministic hash by bucketing flags into categories.
+        
+        Strategy:
+        1. Group 1: Language Standards (-std, --driver-mode)
+        2. Group 2: Macros (-D, -U)
+        3. Group 3: Features (-f, -m, --target)
+        4. Group 4: Includes (-I, -isystem, -include)
+        5. Group 5: Other (Catch-all for --sysroot, -stdlib, etc.)
+        
+        Within each group, we PRESERVE relative order (crucial for -I and overrides).
+        By enforcing a fixed order BETWEEN groups, we solve the issue where 
+        "-std" and "-fPIC" flip positions but mean the same thing.
         """
-        relevant = []
-        # Iterate through arguments, using index to handle two-part flags
+        
+        # Buckets
+        bucket_lang = []
+        bucket_macros = []
+        bucket_features = []
+        bucket_includes = []
+        bucket_other = []  # <--- CRITICAL: Safety net for all other flags
+        
         i = 0
         while i < len(args):
             a = args[i]
-            # --- 1. Flags that are *always* relevant ---
-            # Preprocessor (Defines/Undefines)
-            if a.startswith(("-D", "-U")):
-                relevant.append(a)
-            # Language/Target Dialects (often prefix-value: -std=c++17)
-            elif a.startswith(("-std=", "-x", "--target=", "-f")):
-                relevant.append(a)
-            # --- 2. Flags that can be one-part or two-part (Include Paths) ---
-            # Include Path and Forced Include Flags (e.g., -I, -isystem, -iquote, -include)
-            elif a in ('-I', '-isystem', '-iquote', '-include'):
-                # Append the flag itself
-                relevant.append(a)
-                # Check for the value part (the path/filename), which is the next argument
-                if i + 1 < len(args):
-                    relevant.append(args[i + 1])
-                    i += 1  # Skip the next iteration since we just consumed args[i+1]
             
-            # Include Path Flags that are one-part (e.g., -I/path/to/dir)
-            elif a.startswith(("-I", "-isystem", "-iquote")):
-                relevant.append(a)
-            # Move to the next argument
-            i += 1
+            # --- 1. Language Dialect ---
+            if a.startswith(("-std=", "-x", "--driver-mode")):
+                bucket_lang.append(a)
 
-        # Sort for determinism across argument order variations
-        relevant_sorted = sorted(relevant)
+            # --- 2. Macros ---
+            elif a.startswith(("-D", "-U")):
+                bucket_macros.append(a)
+                
+            # --- 3. Features / Codegen ---
+            elif a.startswith(("-f", "-m", "--target=")):
+                bucket_features.append(a)
+
+            # --- 4. Includes (Handling two-part flags) ---
+            elif a in ('-I', '-isystem', '-iquote', '-include'):
+                bucket_includes.append(a)
+                if i + 1 < len(args):
+                    bucket_includes.append(args[i + 1])
+                    i += 1 
+            
+            # --- 4. Includes (Handling one-part flags) ---
+            elif a.startswith(("-I", "-isystem", "-iquote")):
+                bucket_includes.append(a)
+            
+            # --- 5. CATCH-ALL ---
+            # Capture flags like --sysroot, -stdlib, -resource-dir, -v
+            # If we miss this, these flags are ignored, causing cache collisions
+            # between different system environments.
+            else:
+                bucket_other.append(a)
+            
+            i += 1
         
-        # Combine into a single string for hashing
-        hash_input = " ".join(relevant_sorted)
+        # Canonical Order: Lang -> Macros -> Features -> Includes -> Others
+        canonical_order = bucket_lang + bucket_macros + bucket_features + bucket_includes + bucket_other
         
-        # Compute the MD5 hash and return a short hex string
+        hash_input = " ".join(canonical_order)
+        
         h = hashlib.md5(hash_input.encode("utf-8")).hexdigest()
-        return h[:16]
-        
-    def _sanitize_args(self, args: List[str], file_path: str) -> List[str]:
-        """
-        Remove irrelevant flags from compilation arguments.
-        Assumes the compiler executable path (args[0]) has already been removed by the caller.
-        """
-        sanitized = []
-        skip_next = False
-        
-        # Loop over all arguments since the executable has been removed.
-        for a in args: 
-            if skip_next:
-                skip_next = False
-                continue
-                
-            # These flags are NOT relevant for parsing, and their values must be skipped
-            # These are often two-part flags (e.g., -o followed by the file name)
-            # The -c flag is also often used, though it doesn't usually take a value.
-            if a in {'-c', '-o', '-MMD', '-MF', '-MT', '-MQ', '-fcolor-diagnostics', '-fdiagnostics-color'}:
-                # If it's a two-part flag like -o, we skip the next argument (the output filename)
-                if a in {'-o', '-MF', '-MT', '-MQ'}:
-                    skip_next = True
-                continue
-            
-            # Skip the main source file path itself
-            if a == file_path or os.path.basename(a) == os.path.basename(file_path):
-                continue
-                
-            sanitized.append(a)
-            
-        return sanitized
+        return h
+
+
 
 class _TreesitterWorkerImpl:
     """Contains the logic to parse one file using tree-sitter."""
@@ -550,6 +579,87 @@ class CompilationParser:
         return lang
 
     def _parallel_parse(self, items_to_process: List, parser_type: str, num_workers: int, desc: str, worker_init_args: Dict[str, Any] = None):
+        """Generic parallel processing framework with Throttling (Fix B)."""
+        all_spans = defaultdict(dict)
+        all_includes = set()
+        file_tu_hash_map: Dict[str, Set[str]] = defaultdict(set)
+        
+        initargs = (parser_type, worker_init_args or {})
+        
+        # 1. Create an iterator so we can pull items one by one
+        items_iterator = iter(items_to_process)
+        
+        # 2. Define buffer size (limit "in-flight" tasks to 5x workers)
+        # This keeps RAM usage flat!
+        max_pending = num_workers * 5
+        futures: Dict[Any, Any] = {}
+
+        with ProcessPoolExecutor(
+            max_workers=num_workers,
+            initializer=_worker_initializer,
+            initargs=initargs
+        ) as executor:
+            
+            # 3. Prime the pump: Submit the initial batch
+            for _ in range(max_pending):
+                try:
+                    item = next(items_iterator)
+                    future = executor.submit(_parallel_worker, item)
+                    futures[future] = item
+                except StopIteration:
+                    break # Less items than workers
+            
+            # 4. The Rolling Loop
+            # We use a manual loop instead of as_completed to control submission
+            with tqdm(total=len(items_to_process), desc=desc) as pbar:
+                while futures:
+                    # Wait for the FIRST available result (prevents queue explosion)
+                    # This blocks until at least one task is done.
+                    done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                    
+                    for future in done:
+                        # Remove from active list so we can submit a new one
+                        item = futures.pop(future)
+                        pbar.update(1)
+                        
+                        try:
+                            span_result, includes = future.result()
+                            
+                            # --- MERGE LOGIC ---
+                            if includes: 
+                                all_includes.update(includes)
+                            
+                            if span_result:
+                                for (file_uri, tu_hash), key_to_span_dict in span_result.items():
+                                    # If there is a new TU hash, meaning its spans are not merged in the results yet
+                                    # Otherwise, ut must be a header file included in previous processed TUs, then we don't need merge its spans again.
+                                    if tu_hash not in file_tu_hash_map[file_uri]:
+                                        file_tu_hash_map[file_uri].add(tu_hash)
+
+                                        # Using setdefault is slightly safer/cleaner
+                                        all_spans[file_uri].update(key_to_span_dict)
+                            # -------------------
+
+                        except Exception as e:
+                            # Error handling preserves your original logic
+                            file_path = item if isinstance(item, str) else item.get('file', 'unknown')
+                            logger.error(f"A worker failed while processing {file_path}: {e}", exc_info=True)
+
+                        # 5. Replenish the queue
+                        # Submit ONE new task for every ONE task that finished
+                        try:
+                            next_item = next(items_iterator)
+                            new_future = executor.submit(_parallel_worker, next_item)
+                            futures[new_future] = next_item
+                        except StopIteration:
+                            # No more items to submit, just let the loop drain
+                            pass
+        
+        self.source_spans = all_spans
+        self.include_relations = all_includes
+        gc.collect()
+
+    def _parallel_parse0(self, items_to_process: List, parser_type: str, num_workers: int, desc: str, worker_init_args: Dict[str, Any] = None):
         """Generic parallel processing framework."""
         all_spans = defaultdict(dict)
         all_includes = set()
@@ -562,7 +672,7 @@ class CompilationParser:
             initargs=initargs
         ) as executor:
             future_to_item = {executor.submit(_parallel_worker, item): item for item in items_to_process}
-            
+            count_processed_tus = 0
             for future in tqdm(as_completed(future_to_item), total=len(items_to_process), desc=desc):
                 try:
                     span_result, includes = future.result()
@@ -571,7 +681,9 @@ class CompilationParser:
                     if not span_result: continue
                     for file_uri, key_to_span_dict in span_result.items():
                         all_spans[file_uri].update(key_to_span_dict)
-
+                    
+                    count_processed_tus += 1
+                    if count_processed_tus % 1000 == 0: gc.collect()
                 except Exception as e:
                     item = future_to_item[future]
                     file_path = item if isinstance(item, str) else item.get('file', 'unknown')
