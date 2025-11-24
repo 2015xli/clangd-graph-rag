@@ -11,11 +11,12 @@ import logging
 import subprocess
 import sys
 import hashlib
-from typing import List, Dict, Set, Tuple, Union, Any, Optional
+from typing import List, Dict, Set, Tuple, Union, Any, Optional, NamedTuple
 from pathlib import Path
 from collections import defaultdict
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed, wait, FIRST_COMPLETED
+from multiprocessing import get_context
 import gc
 from dataclasses import dataclass, field
 
@@ -73,6 +74,13 @@ class SpanTreeNode:
         self.children.append(child)
 
 # ============================================================
+# Include relations
+# ============================================================
+class IncludeRelation(NamedTuple):
+    source_file: str
+    included_file: str
+
+# ============================================================
 # Core Clang worker
 # ============================================================
 
@@ -88,7 +96,7 @@ class _ClangWorkerImpl:
         #   - {(file_uri, tu_hash) → {key → SourceSpan}}
         self.span_results: Dict[Tuple[str, str], Dict[str, SourceSpan]] = None
         #   - {(including_file, included_file)}
-        self.include_relations: Set[Tuple[str, str]] = None        
+        self.include_relations: Set[IncludeRelation] = None        
 
         # file-level cache to avoid re-processing header nodes in identical TU contexts
         # Since we use since _ClangWorkerImpl as a singleton in a worker process, this cache is shared across all invocations
@@ -100,7 +108,7 @@ class _ClangWorkerImpl:
     # --------------------------------------------------------
     # Main entry
     # --------------------------------------------------------
-    def run(self, entry: Dict[str, Any]) -> Tuple[Dict[Tuple[str, str], Dict[str, SourceSpan]], Set[Tuple[str, str]]]:
+    def run(self, entry: Dict[str, Any]) -> Tuple[Dict[Tuple[str, str], Dict[str, SourceSpan]], Set[IncludeRelation]]:
         """
         Parse the entry and return:
           - {(file_uri, tu_hash) → {key → SourceSpan}}
@@ -165,7 +173,13 @@ class _ClangWorkerImpl:
                 src_file = os.path.abspath(inc.source.name)
                 include_file = os.path.abspath(inc.include.name)
                 if src_file.startswith(self.project_path) and include_file.startswith(self.project_path):
-                    self.include_relations.add((sys.intern(src_file), sys.intern(include_file)))
+                    # Create the NamedTuple instance
+                    new_relation = IncludeRelation(
+                        source_file=sys.intern(src_file), 
+                        included_file=sys.intern(include_file)
+                    )
+                    self.include_relations.add(new_relation)
+
 
         self._walk_ast(tu.cursor)
 
@@ -536,7 +550,7 @@ class CompilationParser:
     def __init__(self, project_path: str):
         self.project_path = project_path
         self.source_spans: Dict[str, Dict[str, SourceSpan]] = defaultdict(dict) # Changed to Dict[FileURI, Dict[Key, SourceSpan]]
-        self.include_relations: Set[Tuple[str, str]] = set()
+        self.include_relations: Set[IncludeRelation] = set()
 
     def parse(self, files_to_parse: List[str], num_workers: int = 1):
         raise NotImplementedError
@@ -544,7 +558,7 @@ class CompilationParser:
     def get_source_spans(self) -> Dict[str, Dict[str, SourceSpan]]:
         return self.source_spans
 
-    def get_include_relations(self) -> Set[Tuple[str, str]]:
+    def get_include_relations(self) -> Set[IncludeRelation]:
         return self.include_relations
 
     def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
@@ -580,8 +594,8 @@ class CompilationParser:
 
     def _parallel_parse(self, items_to_process: List, parser_type: str, num_workers: int, desc: str, worker_init_args: Dict[str, Any] = None):
         """Generic parallel processing framework with Throttling (Fix B)."""
-        all_spans = defaultdict(dict)
-        all_includes = set()
+        all_spans: Dict[Tuple[str, str], Dict[str, SourceSpan]] = defaultdict(dict)
+        all_includes: Set[IncludeRelation] = set()
         file_tu_hash_map: Dict[str, Set[str]] = defaultdict(set)
         
         initargs = (parser_type, worker_init_args or {})
@@ -594,8 +608,10 @@ class CompilationParser:
         max_pending = num_workers * 5
         futures: Dict[Any, Any] = {}
 
+        ctx = get_context("spawn")
         with ProcessPoolExecutor(
             max_workers=num_workers,
+            mp_context=ctx,
             initializer=_worker_initializer,
             initargs=initargs
         ) as executor:
@@ -615,38 +631,12 @@ class CompilationParser:
                 while futures:
                     # Wait for the FIRST available result (prevents queue explosion)
                     # This blocks until at least one task is done.
-                    done, _ = wait(futures, return_when=FIRST_COMPLETED)
-                    
+                    done, _ = wait(futures, return_when=FIRST_COMPLETED)                   
                     for future in done:
-                        # Remove from active list so we can submit a new one
+                        # 1. Pop the finished future
                         item = futures.pop(future)
-                        pbar.update(1)
-                        
-                        try:
-                            span_result, includes = future.result()
-                            
-                            # --- MERGE LOGIC ---
-                            if includes: 
-                                all_includes.update(includes)
-                            
-                            if span_result:
-                                for (file_uri, tu_hash), key_to_span_dict in span_result.items():
-                                    # If there is a new TU hash, meaning its spans are not merged in the results yet
-                                    # Otherwise, ut must be a header file included in previous processed TUs, then we don't need merge its spans again.
-                                    if tu_hash not in file_tu_hash_map[file_uri]:
-                                        file_tu_hash_map[file_uri].add(tu_hash)
-
-                                        # Using setdefault is slightly safer/cleaner
-                                        all_spans[file_uri].update(key_to_span_dict)
-                            # -------------------
-
-                        except Exception as e:
-                            # Error handling preserves your original logic
-                            file_path = item if isinstance(item, str) else item.get('file', 'unknown')
-                            logger.error(f"A worker failed while processing {file_path}: {e}", exc_info=True)
-
-                        # 5. Replenish the queue
-                        # Submit ONE new task for every ONE task that finished
+                        pbar.update(1)                        
+                        # 2. Replenish the queue IMMEDIATELY
                         try:
                             next_item = next(items_iterator)
                             new_future = executor.submit(_parallel_worker, next_item)
@@ -654,15 +644,31 @@ class CompilationParser:
                         except StopIteration:
                             # No more items to submit, just let the loop drain
                             pass
+                        
+                        # 3. Merge results
+                        try:
+                            span_result, includes = future.result()
+                            if includes: all_includes.update(includes)
+                            if span_result:
+                                for file_uri, tu_hash in span_result.keys():
+                                    # Note: The merging loop runs only if deduplication fails
+                                    if tu_hash not in file_tu_hash_map[file_uri]:
+                                        file_tu_hash_map[file_uri].add(tu_hash)
+                                        all_spans[file_uri].update(span_result[(file_uri, tu_hash)])
+
+                        except Exception as e:
+                            # Error handling preserves your original logic
+                            file_path = item if isinstance(item, str) else item.get('file', 'unknown')
+                            logger.error(f"A worker failed while processing {file_path}: {e}", exc_info=True)
         
         self.source_spans = all_spans
         self.include_relations = all_includes
         gc.collect()
 
-    def _parallel_parse0(self, items_to_process: List, parser_type: str, num_workers: int, desc: str, worker_init_args: Dict[str, Any] = None):
+    def _parallel_parse_outdated(self, items_to_process: List, parser_type: str, num_workers: int, desc: str, worker_init_args: Dict[str, Any] = None):
         """Generic parallel processing framework."""
         all_spans = defaultdict(dict)
-        all_includes = set()
+        all_includes: Set[IncludeRelation] = set()
         
         initargs = (parser_type, worker_init_args or {})
 
@@ -827,6 +833,6 @@ class TreesitterParser(CompilationParser):
         logger.warning("Node kind conversion is not supported by TreesitterParser.")
         return kind
 
-    def get_include_relations(self) -> Set[Tuple[str, str]]:
+    def get_include_relations(self) -> Set[IncludeRelation]:
         logger.warning("Include relation extraction is not supported by TreesitterParser.")
         return set()

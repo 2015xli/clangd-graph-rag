@@ -17,7 +17,7 @@ try:
 except ImportError:
     git = None
 
-from compilation_parser import CompilationParser, ClangParser, TreesitterParser, SourceSpan
+from compilation_parser import CompilationParser, ClangParser, TreesitterParser, SourceSpan, IncludeRelation
 from git_manager import get_git_repo
 
 logger = logging.getLogger(__name__)
@@ -90,14 +90,14 @@ class ParserCache:
         logger.info("Mtime-based parser cache is valid.")
         return True
 
-    def load(self) -> Tuple[List[Dict], Set[Tuple[str, str]]]:
+    def load(self) -> Tuple[List[Dict], Set[IncludeRelation]]:
         """Loads extracted data (function spans, include relations) from the cache."""
         logger.info(f"Loading extracted data from cache: {self.cache_path}")
         with open(self.cache_path, "rb") as f: 
             loaded_data = pickle.load(f)
             return loaded_data.get("source_spans", []), loaded_data.get("include_relations", set())
 
-    def save(self, source_spans: List[Dict], include_relations: Set[Tuple[str, str]]):
+    def save(self, source_spans: List[Dict], include_relations: Set[IncludeRelation]):
         """Saves extracted data to the cache."""
         logger.info(f"Saving new extracted data to cache: {self.cache_path}")
         cache_obj = {
@@ -171,12 +171,12 @@ class CompilationManager:
         gc.collect()
         return
 
-    def get_source_spans(self) -> Dict[str, Set[SourceSpan]]:
+    def get_source_spans(self) -> Dict[str, Dict[str, SourceSpan]]:
         if not hasattr(self, '_parser') or self._parser is None:
             raise RuntimeError("CompilationManager has not parsed any files yet.")
         return self._parser.get_source_spans()
 
-    def get_include_relations(self) -> Set[Tuple[str, str]]:
+    def get_include_relations(self) -> Set[IncludeRelation]:
         if not hasattr(self, '_parser') or self._parser is None:
             raise RuntimeError("CompilationManager has not parsed any files yet.")
         return self._parser.get_include_relations()

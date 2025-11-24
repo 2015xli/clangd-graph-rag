@@ -13,8 +13,9 @@ from dataclasses import dataclass
 import logging, os
 import gc
 import math
-import concurrent.futures
-import itertools
+from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+from multiprocessing import get_context
+from tqdm import tqdm
 
 from memory_debugger import Debugger # Import Debugger
 
@@ -267,90 +268,123 @@ class SymbolParser:
             type=doc.get('Type', '')
         )
 
-    # Reads and parses a clangd YAML index in parallel by chunking it in memory.
+    # ------------------Parallel parsing--------------------------------------
 
-    def _sanitize_and_chunk_in_memory(self, num_chunks: int) -> List[str]:
-        """Reads the source file once, returning a list of sanitized in-memory chunk strings."""
-        if num_chunks <= 0:
-            raise ValueError("Number of chunks must be positive.")
+    # Batch helper function as YAML document batches generator
+    def _sanitize_and_generate_batches(self, batch_size: int):
+        """
+        Stream the YAML file line-by-line, identify YAML document boundaries ('---'),
+        and yield batches of *raw YAML text* (not parsed docs), where each batch
+        contains batch_size documents.
 
-        logger.info(f"Reading and chunking '{self.index_file_path}' into {num_chunks} in-memory chunks...")
-        
-        # First, count the documents to determine chunk size
-        total_docs = 0
+        This avoids loading the entire file or large chunks into memory.
+        """
+        batch_lines = []          # lines belonging to the current batch
+        docs_in_batch = 0         # number of documents in the current batch
+        current_doc_lines = []    # lines of the current YAML document
+
         with open(self.index_file_path, 'r', errors='ignore') as f:
-            for line in f:
-                if line.startswith('---'):
-                    total_docs += 1
-        
-        if total_docs == 0:
-            docs_per_chunk = 0
-        else:
-            docs_per_chunk = math.ceil(total_docs / num_chunks)
+            for raw_line in f:
+                line = raw_line.replace('\t', '  ')
 
-        if docs_per_chunk == 0:
-            logger.warning("No YAML documents found. Proceeding with a single chunk.")
-            with open(self.index_file_path, 'r', errors='ignore') as f:
-                return [f.read().replace('\t', '  ')]
+                # Detect YAML document start
+                if line.lstrip().startswith('---'):
+                    # If previous doc exists, flush it into the batch
+                    if current_doc_lines:
+                        batch_lines.extend(current_doc_lines)
+                        docs_in_batch += 1
+                        current_doc_lines = []
 
-        # Now, read the file again and create the in-memory chunks
-        chunks = []
-        current_chunk_lines = []
-        doc_count_in_chunk = 0
-        with open(self.index_file_path, 'r', errors='ignore') as f_in:
-            for line in f_in:
-                sanitized_line = line.replace('\t', '  ')
-                if sanitized_line.startswith('---'):
-                    if doc_count_in_chunk >= docs_per_chunk and len(chunks) < num_chunks -1:
-                        chunks.append("".join(current_chunk_lines))
-                        current_chunk_lines = []
-                        doc_count_in_chunk = 0
-                    doc_count_in_chunk += 1
-                current_chunk_lines.append(sanitized_line)
-        
-        if current_chunk_lines:
-            chunks.append("".join(current_chunk_lines))
+                        # If batch is full → yield as one big YAML string
+                        if docs_in_batch >= batch_size:
+                            yield ''.join(batch_lines)
+                            batch_lines = []
+                            docs_in_batch = 0
 
-        logger.info(f"Successfully created {len(chunks)} in-memory chunks.")
-        return chunks
+                    # Start a new document
+                    current_doc_lines = [line]
+                else:
+                    current_doc_lines.append(line)
 
-    def _parallel_parse(self, num_workers: int):
-        """
-        Phase 1 (Parallel): Reads and loads raw data from the index file in parallel.
-        """
-        logger.info("Sanitizing and chunking YAML file for parallel processing...")
-        # Create in-memory chunks from the main file
-        content_chunks = self._sanitize_and_chunk_in_memory(num_workers)
+            # EOF: flush the last document
+            if current_doc_lines:
+                batch_lines.extend(current_doc_lines)
+                docs_in_batch += 1
 
-        logger.info(f"Starting parallel parsing of {len(content_chunks)} chunks with {num_workers} workers...")
-        with concurrent.futures.ProcessPoolExecutor(max_workers=num_workers) as executor:
-            results = executor.map(_parse_worker, content_chunks, itertools.repeat(self.log_batch_size))
-            
-            for i, (symbols_chunk, refs_chunk, relations_chunk) in enumerate(results):
-                logger.info(f"Merging results from chunk {i+1}/{len(content_chunks)}...")
-                self.symbols.update(symbols_chunk)
-                self.unlinked_refs.extend(refs_chunk)
-                self.unlinked_relations.extend(relations_chunk)
-        
-        logger.info("All chunks processed and merged.")
-
-# --- Parallel Parser ---
-
-def _parse_worker(yaml_content_chunk: str, log_batch_size: int) -> Tuple[Dict[str, Symbol], List[Dict], List[Dict], bool]:
-    """
-    Worker function to parse a YAML content string chunk.
-    This function is executed in a separate process.
-    """
-    # new a local parser since the forked process can only see module-level symbols
-    # we only need to use its functions, so no need to pass the index_file_path
-    local_parser = SymbolParser("", log_batch_size)
-    try:
-        local_parser._load_from_string(yaml_content_chunk)
-        return local_parser.symbols, local_parser.unlinked_refs, local_parser.unlinked_relations
-
-    except yaml.YAMLError as e:
-        logger.error(f"YAML parsing error in worker: {e}")
-        return {}, [], [], False
+        # yield final partial batch
+        if batch_lines:
+            yield ''.join(batch_lines)
 
 
+    def _parallel_parse(self, num_workers: int, batch_size: int = 1000):
+        batch_size = max(batch_size, self.log_batch_size)
+        logger.info(f"Parallel YAML parsing with {num_workers} workers, batch={batch_size}")
 
+        futures = {}
+        max_pending = num_workers * 5
+
+        batch_iter = self._sanitize_and_generate_batches(batch_size)
+        ctx = get_context("spawn")
+        with ProcessPoolExecutor(
+            max_workers=num_workers,
+            mp_context=ctx,
+            initializer=_yaml_worker_initializer,
+            initargs=(self.log_batch_size,)
+        ) as executor:
+
+            # Prime the worker queue
+            for _ in range(max_pending):
+                try:
+                    batch = next(batch_iter)
+                    fut = executor.submit(_yaml_worker_process, batch)
+                    futures[fut] = True
+                except StopIteration:
+                    break
+
+            with tqdm(desc="Parsing YAML", unit="batch", total=1) as pbar:
+                while futures:
+                    done, _ = wait(futures, return_when=FIRST_COMPLETED)
+
+                    for fut in done:
+                        futures.pop(fut)
+                        pbar.total += 1
+                        pbar.update(1)
+                        # Submit next batch
+                        try:
+                            batch = next(batch_iter)
+                            nf = executor.submit(_yaml_worker_process, batch)
+                            futures[nf] = True
+                        except StopIteration:
+                            pass
+
+                        try:
+                            symbols, refs, rels = fut.result()
+                            self.symbols.update(symbols)
+                            self.unlinked_refs.extend(refs)
+                            self.unlinked_relations.extend(rels)
+                        except Exception as e:
+                            logger.error(f"YAML worker failed: {e}", exc_info=True)
+
+# ============================================================
+# Global worker parser, initializer and worker function
+# ============================================================
+_worker_parser = None
+
+def _yaml_worker_process(batch):
+    global _worker_parser
+
+    # Clear the scratch lists/dicts for this batch
+    _worker_parser.symbols = {}
+    _worker_parser.unlinked_refs = []
+    _worker_parser.unlinked_relations = []
+
+    # Parse the batch
+    _worker_parser._load_from_string(batch)
+
+    return (_worker_parser.symbols,
+            _worker_parser.unlinked_refs,
+            _worker_parser.unlinked_relations)
+
+def _yaml_worker_initializer(log_batch_size):
+    global _worker_parser
+    _worker_parser = SymbolParser("", log_batch_size)

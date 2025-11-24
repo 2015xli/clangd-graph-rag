@@ -13,6 +13,7 @@ from collections import defaultdict, deque
 
 from neo4j_manager import Neo4jManager
 from compilation_manager import CompilationManager
+from compilation_parser import IncludeRelation
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,7 @@ class IncludeRelationProvider:
         """
         logger.info("Preparing to ingest :INCLUDES relationships into the graph...")
         
-        include_relations_set = compilation_manager.get_include_relations()
+        include_relations_set: Set[IncludeRelation] = compilation_manager.get_include_relations()
         if not include_relations_set:
             logger.info("No include relations found to ingest.")
             return
@@ -100,7 +101,7 @@ class IncludeRelationProvider:
         logger.info(f"Found {len(impacted_files)} impacted source files in the graph.")
         return impacted_files
 
-    def analyze_impact_from_memory(self, all_relations: Set[Tuple[str, str]], headers_to_check: List[str]) -> Dict[str, List[str]]:
+    def analyze_impact_from_memory(self, all_relations: Set[IncludeRelation], headers_to_check: List[str]) -> Dict[str, List[str]]:
         """
         Analyzes the impact of header changes using an in-memory set of include relations.
         This method uses absolute paths as it operates on raw parser data.
