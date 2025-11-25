@@ -47,24 +47,21 @@ class SourceSpanProvider:
 
         logger.info("Filtering symbols to only include those in the project path.")
         project_path = self.compilation_manager.project_path
-        new_symbols = {}
+        
+        keys_to_remove = []
         for sym_id, sym in self.symbol_parser.symbols.items():
             loc = sym.definition or sym.declaration
-            if not loc:
-                continue
-            sym_abs_path = unquote(urlparse(loc.file_uri).path)
-            if not sym_abs_path.startswith(project_path):
-                if sym.kind not in ("Namespace"):
+            if loc:
+                sym_abs_path = unquote(urlparse(loc.file_uri).path)
+                if sym_abs_path.startswith(project_path) or sym.kind in ("Namespace"):
                     continue
-            
-            new_symbols[sym_id] = sym
+                
+            keys_to_remove.append(sym_id)
 
-        logger.info(f"Filtered {len(self.symbol_parser.symbols)} symbols to {len(new_symbols)} symbols.")
-        del self.symbol_parser.symbols
-        gc.collect()
-
-        self.symbol_parser.symbols = new_symbols
-
+        logger.info(f"Filtered {len(self.symbol_parser.symbols)} symbols to {len(self.symbol_parser.symbols) - len(keys_to_remove)} symbols.")        
+        for key in keys_to_remove:
+            del self.symbol_parser.symbols[key]
+        
         # Pass 0: Get span data
         # file_span_data: Dict[file_uri → Dict[key → SourceSpan]}
         file_span_data = self.compilation_manager.get_source_spans()

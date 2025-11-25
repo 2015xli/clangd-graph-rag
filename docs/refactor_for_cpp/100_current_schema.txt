@@ -11,8 +11,6 @@ Node Properties:
     node_label: STRING
     path: STRING
     scope: STRING
-    summary: STRING
-    summaryEmbedding: LIST
   (DATA_STRUCTURE)
     body_location: LIST
     file_path: STRING
@@ -41,16 +39,11 @@ Node Properties:
   (FILE)
     name: STRING
     path: STRING (INDEXED) (UNIQUE)
-    summary: STRING
-    summaryEmbedding: LIST
   (FOLDER)
     name: STRING
     path: STRING (INDEXED) (UNIQUE)
-    summary: STRING
-    summaryEmbedding: LIST
   (FUNCTION)
     body_location: LIST
-    codeSummary: STRING
     file_path: STRING
     has_definition: BOOLEAN
     id: STRING (INDEXED) (UNIQUE)
@@ -63,12 +56,9 @@ Node Properties:
     return_type: STRING
     scope: STRING
     signature: STRING
-    summary: STRING
-    summaryEmbedding: LIST
     type: STRING
   (METHOD)
     body_location: LIST
-    codeSummary: STRING
     file_path: STRING
     has_definition: BOOLEAN
     id: STRING (INDEXED) (UNIQUE)
@@ -81,18 +71,17 @@ Node Properties:
     return_type: STRING
     scope: STRING
     signature: STRING
-    summary: STRING
-    summaryEmbedding: LIST
     type: STRING
   (NAMESPACE)
+    id: STRING (INDEXED) (UNIQUE)
     name: STRING
-    qualified_name: STRING (INDEXED) (UNIQUE)
+    name_location: LIST
+    path: STRING
+    qualified_name: STRING
   (PROJECT)
     commit_hash: STRING
     name: STRING
     path: STRING
-    summary: STRING
-    summaryEmbedding: LIST
   (VARIABLE)
     file_path: STRING
     has_definition: BOOLEAN
@@ -109,32 +98,33 @@ Node Properties:
 Relationships:
   (CLASS_STRUCTURE) -[:HAS_FIELD]-> (FIELD)
   (CLASS_STRUCTURE) -[:HAS_METHOD]-> (METHOD)
+  (CLASS_STRUCTURE) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION)
   (CLASS_STRUCTURE) -[:INHERITS]-> (CLASS_STRUCTURE)
   (DATA_STRUCTURE) -[:HAS_FIELD]-> (FIELD)
+  (DATA_STRUCTURE) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE)
   (FILE) -[:DECLARES]-> (NAMESPACE)
   (FILE) -[:DEFINES]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE)
   (FILE) -[:INCLUDES]-> (FILE)
   (FOLDER) -[:CONTAINS]-> (FILE|FOLDER)
   (FUNCTION) -[:CALLS]-> (FUNCTION|METHOD)
+  (FUNCTION) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE)
   (METHOD) -[:CALLS]-> (FUNCTION|METHOD)
+  (METHOD) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE)
   (METHOD) -[:OVERRIDDEN_BY]-> (METHOD)
-  (NAMESPACE) -[:CONTAINS]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|NAMESPACE)
+  (NAMESPACE) -[:SCOPE_CONTAINS]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FIELD|FUNCTION|NAMESPACE|VARIABLE)
   (PROJECT) -[:CONTAINS]-> (FOLDER)
 
 Property Explanations:
-  body_location: Entity's body location in the file [start_line, start_column, end_line, end_column].
-  codeSummary: LLM-generated summary of the code's literal function.
-  file_path: Absolute path to the file containing the symbol.
-  has_definition: Boolean indicating if a symbol has a definition.
   id: Unique identifier for the node.
-  kind: Type of symbol (e.g., Function, Struct, Variable).
-  language: Programming language of the source code.
   name: Name of the entity (e.g., function name, file name).
-  name_location: Entity's name location in the file [line, column].
   path: Relative path to the project root if it is within the project folder. Otherwise, it is absolute path, including the PROJECT node
-  return_type: Return type of a function.
+  name_location: Entity's name location in the file, showing the start position: [line, column].
+  body_location: Entity's body location in the file, showing the range: [start_line, start_column, end_line, end_column].
+  kind: Type of symbol (e.g., Function, Struct, Variable).
   scope: Visibility scope (e.g., global, static).
-  signature: Full signature of a function.
-  summary: LLM-generated context-aware summary of the node's purpose.
-  summaryEmbedding: Vector embedding of the 'summary' for similarity search.
+  language: Programming language of the source code.
   type: Data type of the symbol (e.g., int, void*).
+  return_type: Return type of a function/method.
+  signature: Full signature of a function/method.
+  has_definition: Boolean indicating if a symbol has a definition/implementation, not just a declaration.
+  file_path: Absolute path to the file containing the symbol.

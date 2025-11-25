@@ -27,13 +27,18 @@ This is the primary and recommended strategy, valued for its accuracy.
 *   **Robust Location Finding**: The parser is designed to be resilient to complex C++ macros. It uses `libclang`'s "expansion location" feature to find the true physical source location of a symbol, even if the compiler initially reports its location as being inside a macro definition. This is critical for correctly matching parser output with the `clangd` index.
 *   **Dual Extraction**: For efficiency, the parser traverses the Abstract Syntax Tree (AST) of each source file once, extracting both symbol definition spans and include relationships in a single pass.
 *   **Path Handling**: A critical implementation detail is that it temporarily changes the working directory (`os.chdir`) to the compilation directory specified in `compile_commands.json` for each file it parses. This is essential for `libclang` to correctly resolve any relative include paths. This operation is safely wrapped in a `try...finally` block to guarantee the original working directory is always restored.
-*   **Parallel Processing**: The `ClangParser` leverages `concurrent.futures.ProcessPoolExecutor` to parse multiple Translation Units (TUs) in parallel. Each worker process runs an instance of `_ClangWorkerImpl`, which is responsible for parsing a single TU.
+*   **Parallel Processing with Flow Control and Batching**: The `ClangParser` leverages `concurrent.futures.ProcessPoolExecutor` to parse multiple Translation Units (TUs) in parallel, incorporating significant memory optimizations:
+    *   **"Spawn" Context**: The `ProcessPoolExecutor` is initialized with `multiprocessing.get_context("spawn")`. This ensures that worker processes start as fresh Python interpreters, avoiding memory inheritance from the potentially large main process and reducing overall memory footprint.
+    *   **Throttled Submission**: Instead of submitting all tasks at once, the main process maintains a limited number of "in-flight" tasks (e.g., `num_workers * 2`). It uses `wait(futures, return_when=FIRST_COMPLETED)` to wait for any worker to complete a task. As soon as a result is received, a new task is submitted to keep the worker pool busy without overwhelming the main process's result queue. This prevents memory bottlenecks in the main process.
+    *   **Task Batching for Workers**: Tasks are dispatched to workers in batches (controlled by `batch_size`, defaulting to 1). The `_parallel_worker` function now accepts a list of compilation entries (a batch). If a batch contains multiple entries, the worker process performs local parsing and merging of results from these multiple TUs within the batch before sending a single combined result back to the main process. This was intended to reduce the main process's merging overhead, though current tests show no significant performance improvement when `batch_size` is greater than 1. The feature is retained for potential future use or different scenarios.
+    *   The `items_to_process` (list of compilation entries) is treated as an iterator, allowing items to be pulled one by one, avoiding loading all items into memory at once.
 *   **Header Caching (`_global_header_cache` and `_tu_hash`)**: To prevent redundant parsing of header files across different TUs, `_ClangWorkerImpl` implements a sophisticated caching mechanism:
-    *   A `_tu_hash` is computed for each TU based on its compilation arguments (preprocessor macros, include paths, language dialect). This hash uniquely identifies the compilation environment.
+    *   A `_tu_hash` is computed for each TU based on its compilation arguments (preprocessor macros, include paths, language dialect). This hash uniquely identifies the compilation environment. The `_get_tu_hash` logic has been improved to bucket flags into categories (Language, Macros, Features, Includes, Other) and preserve relative order within buckets, ensuring more robust cache collision avoidance.
     *   A `_global_header_cache` (shared across worker processes) stores header file paths that have already been fully processed for a given `_tu_hash`.
     *   When a worker encounters a header file during AST traversal, it checks if that header has already been processed under the *exact same `_tu_hash`*. If so, parsing of that header's AST is safely skipped, as the `SourceSpan` data would be identical. This significantly reduces redundant work.
     *   A `_local_header_cache` temporarily collects headers processed by the current TU before merging them into the `_global_header_cache` at the end of the TU's processing.
 *   **Node Deduplication**: Within a single TU's AST traversal, the `_process_generic_node` method uses a `node_key` (derived from symbol name, file URI, line, and column) to ensure that only one `SourceSpan` object is created and stored for each unique AST node. This prevents duplicate entries if `libclang` reports the same node multiple times.
+*   **Argument Sanitization**: The `_sanitize_args` method has been refined to remove more irrelevant flags (e.g., `-W`, `-O`, `--`) from compilation arguments, further improving the determinism and effectiveness of the `_tu_hash`.
 
 ### 3.1. Output Data Structure: `SourceSpan` and `source_spans`
 
@@ -50,11 +55,12 @@ The primary output of the `ClangParser` is a collection of `SourceSpan` objects,
     *   `body_location`: A `RelativeLocation` object for the entire body of the entity (start/end line/column). This is crucial for extracting source code snippets.
     *   `id`: A deterministic `synthetic_id` generated from the `node_key`.
     *   `parent_id`: The `synthetic_id` of the immediate lexical parent of this entity, derived from the AST's semantic parent. This is fundamental for establishing parent-child relationships in the graph.
+*   **Memory Optimization**: The `SourceSpan` dataclass now uses `slots=True` to reduce its memory footprint, which is significant when dealing with millions of span objects.
 
 ### 3.2. Output Data Structure: `include_relations`
 
-*   **`self.include_relations`**: `Set[Tuple[str, str]]`
-    *   A set of tuples, where each tuple `(including_file_abs_path, included_file_abs_path)` represents a direct `#include` directive found during parsing.
+*   **`self.include_relations`**: `Set[IncludeRelation]`
+    *   A set of `IncludeRelation` NamedTuple objects, where each tuple `(source_file, included_file)` represents a direct `#include` directive found during parsing. This uses `sys.intern` for string deduplication.
 
 ## 4. Concrete Strategy: `TreesitterParser`
 

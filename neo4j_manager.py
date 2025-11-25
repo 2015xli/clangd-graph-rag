@@ -441,23 +441,23 @@ def _format_schema_for_display(schema_info: dict, args) -> str:
             "id": "Unique identifier for the node.",
             "name": "Name of the entity (e.g., function name, file name).",
             "path": "Relative path to the project root if it is within the project folder. Otherwise, it is absolute path, including the PROJECT node",
-            "name_location": "Entity's name location in the file [line, column].",
-            "body_location": "Entity's body location in the file [start_line, start_column, end_line, end_column].",
+            "name_location": "Entity's name location in the file, showing the start position: [line, column].",
+            "body_location": "Entity's body location in the file, showing the range: [start_line, start_column, end_line, end_column].",
             "kind": "Type of symbol (e.g., Function, Struct, Variable).",
             "scope": "Visibility scope (e.g., global, static).",
             "language": "Programming language of the source code.",
             "type": "Data type of the symbol (e.g., int, void*).",
-            "return_type": "Return type of a function.",
-            "signature": "Full signature of a function.",
-            "has_definition": "Boolean indicating if a symbol has a definition.",
+            "return_type": "Return type of a function/method.",
+            "signature": "Full signature of a function/method.",
+            "has_definition": "Boolean indicating if a symbol has a definition/implementation, not just a declaration.",
             "codeSummary": "LLM-generated summary of the code's literal function.",
             "summary": "LLM-generated context-aware summary of the node's purpose.",
             "summaryEmbedding": "Vector embedding of the 'summary' for similarity search.",
             "file_path": "Absolute path to the file containing the symbol."
         }
-        for prop_key in sorted(list(all_present_property_keys)):
-            explanation = property_explanations.get(prop_key)
-            if explanation:
+        #for prop_key in sorted(list(all_present_property_keys)):
+        for prop_key, explanation in property_explanations.items():
+            if prop_key in all_present_property_keys:
                 output_lines.append(f"  {prop_key}: {explanation}")
 
     return "\n".join(output_lines)

@@ -11,6 +11,7 @@ import logging
 import subprocess
 import sys
 import hashlib
+from itertools import islice
 from typing import List, Dict, Set, Tuple, Union, Any, Optional, NamedTuple
 from pathlib import Path
 from collections import defaultdict
@@ -513,8 +514,12 @@ def _worker_initializer(parser_type: str, init_args: Dict[str, Any]):
     else:
         raise ValueError(f"Unknown parser type: {parser_type}")
 
-def _parallel_worker(data: Any) -> Tuple[Optional[Dict[str, Set[SourceSpan]]], Set]:
-    """Generic top-level worker function that uses the process-local worker object."""
+def _parallel_worker(data: Any) -> Tuple[Optional[Dict[Tuple[str,str], Dict[str, SourceSpan]]], Set]:
+    """Generic top-level worker function that uses the process-local worker object.
+
+    Accepts a list of entry dicts (batch).
+    When given a list, it locally merges per-entry results into one result.
+    """
     global _worker_impl_instance
     global _count_processed_tus
 
@@ -522,13 +527,50 @@ def _parallel_worker(data: Any) -> Tuple[Optional[Dict[str, Set[SourceSpan]]], S
         raise RuntimeError("Worker implementation has not been initialized in this process.")
 
     try:
-        _count_processed_tus += 1
-        if _count_processed_tus % 1000 == 0: gc.collect()
+        # Fast path: we have a single entry so we avoid the overhead of local merging
+        if len(data) == 1:
+            entry = data[0]
+            _count_processed_tus += 1
+            if _count_processed_tus % 1000 == 0: gc.collect()
 
-        return _worker_impl_instance.run(data)
-    except RecursionError:
-        file_path = data if isinstance(data, str) else data.get('file', 'unknown')
-        logger.error(f"Hit recursion limit while parsing {file_path}. The file's AST is likely too deep.")
+            try:
+                span_result, includes = _worker_impl_instance.run(entry)
+            except Exception:
+                file_path = entry if isinstance(entry, str) else entry.get('file', 'unknown')
+                logger.exception(f"Worker failed on {file_path}")
+                return None, set()
+            return span_result, includes
+
+        # Otherwise, we have a list of entries that need local merging    
+        merged_spans: Dict[Tuple[str, str], Dict[str, SourceSpan]] = defaultdict(dict)
+        merged_includes: Set[IncludeRelation] = set()
+
+        for entry in data:
+            _count_processed_tus += 1
+            if _count_processed_tus % 1000 == 0: gc.collect()
+
+            try:
+                span_result, includes = _worker_impl_instance.run(entry)
+            except Exception:
+                file_path = entry if isinstance(entry, str) else entry.get('file', 'unknown')
+                logger.exception(f"Worker failed on {file_path}")
+                continue
+
+            if includes:
+                merged_includes.update(includes)
+
+            if not span_result:
+                continue
+
+            # Merge per-entry span_result into merged_spans with intra-batch dedup
+            # Local merging does not use tu_hash to dedup, because it has deduped during parsing
+            for (file_uri, tu_hash), key_to_span_dict in span_result.items():
+                merged_spans[(file_uri, tu_hash)].update(key_to_span_dict)
+
+        return merged_spans, merged_includes
+
+    except Exception as e:
+        logger.exception(f"Unexpected error in worker: {e}")
         return None, set()
 
 # --- Abstract Base Class ---
@@ -592,20 +634,22 @@ class CompilationParser:
             lang = "Unknown"
         return lang
 
-    def _parallel_parse(self, items_to_process: List, parser_type: str, num_workers: int, desc: str, worker_init_args: Dict[str, Any] = None):
-        """Generic parallel processing framework with Throttling (Fix B)."""
+    def _parallel_parse(self, items_to_process: List, parser_type: str, num_workers: int, desc: str, worker_init_args: Dict[str, Any] = None, batch_size: int = 1):
+        """Generic parallel processing with task batching so workers do local merging.
+
+        batch_size: Number of TUs to send to a worker in one task submission.
+        """
         all_spans: Dict[Tuple[str, str], Dict[str, SourceSpan]] = defaultdict(dict)
         all_includes: Set[IncludeRelation] = set()
         file_tu_hash_map: Dict[str, Set[str]] = defaultdict(set)
-        
+
         initargs = (parser_type, worker_init_args or {})
-        
-        # 1. Create an iterator so we can pull items one by one
+
+        # Create an iterator so we can pull items one by one
         items_iterator = iter(items_to_process)
-        
-        # 2. Define buffer size (limit "in-flight" tasks to 5x workers)
-        # This keeps RAM usage flat!
-        max_pending = num_workers * 5
+
+        # Define buffer size (limit "in-flight" tasks to 5x workers)
+        max_pending = num_workers * 2
         futures: Dict[Any, Any] = {}
 
         ctx = get_context("spawn")
@@ -615,85 +659,55 @@ class CompilationParser:
             initializer=_worker_initializer,
             initargs=initargs
         ) as executor:
-            
-            # 3. Prime the pump: Submit the initial batch
+
+            # Helper to fetch the next batch (list). Returns empty list if exhausted.
+            def _next_batch():
+                return list(islice(items_iterator, batch_size))
+
+            # Prime the pump: Submit the initial batch tasks
             for _ in range(max_pending):
-                try:
-                    item = next(items_iterator)
-                    future = executor.submit(_parallel_worker, item)
-                    futures[future] = item
-                except StopIteration:
-                    break # Less items than workers
-            
-            # 4. The Rolling Loop
-            # We use a manual loop instead of as_completed to control submission
-            with tqdm(total=len(items_to_process), desc=desc) as pbar:
+                batch = _next_batch()
+                if not batch:
+                    break
+                future = executor.submit(_parallel_worker, batch)
+                futures[future] = len(batch)  # store batch size for progress accounting
+
+            total_tus = len(items_to_process)
+            with tqdm(total=total_tus, desc=desc) as pbar:
                 while futures:
-                    # Wait for the FIRST available result (prevents queue explosion)
-                    # This blocks until at least one task is done.
-                    done, _ = wait(futures, return_when=FIRST_COMPLETED)                   
+                    done, _ = wait(futures, return_when=FIRST_COMPLETED)
+
                     for future in done:
-                        # 1. Pop the finished future
-                        item = futures.pop(future)
-                        pbar.update(1)                        
-                        # 2. Replenish the queue IMMEDIATELY
-                        try:
-                            next_item = next(items_iterator)
-                            new_future = executor.submit(_parallel_worker, next_item)
-                            futures[new_future] = next_item
-                        except StopIteration:
-                            # No more items to submit, just let the loop drain
-                            pass
-                        
-                        # 3. Merge results
+                        # Pop finished future and get how many TUs this future represented
+                        batch_count = futures.pop(future)
+                        # Update progress bar by number of TUs processed in this batch
+                        pbar.update(batch_count)
+
+                        # Replenish the queue immediately
+                        next_batch = _next_batch()
+                        if next_batch:
+                            nf = executor.submit(_parallel_worker, next_batch)
+                            futures[nf] = len(next_batch)
+
+                        # Merge results from this future
                         try:
                             span_result, includes = future.result()
-                            if includes: all_includes.update(includes)
+                            if includes:
+                                all_includes.update(includes)
+
                             if span_result:
-                                for file_uri, tu_hash in span_result.keys():
-                                    # Note: The merging loop runs only if deduplication fails
+                                # Merge using same dedupe rule: only add spans from (file_uri, tu_hash)
+                                # when tu_hash hasn't been seen for the file.
+                                #logger.debug(f"Merging spans for {len(span_result)} TUs")
+                                for (file_uri, tu_hash), key_to_span_dict in span_result.items():
                                     if tu_hash not in file_tu_hash_map[file_uri]:
                                         file_tu_hash_map[file_uri].add(tu_hash)
-                                        all_spans[file_uri].update(span_result[(file_uri, tu_hash)])
+                                        all_spans[file_uri].update(key_to_span_dict)
+                                #logger.debug(f"Merged spans for {len(span_result)} TUs")
 
                         except Exception as e:
                             # Error handling preserves your original logic
-                            file_path = item if isinstance(item, str) else item.get('file', 'unknown')
-                            logger.error(f"A worker failed while processing {file_path}: {e}", exc_info=True)
-        
-        self.source_spans = all_spans
-        self.include_relations = all_includes
-        gc.collect()
-
-    def _parallel_parse_outdated(self, items_to_process: List, parser_type: str, num_workers: int, desc: str, worker_init_args: Dict[str, Any] = None):
-        """Generic parallel processing framework."""
-        all_spans = defaultdict(dict)
-        all_includes: Set[IncludeRelation] = set()
-        
-        initargs = (parser_type, worker_init_args or {})
-
-        with ProcessPoolExecutor(
-            max_workers=num_workers,
-            initializer=_worker_initializer,
-            initargs=initargs
-        ) as executor:
-            future_to_item = {executor.submit(_parallel_worker, item): item for item in items_to_process}
-            count_processed_tus = 0
-            for future in tqdm(as_completed(future_to_item), total=len(items_to_process), desc=desc):
-                try:
-                    span_result, includes = future.result()
-                    if includes: all_includes.update(includes)
-                    
-                    if not span_result: continue
-                    for file_uri, key_to_span_dict in span_result.items():
-                        all_spans[file_uri].update(key_to_span_dict)
-                    
-                    count_processed_tus += 1
-                    if count_processed_tus % 1000 == 0: gc.collect()
-                except Exception as e:
-                    item = future_to_item[future]
-                    file_path = item if isinstance(item, str) else item.get('file', 'unknown')
-                    logger.error(f"A worker failed while processing {file_path}: {e}", exc_info=True)
+                            logger.error(f"A worker failed while processing a batch: {e}", exc_info=True)
 
         self.source_spans = all_spans
         self.include_relations = all_includes

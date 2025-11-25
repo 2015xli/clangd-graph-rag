@@ -311,8 +311,7 @@ class SymbolProcessor:
             function_merge_query = """
             UNWIND $function_data AS data
             MERGE (n:FUNCTION {id: data.id})
-            ON CREATE SET n += data
-            ON MATCH SET n += data
+            SET n += apoc.map.removeKeys(data, ['parent_id', 'namespace_id'])
             """
             all_counters = neo4j_mgr.process_batch([(function_merge_query, {"function_data": batch})])
             for counters in all_counters:
@@ -331,8 +330,7 @@ class SymbolProcessor:
             data_structure_merge_query = """
             UNWIND $data_structure_data AS data
             MERGE (n:DATA_STRUCTURE {id: data.id})
-            ON CREATE SET n += data
-            ON MATCH SET n += data
+            SET n += apoc.map.removeKeys(data, ['parent_id', 'namespace_id'])
             """
             all_counters = neo4j_mgr.process_batch([(data_structure_merge_query, {"data_structure_data": batch})])
             for counters in all_counters:
@@ -351,7 +349,7 @@ class SymbolProcessor:
             field_merge_query = """
             UNWIND $field_data AS data
             MERGE (n:FIELD {id: data.id})
-            SET n += apoc.map.removeKey(data, 'parent_id')
+            SET n += apoc.map.removeKeys(data, ['parent_id', 'namespace_id'])
             """
             all_counters = neo4j_mgr.process_batch([(field_merge_query, {"field_data": batch})])
             for counters in all_counters:
@@ -387,8 +385,8 @@ class SymbolProcessor:
             class_merge_query = """
             UNWIND $class_data AS data
             MERGE (n:CLASS_STRUCTURE {id: data.id})
-            ON CREATE SET n += data
-            ON MATCH SET n += data
+            SET n += apoc.map.removeKeys(data, ['parent_id', 'namespace_id'])
+
             """
             all_counters = neo4j_mgr.process_batch([(class_merge_query, {"class_data": batch})])
             for counters in all_counters:
@@ -426,8 +424,7 @@ class SymbolProcessor:
             variable_merge_query = """
             UNWIND $variable_data AS data
             MERGE (n:VARIABLE {id: data.id})
-            ON CREATE SET n += data
-            ON MATCH SET n += data
+            SET n += apoc.map.removeKeys(data, ['parent_id', 'namespace_id'])
             """
             all_counters = neo4j_mgr.process_batch([(variable_merge_query, {"variable_data": batch})])
             for counters in all_counters:

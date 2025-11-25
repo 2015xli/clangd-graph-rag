@@ -318,7 +318,7 @@ class SymbolParser:
 
     def _parallel_parse(self, num_workers: int, batch_size: int = 1000):
         batch_size = max(batch_size, self.log_batch_size)
-        logger.info(f"Parallel YAML parsing with {num_workers} workers, batch={batch_size}")
+        logger.info(f"Parallel YAML parsing with {num_workers} workers ( 1 batch={batch_size} symbols)")
 
         futures = {}
         max_pending = num_workers * 5
@@ -327,7 +327,7 @@ class SymbolParser:
         ctx = get_context("spawn")
         with ProcessPoolExecutor(
             max_workers=num_workers,
-            mp_context=ctx,
+            mp_context=ctx, 
             initializer=_yaml_worker_initializer,
             initargs=(self.log_batch_size,)
         ) as executor:
