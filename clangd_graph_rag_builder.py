@@ -32,54 +32,9 @@ from include_relation_provider import IncludeRelationProvider
 import logging
 import sys
 
-# --- 1. Custom Filter Classes ---
-# --- 1. Custom Filter Classes for Level Separation ---
-
-class DebugOnlyFilter(logging.Filter):
-    """Passes ONLY messages with an exact level of DEBUG (levelno 10)."""
-    def filter(self, record):
-        return record.levelno == logging.DEBUG
-
-class InfoAndUpFilter(logging.Filter):
-    """Passes ONLY messages with a level of INFO (levelno 20) or higher."""
-    def filter(self, record):
-        return record.levelno >= logging.INFO
-
-# --- 2. Configure the Root Logger (The System Gatekeeper) ---
-
-# Get the Root Logger (the one named '')
-root_logger = logging.getLogger()
-# Set the Root Logger to INFO. This is CRITICAL: it prevents all third-party 
-# libraries from generating DEBUG logs, isolating your application.
-root_logger.setLevel(logging.INFO) 
-# Note: Handlers will be attached to the root logger.
-
-# --- 3. Configure YOUR Application Logger (Bypassing the Root's Restriction) ---
-
-# Get your specific main module logger (__main__)
-logger = logging.getLogger(__name__) 
-# Explicitly set your application's logger to DEBUG. This ensures your log messages
-# are created and processed, even though the root is set to INFO.
-logger.setLevel(logging.DEBUG) 
-
-# --- 4. Configure the STDOUT (Console) Handler ---
-
-stdout_handler = logging.StreamHandler(sys.stdout)
-stdout_handler.setLevel(logging.DEBUG) # Allow all messages (DEBUG and up) to reach the filter
-stdout_handler.addFilter(InfoAndUpFilter()) # Filter to pass only INFO, WARNING, ERROR, etc.
-stdout_handler.setFormatter(logging.Formatter('%(asctime)s - [%(levelname)s] %(message)s'))
-
-# --- 5. Configure the FILE Handler ---
-file_handler = logging.FileHandler('debug.log', mode='w') # 'w' overwrites on start
-file_handler.setLevel(logging.DEBUG) # Allow all messages (DEBUG and up) to reach the filter
-file_handler.addFilter(DebugOnlyFilter()) # CRITICAL: Filter to pass ONLY DEBUG messages
-file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - [%(levelname)s] %(message)s'))
-
-# --- 6. Add Handlers to the Root Logger ---
-
-# These handlers will process logs that propagate up from all your modules.
-root_logger.addHandler(stdout_handler)
-root_logger.addHandler(file_handler)
+from log_manager import init_logging
+init_logging()
+logger = logging.getLogger(__name__)
 
 class GraphBuilder:
     """Orchestrates the full build of the code graph from a clangd index."""
@@ -117,8 +72,8 @@ class GraphBuilder:
                 del self.symbol_parser
                 gc.collect()
 
-                self._pass_7_generate_rag(neo4j_mgr)
-                self._pass_8_cleanup_orphans(neo4j_mgr)
+                self._pass_7_graph_cleanup(neo4j_mgr)
+                self._pass_8_generate_rag(neo4j_mgr)
 
             logger.info("\n✅ All passes complete. Code graph ingestion finished.")
             return 0
@@ -221,11 +176,22 @@ class GraphBuilder:
         gc.collect()
         logger.info("--- Finished Pass 6 ---")
 
-    def _pass_7_generate_rag(self, neo4j_mgr):
+    def _pass_7_graph_cleanup(self, neo4j_mgr):
+        if not self.args.keep_orphans:
+            logger.info("\n--- Starting Pass 7: Cleaning up Orphan Nodes ---")
+            deleted_nodes_count = neo4j_mgr.cleanup_orphan_nodes()
+            logger.info(f"Removed {deleted_nodes_count} orphan nodes.")
+            logger.info(f"Total nodes in graph: {neo4j_mgr.total_nodes_in_graph()}")
+            logger.info(f"Total relationships in graph: {neo4j_mgr.total_relationships_in_graph()}")
+            logger.info("--- Finished Pass 7 ---")
+        else:
+            logger.info("\n--- Skipping Pass 7: Keeping orphan nodes as requested ---")
+
+    def _pass_8_generate_rag(self, neo4j_mgr):
         if not self.args.generate_summary:
             return
 
-        logger.info("\n--- Starting Pass 7: Generating Summaries and Embeddings ---")
+        logger.info("\n--- Starting Pass 8: Generating Summaries and Embeddings ---")
         from code_graph_rag_generator import RagGenerator
         from llm_client import get_llm_client, get_embedding_client
 
@@ -245,16 +211,7 @@ class GraphBuilder:
 
         rag_generator.summarize_code_graph()
         neo4j_mgr.create_vector_indices()
-        logger.info("--- Finished Pass 7 ---")
-
-    def _pass_8_cleanup_orphans(self, neo4j_mgr):
-        if not self.args.keep_orphans:
-            logger.info("\n--- Starting Pass 8: Cleaning up Orphan Nodes ---")
-            deleted_nodes_count = neo4j_mgr.cleanup_orphan_nodes()
-            logger.info(f"Removed {deleted_nodes_count} orphan nodes.")
-            logger.info("--- Finished Pass 8 ---")
-        else:
-            logger.info("\n--- Skipping Pass 8: Keeping orphan nodes as requested ---")
+        logger.info("--- Finished Pass 8 ---")
 
 import input_params
 from pathlib import Path

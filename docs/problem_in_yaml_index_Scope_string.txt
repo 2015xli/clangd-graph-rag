@@ -1,0 +1,49 @@
+Since every symbol from yaml index has a Scope string, I wanted to use it as the primary driver for the HAS_NESTED relationship identification. 
+
+The HAS_NESTED relationship that I hoped to build is:
+(CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|METHOD) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION)
+
+I wanted to use HAS_NESTED to distinguish from Namespace's scope containing relationship SCOPE_CONTAINS: (NAMESPACE) -[:SCOPE_CONTAINS]-> (NAMESPACE|CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE). 
+
+My previous plan to implement HAS_NESTED was to match the Scope string of a symbol to another target symbol, where the latter is the nester of the former, the former is nestee. But I found this idea did not work through with current clangd-indexer's yaml index file.
+
+1. Not all the target symbols are available in the yaml index. At least the anonymous entities don't have such as anonymous struct, since clangd index yaml file only has symbols for named entities. We need create synthetic Symbol data for an anonymous entity with a unique synthetic ID, and find its nester's symbol. Its nester may be anonymous entity as well with only synthetic Symbol. I could represent the nester symbol with parent_id field in the nestee symbol, which would be used to build the HAS_NESTED relationship in neo4j graph. 
+
+2. Even if the targe symbol (nester) is available in the clangd index yaml file, we know there are cases where we have no way to map the scope string of a symbol to a target symbol. Let's assume a fully qualified scope string is in form of part scope strings like "part_scope1::part_scope2::part_scope3::". 
+
+2.1. If a part_scope in a symbol (the nestee)'s Scope string represents an anonymous entity like '(anonymous struct)::', it has no way to know the synthetic ID of the entity we created.
+
+2.2. If a part_scope in a symbol (the nestee)'s Scope string has type specialization expression with accurate types like 'symbol_name_A<unsigned int>::', its corresponding Symbol (the nester)'s name has no type specialization part, but the 'symbol_name_A'. The Symbol's TemplateSpecializationArgs field gives the '<unsigned int>'. There can be multiple Symbols in the clangd index yaml file having the same symbol_name_A, while with different TemplateSpecializationArgs strings. If we want to map a nestee's Symbol's Scope string to the target Symbol, we need do some string concatenation between the Symbol's name and TemplateSpecializationArgs. But this is not enough. See next.
+ 
+2.3. If a part_scope in a symbols (the nestee)'s Scope string has type specialization part with type placeholder like 'symbol_name_A<type-parameter-0-0 (type-parameter-0-1...)>::', where the type-parameter-0-0, type-parameter-0-1 are just type placeholders. Its corresponding target Symbol (the nester)'s name string has no specialization part, but the 'symbol_name_A'. At the same time, the symbol's TemplateSpecializationArgs gives the '<_Res (_ArgTypes...)>'. The nester symbol's TemplateSpecializationArgs string is different from the the nestee symbol's Scope string's type specialization part. So string concatenation between the nester's Symbol's name and TemplateSpecializationArgs cannot match the nestee's Scope string.
+
+2.4. Even more complicated, the part_scope may have any template-specific characters like [], *, & for template type representation, such as 'unique_ptr<type-parameter-0-0[], type-parameter-0-1 &&>::'. This makes it even harder to map it to the the TemplateSpecializationArgs like '<_Res[], _ArgType &&>' of the target nester Symbol.
+
+2.5. If a part_scope has function (or method) entity, it includes the signature of the function but with only parameter types and no parameter names, e.g., 'create_strings(const std::vector<std::string> &)::'. The symbol's name of the function does not include the signature, while having a Signature field for it like '(const std::vector<std::string> & strings)'. If a function foo() has no parameter, its Signature field is empty, while its corresponding part_scope is 'foo()::'. This also adds the difficulty to map a nestee's Scope string to a nestor symbol.
+
+So we gave up using Symbol's Scope string to build the :HAS_NESTED relationship.
+
+3. I solved the problem by directly using cland.cindex compilation parser to construct the nesting relationship.
+
+3.1. It iterates the file AST to find all nodes that have body spans. Then it creates a synthetic ID for it, and creates a SourceSpan object to record the node's info. The info will be used by SourceSpanProvider to create synthetic Symbol object when it enriches the symbol data from SymbolParser.
+
+3.2. In SourceSpanProvider, it tries to match the symbols of SymbolParser with key (symbol name, file uri, start line, start column) to the SourceSpan objects returned by the clang parser. If a symbol is matched to a SourceSpan object, it adds the body location info to the symbol data. Otherwise, if no symbol can be matched, it creates symthetic Symbol objects for all the remaining SourceSpan objects, and add them to symbolParser. 
+
+3.3. At the same time, since the SourceSpan object also records its parent SourceSpan id, we can leverage this info to build the nester-nestee relationship. (In clang index yaml file, the !Ref documents also record the parent symbol ID in its Container field for most symbols. But there are still many missing, especially the anonymous entities.)
+
+3.4. For fields (or variables, pure virtual method, etc.) that have no parent symbol given by the clang index yaml file, the SourceSpanProvider just searches all the SourceSpan objects from the same file of the field, then identifies the innermost body span that contains the field's location, and uses it as its parent SourceSpan (hence the parent synthetic Symbol).
+
+By using the SourceSpan as the absolute source of truth for all lexical nesting and generating "synthetic" symbols for anonymous structures, I can handle both named and anonymous entities with a unified, elegant mechanism.
+
+The end result is that every symbol object that has a lexical parent (e.g., a nester class) will have a parent_id attribute pointing directly to its parent symbol. This is exactly what's needed for the graph.
+
+4. Namespace structure handling.
+
+NOTE: We don't include NAMESPACE spans in clang.cindex parsing, although they have body spans. 
+
+The reason is, same namespaces are declared in multiple sites at different locations, hence may have multiple different synthetic ids, which are considered as different symbols. Unless we reconcil all the namespace symbols to keep only one canonical one, we will end up with multiple namespace nodes in the neo4j graph, which is incorrect.
+
+So for namespaces, we should only use their name literals as the identifier, not locations.  For simplicity, we just use the Namespace symbol in the clangd index yaml file, without dealing with them in clang.cindex parsing. 
+
+In future, I will check if we need create parent (or scope) relation data structure from a namespace literal to an entity in clang.cindex. 
+

@@ -22,7 +22,7 @@ from compilation_manager import CompilationManager
 from clangd_index_yaml_parser import (
     SymbolParser, Symbol, Location, Reference, RelativeLocation, CallRelation
 )
-from neo4j_manager import Neo4jManager
+from neo4j_manager import Neo4jManager, align_string
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -90,7 +90,7 @@ Functions that are only called (leaf functions): {len(callees - callers)}
 
         if neo4j_mgr:
             total_rels_created = 0
-            for i in tqdm(range(0, total_relations, self.ingest_batch_size), desc="Ingesting CALLS relations"):
+            for i in tqdm(range(0, total_relations, self.ingest_batch_size), desc=align_string("Ingesting CALLS relations")):
                 batch = all_relations[i:i + self.ingest_batch_size]
                 all_counters = neo4j_mgr.process_batch([(query, {"relations": batch})])
                 for counters in all_counters:

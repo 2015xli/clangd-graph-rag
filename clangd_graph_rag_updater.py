@@ -21,7 +21,10 @@ from include_relation_provider import IncludeRelationProvider
 from compilation_parser import CompilationParser # Import CompilationParser
 from graph_update_scope_builder import GraphUpdateScopeBuilder
 
+from log_manager import init_logging
+init_logging()
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 class GraphUpdater:
     """Manages the incremental update process using dependency analysis."""
@@ -67,25 +70,31 @@ class GraphUpdater:
 
             logger.info(f"Found {len(dirty_files)} files to re-ingest and {len(git_changes['deleted'])} files to delete.")
 
-            # Phase 3: Purge all stale data from the graph
-            dirty_files_rel = {os.path.relpath(f, self.project_path) for f in dirty_files}
-            deleted_files_rel = [os.path.relpath(f, self.project_path) for f in git_changes['deleted']]
-            self._purge_stale_graph_data(dirty_files_rel, deleted_files_rel)
-
-            # Phase 4: Rebuild the dirty scope using the dedicated builder
+            # Phase 3: Rebuild the dirty scope using the dedicated builder
             full_symbol_parser = SymbolParser(self.args.index_file)
             full_symbol_parser.parse(self.args.num_parse_workers)
 
             scope_builder = GraphUpdateScopeBuilder(self.args, self.neo4j_mgr, self.project_path)
-            mini_symbol_parser = scope_builder.rebuild_dirty_scope(dirty_files, full_symbol_parser)
+            mini_symbol_parser = scope_builder.build_miniparser_for_dirty_scope(dirty_files, full_symbol_parser)
 
-            # Phase 5: Run targeted RAG update if any symbols were re-ingested
+            # Phase 4: Purge all stale data from the graph
+            dirty_files_rel = {os.path.relpath(f, self.project_path) for f in dirty_files}
+            deleted_files_rel = [os.path.relpath(f, self.project_path) for f in git_changes['deleted']]
+            self._purge_stale_graph_data(dirty_files_rel, deleted_files_rel)
+
+            # Phase 5: Rebuild the dirty scope
+            scope_builder.rebuild_mini_scope()
+
+            # Phase 6: Run targeted RAG update if any symbols were re-ingested
             if mini_symbol_parser:
                 self._regenerate_summary(mini_symbol_parser, git_changes, impacted_from_graph)
 
             # Final Step: Update the commit hash in the graph to the new state
             self.neo4j_mgr.update_project_node(self.project_path, {'commit_hash': new_commit})
             logger.info(f"Successfully updated PROJECT node to commit: {new_commit}")
+            
+            deleted_nodes_count = self.neo4j_mgr.cleanup_orphan_nodes()
+            logger.info(f"Removed {deleted_nodes_count} orphan nodes.")
 
         logger.info("\n✅ Incremental update complete.")
 
@@ -137,68 +146,6 @@ class GraphUpdater:
         deleted_namespaces_count = self.neo4j_mgr.cleanup_orphaned_namespaces()
         if deleted_namespaces_count > 0:
             logger.info(f"Removed {deleted_namespaces_count} orphaned NAMESPACE nodes.")
-
-    def _rebuild_dirty_scope(self, git_changes: Dict[str, List[str]], impacted_from_graph: Set[str]):
-        dirty_files = set(git_changes['added'] + git_changes['modified']) | impacted_from_graph
-        logger.info(f"\n--- Phase 4: Rebuilding scope for {len(dirty_files)} Dirty Files ---")
-        if not dirty_files:
-            logger.info("No dirty files to rebuild. Skipping.")
-            return
-
-        # 1. Parse full new symbol index
-        full_symbol_parser = SymbolParser(self.args.index_file)
-        full_symbol_parser.parse(self.args.num_parse_workers)
-
-        # 2. Parse only dirty source files
-        comp_manager = CompilationManager(
-            parser_type=self.args.source_parser,
-            project_path=self.project_path,
-            compile_commands_path=self.args.compile_commands
-        )
-        comp_manager.parse_files(list(dirty_files), self.args.num_parse_workers)
-
-        # 3. Create "mini" symbol parser for the dirty scope
-        dirty_file_uris = {f"file://{os.path.abspath(f)}" for f in dirty_files}
-        dirty_symbol_ids = {
-            s.id for s in full_symbol_parser.symbols.values() 
-            if s.definition and s.definition.file_uri in dirty_file_uris
-        }
-        mini_symbol_parser = full_symbol_parser.create_sufficient_subset(dirty_symbol_ids)
-        logger.info(f"Created mini-parser with {len(mini_symbol_parser.symbols)} symbols from dirty files.")
-        del full_symbol_parser
-
-        # 4. Enrich the "mini" symbols with spans
-        span_provider = SourceSpanProvider(mini_symbol_parser, comp_manager)
-        span_provider.enrich_symbols_with_span()
-
-        # 5. Re-run ingestion pipeline on the mini-scope
-        path_manager = PathManager(self.project_path)
-        
-        path_processor = PathProcessor(path_manager, self.neo4j_mgr, self.args.log_batch_size, self.args.ingest_batch_size)
-        path_processor.ingest_paths(mini_symbol_parser.symbols, comp_manager)
-
-        symbol_processor = SymbolProcessor(path_manager, self.args.log_batch_size, self.args.ingest_batch_size, self.args.cypher_tx_size)
-        symbol_processor.ingest_symbols_and_relationships(mini_symbol_parser.symbols, self.neo4j_mgr, self.args.defines_generation)
-
-        include_provider = IncludeRelationProvider(self.neo4j_mgr, self.project_path)
-        include_provider.ingest_include_relations(comp_manager, self.args.ingest_batch_size)
-
-        # 5.5 Re-ingest call graph for the mini-scope
-        logger.info("Re-ingesting call graph for the dirty scope...")
-        if mini_symbol_parser.has_container_field:
-            extractor = ClangdCallGraphExtractorWithContainer(mini_symbol_parser, self.args.log_batch_size, self.args.ingest_batch_size)
-        else:
-            extractor = ClangdCallGraphExtractorWithoutContainer(mini_symbol_parser, self.args.log_batch_size, self.args.ingest_batch_size)
-        
-        # Extract unidirectional map for ingestion
-        caller_to_callees_map = extractor.extract_call_relationships(generate_bidirectional=False)
-        # Ingest the new relationships
-        extractor.ingest_call_relations(caller_to_callees_map, neo4j_mgr=self.neo4j_mgr)
-
-        logger.info("--- Re-ingestion complete ---")
-
-        # 6. Run targeted RAG update
-        self._regenerate_summary(mini_symbol_parser, git_changes, impacted_from_graph)
 
     def _regenerate_summary(self, mini_symbol_parser: SymbolParser, git_changes: Dict[str, List[str]], impacted_from_graph: Set[str]):
         if not self.args.generate_summary:
@@ -252,8 +199,6 @@ def main():
     input_params.add_rag_args(parser)
     input_params.add_ingestion_strategy_args(parser)
     input_params.add_source_parser_args(parser)
-    # Set a different default for defines_generation for safety in updates
-    parser.set_defaults(defines_generation='batched-parallel')
 
     args = parser.parse_args()
 

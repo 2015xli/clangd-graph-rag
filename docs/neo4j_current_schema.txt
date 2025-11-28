@@ -11,6 +11,8 @@ Node Properties:
     node_label: STRING
     path: STRING
     scope: STRING
+    summary: STRING
+    summaryEmbedding: LIST
   (DATA_STRUCTURE)
     body_location: LIST
     file_path: STRING
@@ -39,11 +41,16 @@ Node Properties:
   (FILE)
     name: STRING
     path: STRING (INDEXED) (UNIQUE)
+    summary: STRING
+    summaryEmbedding: LIST
   (FOLDER)
     name: STRING
     path: STRING (INDEXED) (UNIQUE)
+    summary: STRING
+    summaryEmbedding: LIST
   (FUNCTION)
     body_location: LIST
+    codeSummary: STRING
     file_path: STRING
     has_definition: BOOLEAN
     id: STRING (INDEXED) (UNIQUE)
@@ -56,9 +63,12 @@ Node Properties:
     return_type: STRING
     scope: STRING
     signature: STRING
+    summary: STRING
+    summaryEmbedding: LIST
     type: STRING
   (METHOD)
     body_location: LIST
+    codeSummary: STRING
     file_path: STRING
     has_definition: BOOLEAN
     id: STRING (INDEXED) (UNIQUE)
@@ -71,6 +81,8 @@ Node Properties:
     return_type: STRING
     scope: STRING
     signature: STRING
+    summary: STRING
+    summaryEmbedding: LIST
     type: STRING
   (NAMESPACE)
     id: STRING (INDEXED) (UNIQUE)
@@ -82,6 +94,8 @@ Node Properties:
     commit_hash: STRING
     name: STRING
     path: STRING
+    summary: STRING
+    summaryEmbedding: LIST
   (VARIABLE)
     file_path: STRING
     has_definition: BOOLEAN
@@ -111,7 +125,7 @@ Relationships:
   (METHOD) -[:CALLS]-> (FUNCTION|METHOD)
   (METHOD) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE)
   (METHOD) -[:OVERRIDDEN_BY]-> (METHOD)
-  (NAMESPACE) -[:SCOPE_CONTAINS]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FIELD|FUNCTION|NAMESPACE|VARIABLE)
+  (NAMESPACE) -[:SCOPE_CONTAINS]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|NAMESPACE|VARIABLE)
   (PROJECT) -[:CONTAINS]-> (FOLDER)
 
 Property Explanations:
@@ -127,4 +141,7 @@ Property Explanations:
   return_type: Return type of a function/method.
   signature: Full signature of a function/method.
   has_definition: Boolean indicating if a symbol has a definition/implementation, not just a declaration.
+  codeSummary: LLM-generated summary of the code's literal function.
+  summary: LLM-generated context-aware summary of the node's purpose.
+  summaryEmbedding: Vector embedding of the 'summary' for similarity search.
   file_path: Absolute path to the file containing the symbol.

@@ -21,6 +21,7 @@ from compilation_parser import CompilationParser, ClangParser, TreesitterParser,
 from git_manager import get_git_repo
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 # --- Caching Logic ---
 

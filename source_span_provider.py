@@ -9,7 +9,7 @@ synthesizing new Symbol objects for anonymous entities.
 """
 
 import logging
-import gc, copy
+import gc, copy, sys
 import hashlib
 from typing import Optional, Dict, List, Set
 from urllib.parse import urlparse, unquote
@@ -109,10 +109,10 @@ class SourceSpanProvider:
             # That is why we need separate passes for pass 2 and 3, only after pass 1 that has built the map.
             synthetic_id_to_index_id[source_span.id] = sym_id
             matched_body_count += 1
-            # Remove the span from the lookup in order to use the remaining spans for synthetic symbols
+            # Remove the span from the file spans in order to use the remaining spans for synthetic symbols
             del file_span_data_copy[loc.file_uri][key]
 
-        # Pass 2: Any remaining spans in the lookup are not clangd-indexed (such as anonymous structures or unused symbols)
+        # Pass 2: Any remaining spans in the all file spans are not clangd-indexed (such as anonymous structures or unused symbols)
         # Note we add parent id for the synthetic symbols if they have one in their source span
         synthetic_symbols = {}
         assigned_sym_parent_in_span = 0
@@ -177,11 +177,12 @@ class SourceSpanProvider:
                 span_tree = file_span_data.get(loc.file_uri, {}) 
                 container = self._find_innermost_container(span_tree, field_span)
                 if container:
-                    #parent_synth_id = self._make_synthetic_id(loc.file_uri, container)
-                    container_key = CompilationParser.make_symbol_key(container.name, loc.file_uri, container.name_location.start_line, container.name_location.start_column)
-                    parent_span = span_tree.get(container_key)
+                    #container_key = CompilationParser.make_symbol_key(container.name, loc.file_uri, container.name_location.start_line, container.name_location.start_column)
+                    #parent_span = span_tree.get(container_key)
                     # A container should always have a synthetic id, so no checking
-                    parent_synth_id = parent_span.id
+                    #parent_synth_id = parent_span.id
+
+                    parent_synth_id = container.id
                     assigned_parent_no_span += 1
 
                 else:
@@ -203,7 +204,9 @@ class SourceSpanProvider:
                 key = CompilationParser.make_symbol_key(sym.name, loc.file_uri, loc.start_line, loc.start_column)
                 span_tree = file_span_data.get(loc.file_uri, {})
                 if not span_tree:
-                    logger.debug(f"Could not find span tree for file {loc.file_uri}, symbol {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                    if not sys.argv[0].endswith("clangd_graph_rag_updater.py"):
+                        # The symbol is extended from the seed symbols, which we may not compile its source file at all.
+                        logger.debug(f"Could not find span tree for file {loc.file_uri}, symbol {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
                     continue
 
                 span = span_tree.get(key)

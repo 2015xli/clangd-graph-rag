@@ -20,6 +20,7 @@ from tqdm import tqdm
 from memory_debugger import Debugger # Import Debugger
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 # --- YAML tag handling ---
 def unknown_tag(loader, tag_suffix, node):
@@ -341,7 +342,7 @@ class SymbolParser:
                 except StopIteration:
                     break
 
-            with tqdm(desc="Parsing YAML", unit="batch", total=1) as pbar:
+            with tqdm(desc="Parsing YAML", unit="batch", total=0) as pbar:
                 while futures:
                     done, _ = wait(futures, return_when=FIRST_COMPLETED)
 

@@ -271,7 +271,6 @@ class _ClangWorkerImpl:
         - CXX_METHOD   → class
         - FIELD_DECL   → class/struct
         - FUNCTION_DECL outside class → TU → no parent_id
-        - NAMESPACE    → parent namespace or none
         """
         parent = node.semantic_parent
         if not parent or parent.kind == clang.cindex.CursorKind.TRANSLATION_UNIT or parent.kind == clang.cindex.CursorKind.LINKAGE_SPEC:
@@ -280,9 +279,11 @@ class _ClangWorkerImpl:
         file_name = parent.location.file.name if parent.location.file else parent.translation_unit.spelling
         if not file_name:
             return None
-
+        
+        # We don't catch Namespace nodes for the moment...
         if parent.kind.name not in ClangParser.NODE_KIND_FOR_BODY_SPANS:
-            logger.warning(f"Parent {parent.kind.name} ({parent.spelling} at {parent.location}) of node {node.spelling} at {node.location} is not in NODE_KIND_FOR_BODY_SPANS")
+            if not parent.kind.name in "ClangParser.NODE_KIND_NAMESPACE":
+                logger.warning(f"Parent {parent.kind.name} {parent.spelling} at {parent.location}) of node {node.spelling} at {node.location} is not in NODE_KIND_FOR_BODY_SPANS")
             return None
 
         file_uri = f"file://{os.path.abspath(file_name)}"
@@ -757,9 +758,14 @@ class ClangParser(CompilationParser):
         clang.cindex.CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION.name,
     }
 
+    NODE_KIND_FOR_BODY_SPANS = NODE_KIND_FUNCTIONS | NODE_KIND_METHODS | NODE_KIND_UNION | NODE_KIND_ENUM | NODE_KIND_STRUCT | NODE_KIND_CLASSES 
+    
+    # NOTE: We don't include NAMESPACE spans although they have body spans. 
+    # The reason is, same namespaces are declared in multiple sites with different name_locations hence the synthetic ids, which are considered as different symbols
+    # So for namespaces, we should only use their name literals as the identifier, not locations. 
+    # For simplicity, we just use the Namespace symbol in clangd index.
+    # TODO: Check if we need create parent (or scope) relation from a structure to a namespace literal.
     NODE_KIND_NAMESPACE = { clang.cindex.CursorKind.NAMESPACE.name }
-
-    NODE_KIND_FOR_BODY_SPANS = NODE_KIND_FUNCTIONS | NODE_KIND_METHODS | NODE_KIND_UNION | NODE_KIND_ENUM | NODE_KIND_STRUCT | NODE_KIND_CLASSES | NODE_KIND_NAMESPACE
 
     def __init__(self, project_path: str, compile_commands_path: str):
         super().__init__(project_path)

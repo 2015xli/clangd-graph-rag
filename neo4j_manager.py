@@ -14,6 +14,15 @@ NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "12345678")
 
+
+def align_string(string: str, width: int = 45, direction: str = 'right', fillchar: str = ' ') -> str:
+    if direction == 'left':
+        return string.ljust(width, fillchar)
+    elif direction == 'right':
+        return string.rjust(width, fillchar)
+    else:
+        return string.center(width)
+
 class Neo4jManager:
     """Manages Neo4j database operations."""
     def __init__(self, uri: str = NEO4J_URI, user: str = NEO4J_USER, password: str = NEO4J_PASSWORD) -> None:
@@ -110,9 +119,9 @@ class Neo4jManager:
                 tx.commit()
         return all_counters
 
-    def execute_autocommit_query(self, cypher: str, params: Dict) -> Any: # Returns summary.counters
+    def execute_autocommit_query(self, cypher: str, params: Dict = None) -> Any: # Returns summary.counters
         with self.driver.session() as session:
-            result = session.run(cypher, **params)
+            result = session.run(cypher, **(params or {}))
             return result.consume().counters
 
     def execute_read_query(self, cypher: str, params: dict = None) -> list[dict]:
@@ -132,6 +141,18 @@ class Neo4jManager:
         with self.driver.session() as session:
             result = session.run(query)
             return result.consume().counters.nodes_deleted
+
+    def total_nodes_in_graph(self) -> int:
+        query = "MATCH (n) RETURN count(n)"
+        with self.driver.session() as session:
+            result = session.run(query)
+            return result.single()[0]
+
+    def total_relationships_in_graph(self) -> int:
+        query = "MATCH ()-[r]->() RETURN count(r)"
+        with self.driver.session() as session:
+            result = session.run(query)
+            return result.single()[0]
 
     def purge_files(self, file_paths: List[str]) -> Tuple[int, int]:
         """Deletes FILE nodes for the given paths and prunes empty FOLDERs."""
@@ -203,7 +224,7 @@ class Neo4jManager:
         """
 
         total_created = 0
-        for i in tqdm(range(0, len(relations), batch_size), desc="Ingesting INCLUDES relationships"):
+        for i in tqdm(range(0, len(relations), batch_size), desc=align_string("Ingesting INCLUDES relationships")):
             batch = relations[i:i + batch_size]
             summary = self.execute_autocommit_query(query, {"batch": batch})
             total_created += summary.relationships_created

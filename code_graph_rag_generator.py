@@ -29,10 +29,11 @@ _SPECIAL_PATTERN = re.compile(r"<\|[^|]+?\|>")
 def sanitize_special_tokens(text: str) -> str:
     """Break up special tokens so the model won't treat them as control tokens."""
     return _SPECIAL_PATTERN.sub(lambda m: f"< |{m.group(0)[2:-2]}| >", text)
-from neo4j_manager import Neo4jManager
+from neo4j_manager import Neo4jManager, align_string
 from llm_client import get_llm_client, LlmClient, get_embedding_client, EmbeddingClient
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 # --- Constants for Summarization ---
 TOKEN_ENCODING = "cl100k_base"
@@ -86,7 +87,7 @@ class RagGenerator:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(process_func, item): item for item in items}
             
-            for future in tqdm(as_completed(futures), total=len(items), desc=desc):
+            for future in tqdm(as_completed(futures), total=len(items), desc=align_string(desc)):
                 try:
                     result = future.result()
                     if result:
@@ -342,7 +343,7 @@ class RagGenerator:
         
         # This pass is not parallelized because the iterative summarization within
         # each item can be resource-intensive.
-        for item in tqdm(items_to_process, desc="Pass 2: Context Summaries"):
+        for item in tqdm(items_to_process, desc=align_string("Pass 2: Context Summaries")):
             self._process_one_function_for_contextual_summary(item['id'])
 
         logging.info("--- Finished Pass 2 ---")
@@ -796,7 +797,7 @@ class RagGenerator:
         SET n.summaryEmbedding = data.embedding
         """
         
-        for i in tqdm(range(0, len(update_params), ingest_batch_size), desc="Updating DB"):
+        for i in tqdm(range(0, len(update_params), ingest_batch_size), desc=align_string("Updating DB")):
             batch = update_params[i:i + ingest_batch_size]
             self.neo4j_mgr.execute_autocommit_query(update_query, params={'batch': batch})
 
