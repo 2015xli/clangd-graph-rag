@@ -760,8 +760,7 @@ class RagGenerator:
 
     # --- Pass 7 Methods ---
     def generate_embeddings(self):
-        """PASS 7: Generates and stores embeddings for all generated summaries in batches."""
-        logging.info("\n--- Starting Pass 7: Generating Embeddings ---")
+        logging.info("\n--- Starting Generating Embeddings ---")
         nodes_to_embed = self._get_nodes_for_embedding()
         if not nodes_to_embed:
             logging.info("No nodes require embedding.")
@@ -801,7 +800,7 @@ class RagGenerator:
             batch = update_params[i:i + ingest_batch_size]
             self.neo4j_mgr.execute_autocommit_query(update_query, params={'batch': batch})
 
-        logging.info("--- Finished Pass 5 ---")
+        logging.info("--- Finished Generating Embeddings ---")
 
     def _get_nodes_for_embedding(self) -> list[dict]:
         # This query finds any node with a final summary but no embedding yet.

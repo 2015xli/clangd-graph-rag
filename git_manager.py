@@ -26,6 +26,20 @@ def get_git_repo(folder: str) -> Optional[git.Repo]:
     except (git.InvalidGitRepositoryError, git.NoSuchPathError):
         return None
 
+def resolve_commit_ref_to_hash(repo: git.Repo, ref: str) -> str:
+    """
+    Resolves a Git reference (tag, branch, hash) to a full commit hash.
+    Raises ValueError if the reference is invalid.
+    """
+    if not ref:
+        raise ValueError("Commit reference cannot be empty.")
+    try:
+        commit = repo.commit(ref)
+        return commit.hexsha
+    except (git.exc.BadName, git.exc.GitCommandError) as e:
+        raise ValueError(f"Could not resolve git reference '{ref}': {e}") from e
+
+
 class GitManager:
     """Manages Git operations for the graph updater."""
 

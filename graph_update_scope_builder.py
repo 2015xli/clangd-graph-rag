@@ -6,13 +6,14 @@ It is responsible for creating a "sufficient subset" of symbols from a full
 clangd index and then running a mini-ingestion pipeline on that subset.
 """
 
-import os, re
+import os
 import logging
-from typing import Dict, List, Set
-from collections import defaultdict, deque
+from typing import Dict, List, Set, Optional
+from collections import defaultdict
+from tqdm import tqdm 
 
 # Lower-level data structures and utilities
-from clangd_index_yaml_parser import SymbolParser
+from clangd_index_yaml_parser import SymbolParser, Symbol
 from compilation_manager import CompilationManager
 from neo4j_manager import Neo4jManager
 
@@ -35,7 +36,7 @@ class GraphUpdateScopeBuilder:
         self.comp_manager = None
         self.mini_symbol_parser = None
 
-    def build_miniparser_for_dirty_scope(self, dirty_files: Set[str], full_symbol_parser: SymbolParser) -> SymbolParser:
+    def build_miniparser_for_dirty_scope(self, dirty_files: Set[str], full_symbol_parser: SymbolParser, new_commit: Optional[str], old_commit: Optional[str]) -> SymbolParser:
         """Main entry point to run the mini-rebuild pipeline."""
         # dirty_files include all the added/modified files and recursively impacted files by modified header files.
         logger.info(f"\n--- Phase 4: Rebuilding scope for {len(dirty_files)} Dirty Files ---")
@@ -49,7 +50,13 @@ class GraphUpdateScopeBuilder:
             project_path=self.project_path,
             compile_commands_path=self.args.compile_commands
         )
-        self.comp_manager.parse_files(list(dirty_files), self.args.num_parse_workers)
+        self.comp_manager.parse_files(
+            list(dirty_files),
+            self.args.num_parse_workers,
+            new_commit=new_commit,
+            old_commit=old_commit
+        )
+
 
         # 2. Create the "sufficient subset" of symbols
         dirty_file_uris = {f"file://{os.path.abspath(f)}" for f in dirty_files}

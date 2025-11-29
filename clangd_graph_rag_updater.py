@@ -75,7 +75,9 @@ class GraphUpdater:
             full_symbol_parser.parse(self.args.num_parse_workers)
 
             scope_builder = GraphUpdateScopeBuilder(self.args, self.neo4j_mgr, self.project_path)
-            mini_symbol_parser = scope_builder.build_miniparser_for_dirty_scope(dirty_files, full_symbol_parser)
+            mini_symbol_parser = scope_builder.build_miniparser_for_dirty_scope(
+                dirty_files, full_symbol_parser, new_commit, old_commit
+            )
 
             # Phase 4: Purge all stale data from the graph
             dirty_files_rel = {os.path.relpath(f, self.project_path) for f in dirty_files}
@@ -85,16 +87,16 @@ class GraphUpdater:
             # Phase 5: Rebuild the dirty scope
             scope_builder.rebuild_mini_scope()
 
+            # Phase 6: Clean up orphan nodes
+            self._cleanup_graph()
+            
+            # Update the commit hash in the graph to the new state
+            self.neo4j_mgr.update_project_node(self.project_path, {'commit_hash': new_commit})
+            logger.info(f"Successfully updated PROJECT node to commit: {new_commit}")
+
             # Phase 6: Run targeted RAG update if any symbols were re-ingested
             if mini_symbol_parser:
                 self._regenerate_summary(mini_symbol_parser, git_changes, impacted_from_graph)
-
-            # Final Step: Update the commit hash in the graph to the new state
-            self.neo4j_mgr.update_project_node(self.project_path, {'commit_hash': new_commit})
-            logger.info(f"Successfully updated PROJECT node to commit: {new_commit}")
-            
-            deleted_nodes_count = self.neo4j_mgr.cleanup_orphan_nodes()
-            logger.info(f"Removed {deleted_nodes_count} orphan nodes.")
 
         logger.info("\n✅ Incremental update complete.")
 
@@ -147,11 +149,23 @@ class GraphUpdater:
         if deleted_namespaces_count > 0:
             logger.info(f"Removed {deleted_namespaces_count} orphaned NAMESPACE nodes.")
 
+    def _cleanup_graph(self):
+        neo4j_mgr = self.neo4j_mgr
+        if not self.args.keep_orphans:
+            logger.info("\n--- Phase 6: Cleaning up Orphan Nodes ---")
+            deleted_nodes_count = neo4j_mgr.cleanup_orphan_nodes()
+            logger.info(f"Removed {deleted_nodes_count} orphan nodes.")
+            logger.info(f"Total nodes in graph: {neo4j_mgr.total_nodes_in_graph()}")
+            logger.info(f"Total relationships in graph: {neo4j_mgr.total_relationships_in_graph()}")
+            logger.info("--- Finished Phase 6 ---")
+        else:
+            logger.info("\n--- Skipping Phase 6: Keeping orphan nodes as requested ---")
+
     def _regenerate_summary(self, mini_symbol_parser: SymbolParser, git_changes: Dict[str, List[str]], impacted_from_graph: Set[str]):
         if not self.args.generate_summary:
             return
 
-        logger.info("\n--- Phase 5: Running targeted RAG update ---")
+        logger.info("\n--- Phase 7: Running targeted RAG update ---")
 
         llm_client = get_llm_client(self.args.llm_api)
         embedding_client = get_embedding_client(self.args.llm_api)

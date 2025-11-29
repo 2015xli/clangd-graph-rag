@@ -35,6 +35,7 @@ import sys
 from log_manager import init_logging
 init_logging()
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 class GraphBuilder:
     """Orchestrates the full build of the code graph from a clangd index."""
@@ -81,27 +82,27 @@ class GraphBuilder:
             self.debugger.stop()
 
     def _pass_0_parse_symbols(self):
-        logger.info("\n--- Starting Pass 0: Parsing Clangd Index ---")
+        logger.info("\n--- Starting Phase 0: Parsing Clangd Index ---")
         self.symbol_parser = SymbolParser(
             index_file_path=self.args.index_file,
             log_batch_size=self.args.log_batch_size,
             debugger=self.debugger
         )
         self.symbol_parser.parse(num_workers=self.args.num_parse_workers)
-        logger.info("--- Finished Pass 0 ---")
+        logger.info("--- Finished Phase 0 ---")
 
     def _pass_1_parse_sources(self):
-        logger.info("\n--- Starting Pass 1: Parsing Source Code ---")
+        logger.info("\n--- Starting Phase 1: Parsing Source Code ---")
         self.compilation_manager = CompilationManager(
             parser_type=self.args.source_parser,
             project_path=self.args.project_path,
             compile_commands_path=self.args.compile_commands
         )
-        self.compilation_manager.parse_folder(self.args.project_path, self.args.num_parse_workers)
-        logger.info("--- Finished Pass 1 ---")
+        self.compilation_manager.parse_folder(self.args.project_path, self.args.num_parse_workers, new_commit=self.args.new_commit)
+        logger.info("--- Finished Phase 1 ---")
 
     def _pass_2_enrich_symbols(self):
-        logger.info("\n--- Starting Pass 2: Enriching Symbols with Spans ---")
+        logger.info("\n--- Starting Phase 2: Enriching Symbols with Spans ---")
         from source_span_provider import SourceSpanProvider
         
         span_provider = SourceSpanProvider(self.symbol_parser, self.compilation_manager)
@@ -110,7 +111,7 @@ class GraphBuilder:
         logger.info(f"Enriched {span_provider.get_matched_count()} symbols with body_location.")
         del span_provider
         gc.collect()
-        logger.info("--- Finished Pass 2 ---")
+        logger.info("--- Finished Phase 2 ---")
 
     def _setup_database(self, neo4j_mgr):
         neo4j_mgr.reset_database()
@@ -125,17 +126,17 @@ class GraphBuilder:
         neo4j_mgr.create_constraints()
 
     def _pass_3_ingest_paths(self, neo4j_mgr):
-        logger.info("\n--- Starting Pass 3: Ingesting File & Folder Structure ---")
+        logger.info("\n--- Starting Phase 3: Ingesting File & Folder Structure ---")
         path_manager = PathManager(self.args.project_path)
         path_processor = PathProcessor(path_manager, neo4j_mgr, self.args.log_batch_size, self.args.ingest_batch_size)
         # Pass both symbol_parser and compilation_manager to the updated ingest_paths
         path_processor.ingest_paths(self.symbol_parser.symbols, self.compilation_manager)
         del path_processor, path_manager
         gc.collect()
-        logger.info("--- Finished Pass 3 ---")
+        logger.info("--- Finished Phase 3 ---")
 
     def _pass_4_ingest_symbols(self, neo4j_mgr):
-        logger.info("\n--- Starting Pass 4: Ingesting Symbol Definitions ---")
+        logger.info("\n--- Starting Phase 4: Ingesting Symbol Definitions ---")
         path_manager = PathManager(self.args.project_path)
         symbol_processor = SymbolProcessor(
             path_manager,
@@ -148,18 +149,18 @@ class GraphBuilder:
         symbol_processor.ingest_symbols_and_relationships(self.symbol_parser, neo4j_mgr, self.args.defines_generation)
         del symbol_processor, path_manager
         gc.collect()
-        logger.info("--- Finished Pass 4 ---")
+        logger.info("--- Finished Phase 4 ---")
 
     def _pass_5_ingest_includes(self, neo4j_mgr):
-        logger.info("\n--- Starting Pass 5: Ingesting Include Relations ---")
+        logger.info("\n--- Starting Phase 5: Ingesting Include Relations ---")
         include_provider = IncludeRelationProvider(neo4j_mgr, self.args.project_path)
         include_provider.ingest_include_relations(self.compilation_manager)
         del include_provider
         gc.collect()
-        logger.info("--- Finished Pass 5 ---")
+        logger.info("--- Finished Phase 5 ---")
 
     def _pass_6_ingest_call_graph(self, neo4j_mgr):
-        logger.info("\n--- Starting Pass 6: Ingesting Call Graph ---")
+        logger.info("\n--- Starting Phase 6: Ingesting Call Graph ---")
         if self.symbol_parser.has_container_field:
             extractor = ClangdCallGraphExtractorWithContainer(self.symbol_parser, self.args.log_batch_size, self.args.ingest_batch_size)
             logger.info("Using ClangdCallGraphExtractorWithContainer (new format detected).")
@@ -174,24 +175,24 @@ class GraphBuilder:
         extractor.ingest_call_relations(call_relations, neo4j_mgr=neo4j_mgr)
         del extractor, call_relations
         gc.collect()
-        logger.info("--- Finished Pass 6 ---")
+        logger.info("--- Finished Phase 6 ---")
 
     def _pass_7_graph_cleanup(self, neo4j_mgr):
         if not self.args.keep_orphans:
-            logger.info("\n--- Starting Pass 7: Cleaning up Orphan Nodes ---")
+            logger.info("\n--- Starting Phase 7: Cleaning up Orphan Nodes ---")
             deleted_nodes_count = neo4j_mgr.cleanup_orphan_nodes()
             logger.info(f"Removed {deleted_nodes_count} orphan nodes.")
             logger.info(f"Total nodes in graph: {neo4j_mgr.total_nodes_in_graph()}")
             logger.info(f"Total relationships in graph: {neo4j_mgr.total_relationships_in_graph()}")
-            logger.info("--- Finished Pass 7 ---")
+            logger.info("--- Finished Phase 7 ---")
         else:
-            logger.info("\n--- Skipping Pass 7: Keeping orphan nodes as requested ---")
+            logger.info("\n--- Skipping Phase 7: Keeping orphan nodes as requested ---")
 
     def _pass_8_generate_rag(self, neo4j_mgr):
         if not self.args.generate_summary:
             return
 
-        logger.info("\n--- Starting Pass 8: Generating Summaries and Embeddings ---")
+        logger.info("\n--- Starting Phase 8: Generating Summaries and Embeddings ---")
         from code_graph_rag_generator import RagGenerator
         from llm_client import get_llm_client, get_embedding_client
 
@@ -211,7 +212,7 @@ class GraphBuilder:
 
         rag_generator.summarize_code_graph()
         neo4j_mgr.create_vector_indices()
-        logger.info("--- Finished Pass 8 ---")
+        logger.info("\n--- Finished Phase 8 ---")
 
 import input_params
 from pathlib import Path
@@ -228,7 +229,9 @@ def main():
     input_params.add_ingestion_strategy_args(parser)
     input_params.add_source_parser_args(parser)
     input_params.add_logistic_args(parser) # For --debug-memory
-    
+
+    parser.add_argument('--new-commit', default=None, help='The commit hash or reference for building the graph. Defaults to repo HEAD')
+
     args = parser.parse_args()
 
     # Resolve paths and convert back to strings
