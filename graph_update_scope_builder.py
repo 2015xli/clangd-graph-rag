@@ -57,20 +57,20 @@ class GraphUpdateScopeBuilder:
             old_commit=old_commit
         )
 
+        # 2. Enrich the full symbol parser symbols with the fresh spans, and parent/child relationships
+        span_provider = SourceSpanProvider(full_symbol_parser, self.comp_manager)
+        span_provider.enrich_symbols_with_span()
 
-        # 2. Create the "sufficient subset" of symbols
+        # 3. Find the seed symbols
         dirty_file_uris = {f"file://{os.path.abspath(f)}" for f in dirty_files}
         seed_symbol_ids = {
             s.id for s in full_symbol_parser.symbols.values()
             if s.definition and s.definition.file_uri in dirty_file_uris \
                 or s.declaration and s.declaration.file_uri in dirty_file_uris
         }
-        
-        self.mini_symbol_parser = self._create_sufficient_subset(full_symbol_parser, seed_symbol_ids)
 
-        # 3. Enrich the new mini-parser symbols with the fresh spans
-        span_provider = SourceSpanProvider(self.mini_symbol_parser, self.comp_manager)
-        span_provider.enrich_symbols_with_span()
+        # 4. Create the "sufficient subset" of symbols        
+        self.mini_symbol_parser = self._create_sufficient_subset(full_symbol_parser, seed_symbol_ids)
 
         return self.mini_symbol_parser
 
@@ -85,7 +85,7 @@ class GraphUpdateScopeBuilder:
             logger.info("No symbols to rebuild. Skipping.")
             return
         
-        # 4. Re-run the ingestion pipeline on the mini-scope
+        # 5. Re-run the ingestion pipeline on the mini-scope
         path_manager = PathManager(project_path)
         
         path_processor = PathProcessor(path_manager, neo4j_mgr, args.log_batch_size, args.ingest_batch_size)
@@ -97,7 +97,7 @@ class GraphUpdateScopeBuilder:
         include_provider = IncludeRelationProvider(neo4j_mgr, project_path)
         include_provider.ingest_include_relations(comp_manager, args.ingest_batch_size)
 
-        # 4.5 Re-ingest call graph for the mini-scope
+        # 5.5 Re-ingest call graph for the mini-scope
         logger.info("Re-ingesting call graph for the dirty scope...")
         if mini_symbol_parser.has_container_field:
             extractor = ClangdCallGraphExtractorWithContainer(mini_symbol_parser, args.log_batch_size, args.ingest_batch_size)

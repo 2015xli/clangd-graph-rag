@@ -14,7 +14,7 @@ The updater's core logic revolves around a robust, multi-stage process to determ
 
 ## 3. The Incremental Update Pipeline
 
-The update process is divided into a sequence of high-level phases orchestrated by the `GraphUpdater` class.
+The update process is divided into a sequence of high-level phases orchestrated by the `GraphUpdater` class. The pipeline is carefully ordered to allow for easier debugging of the complex scope-building logic before any data is removed from the graph.
 
 ### Phase 1 & 2: Identify Full Impact Scope
 
@@ -25,39 +25,36 @@ The update process is divided into a sequence of high-level phases orchestrated 
     2.  **Header Impact**: It then passes the modified and deleted headers to the `IncludeRelationProvider`, which queries the existing `[:INCLUDES]` graph to find all source files that transitively depend on those headers.
     3.  **Final Scope**: The "dirty files" set is the union of the textually changed files and the files impacted by header changes.
 
-### Phase 3: Purge Stale Graph Data
+### Phase 3: Build the "Sufficient Subset" for the Update
+
+*   **Component**: `graph_update_scope_builder.GraphUpdateScopeBuilder`
+*   **Purpose**: To determine the precise, self-contained set of symbols required to correctly patch the graph.
+*   **Mechanism**: This is the most complex logical step. The `GraphUpdater` delegates this to the `GraphUpdateScopeBuilder`, which performs the following actions:
+    1.  It parses the **entire new `clangd` index file** to have a complete, in-memory view of all symbols in the new commit.
+    2.  It parses the source code of **only the dirty files** to get fresh information about their structure (function spans, parent-child relationships).
+    3.  It enriches the **entire, full symbol set** with this new structural information. This is a critical step to ensure dependency analysis is performed on the most up-to-date view of the code.
+    4.  It identifies the "seed symbols" (those defined in the dirty files) and expands this set by one level of dependencies (e.g., parents, children, callers, callees, base classes) to create a "sufficient subset".
+    5.  The result is a new, small `SymbolParser` object (the "mini-parser") containing only the symbols needed for the update.
+*   **Further Reading**: For a detailed explanation, see [`summary_graph_update_scope_builder.md`](./summary_graph_update_scope_builder.md).
+
+### Phase 4: Purge Stale Graph Data
 
 *   **Component**: `neo4j_manager.Neo4jManager`
 *   **Purpose**: To remove all outdated information from the graph, creating a clean slate for the new data.
 *   **Mechanism**: It purges all symbols, relationships, and file nodes associated with the "dirty" and "deleted" files. This now includes a call to `cleanup_orphaned_namespaces()` to correctly handle C++ namespaces that may become empty.
+*   **Design Note**: This purge is intentionally performed *after* the sufficient subset has been built. This allows a developer to more easily debug the scope-building logic by comparing the in-memory "mini-parser" against the existing, un-purged data in the graph.
 
-### Phase 4: Rebuild Dirty Scope
+### Phase 5: Rebuild Dirty Scope (Ingestion)
 
 *   **Component**: `graph_update_scope_builder.GraphUpdateScopeBuilder`
-*   **Purpose**: To surgically "patch" the graph with new, updated information. This is the most complex phase of the update.
-*   **Mechanism**: The `GraphUpdater` now delegates the entire rebuilding process to the `GraphUpdateScopeBuilder` module. This new module encapsulates all the logic for this phase:
-    1.  It parses the **entire new `clangd` index file** to have a complete view of all symbols.
-    2.  It determines the initial "seed symbols" from the dirty files.
-    3.  It performs a comprehensive, iterative expansion of the seed set to create a **"sufficient subset"** of symbols, including all necessary C++ dependencies (parent classes, base classes, etc.). This is the core logic that makes C++ updates robust.
-    4.  It then runs a "mini" ingestion pipeline on this sufficient subset to update the graph.
-*   **Further Reading**: For a detailed explanation of this component, see [`summary_graph_update_scope_builder.md`](./summary_graph_update_scope_builder.md).
+*   **Purpose**: To surgically "patch" the graph with the new, updated information.
+*   **Mechanism**: The `GraphUpdater` calls the `rebuild_mini_scope()` method on the scope builder, which runs the complete ingestion pipeline (`PathProcessor`, `SymbolProcessor`, `ClangdCallGraphExtractor`, etc.) using the "mini-parser" as its data source.
 
-### Phase 5: Targeted RAG Update
+### Phase 6 & 7: Finalize and Run RAG
 
-*   **Component**: `code_graph_rag_generator.RagGenerator`
-*   **Purpose**: To efficiently update AI-generated summaries and embeddings.
-*   **Mechanism**: After the scope is rebuilt, the `GraphUpdater` calls `summarize_targeted_update()`, providing the set of all symbol IDs from the "mini-parser" as the initial "seed." The `RagGenerator` then intelligently updates summaries for the changed nodes and any parent nodes affected by the change.
-
-## 4. Design Subtlety: Path Management
-
-A critical design principle throughout the updater is the careful management of file paths. The convention is strictly enforced:
-
-*   **Absolute Paths for Processing:** All internal logic, such as identifying changed files with `GitManager` or parsing source code with `CompilationManager`, uses **absolute paths**. This avoids ambiguity and makes processing straightforward.
-
-*   **Relative Paths for Graph Operations:** Any operation that queries the Neo4j database (e.g., to find or delete a `:FILE` node) **must** use **relative paths** (from the project root), as this is how paths are stored in the graph.
-
-The `GraphUpdater` orchestrator explicitly manages this conversion at the boundaries. For example, before calling `_purge_stale_graph_data`, the main `update` method converts its lists of absolute paths for dirty and deleted files into relative paths. This ensures each component receives paths in the format it expects.
-
-## 5. Final Step: Update Commit Hash
-
-*   After all phases are complete, the `:PROJECT` node in the graph is updated with the new commit hash, bringing the database's recorded state in sync with the codebase.
+*   **Component**: `neo4j_manager.Neo4jManager`, `code_graph_rag_generator.RagGenerator`
+*   **Purpose**: To finalize the graph state and update AI-generated data.
+*   **Mechanism**:
+    1.  **Cleanup**: Orphan nodes that may have been created during the patch are removed.
+    2.  **Update Commit**: The `:PROJECT` node in the graph is updated with the new commit hash, bringing the database's recorded state in sync with the codebase.
+    3.  **Targeted RAG**: If enabled, the `GraphUpdater` calls `summarize_targeted_update()`, providing the set of all symbol IDs from the "mini-parser" as the initial "seed." The `RagGenerator` then intelligently updates summaries for the changed nodes and any parent nodes affected by the change.

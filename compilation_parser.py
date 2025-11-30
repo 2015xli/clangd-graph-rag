@@ -194,8 +194,8 @@ class _ClangWorkerImpl:
             return
 
         if False:
-            if file_name.endswith("ggml-rpc/ggml-rpc.cpp"):
-                if node.spelling == "rpc_server":
+            if file_name.endswith("ggml-cpu/ggml-cpu.c"):
+                if node.spelling == "ggml_graph_compute_secondary_thread":
                     logger.info(f"Processing {file_name}, {node}")
 
         # Now process this node normally

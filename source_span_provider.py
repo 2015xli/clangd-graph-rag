@@ -146,7 +146,7 @@ class SourceSpanProvider:
                 continue
 
             if False:
-                if sym_id == '3C6AD8457679DEAB':
+                if sym.name == 'ggml_graph_compute_secondary_thread':
                     logger.info(f"Found symbol: {sym}")
 
             # Use the symbol's location to find its parent symbol by lexical scope container id lookup
@@ -193,8 +193,8 @@ class SourceSpanProvider:
                     logger.debug(f"Could not find container for no-body {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
             else:
                 # Other symbols: find parent id from span lookup
-                if sym.kind in {"TypeAlias"}:
-                    # We don't support TypeAlias symbols at the moment.
+                if sym.kind in {"TypeAlias"} or (sym.kind in {"Function"} and not sym.definition):
+                    # We don't support TypeAlias symbols at the moment. Function without definition is only a declaration.
                     continue
 
                 if False:

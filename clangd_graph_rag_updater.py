@@ -58,8 +58,10 @@ class GraphUpdater:
 
             logger.info(f"Processing changes from {old_commit} to {new_commit}")
 
-            # Phase 1 & 2: Identify all files that are dirty due to direct or indirect changes
+            # Phase 1: Identify git changed files 
             git_changes = self._identify_git_changes(old_commit, new_commit)
+
+            # Phase 2: Analyze files that are impacted by (including) git changed header files.
             impacted_from_graph = self._analyze_impact_from_graph(git_changes)
             dirty_files = set(git_changes['added'] + git_changes['modified']) | impacted_from_graph
             
@@ -71,20 +73,26 @@ class GraphUpdater:
             logger.info(f"Found {len(dirty_files)} files to re-ingest and {len(git_changes['deleted'])} files to delete.")
 
             # Phase 3: Rebuild the dirty scope using the dedicated builder
+            # 3.1. We build the full symbol parser to get all the symbols info.
             full_symbol_parser = SymbolParser(self.args.index_file)
             full_symbol_parser.parse(self.args.num_parse_workers)
 
+            # 3.2. We build the mini symbol parser by extracting the sufficient subset of symbols from the full symbol parser.
+            # The sufficient subset includes the seed symbols (directly defined by the dirty files) 
+            # and their direct dependent symbols (e.g., parent-child, inheritance, override, caller-callee, scope, nesting).
             scope_builder = GraphUpdateScopeBuilder(self.args, self.neo4j_mgr, self.project_path)
             mini_symbol_parser = scope_builder.build_miniparser_for_dirty_scope(
                 dirty_files, full_symbol_parser, new_commit, old_commit
             )
 
-            # Phase 4: Purge all stale data from the graph
+            # Phase 4: Purge all stale data from the graph. 
+            # We purge after building the mini_symbol_parser solely for easy debugging. 
+            # If we purge before the mini_symbol_parser building, we lose lots of nodes in the graph that can be useful for the mini_symbol_parser debugging.
             dirty_files_rel = {os.path.relpath(f, self.project_path) for f in dirty_files}
             deleted_files_rel = [os.path.relpath(f, self.project_path) for f in git_changes['deleted']]
             self._purge_stale_graph_data(dirty_files_rel, deleted_files_rel)
 
-            # Phase 5: Rebuild the dirty scope
+            # Phase 5: Rebuild the dirty scope. 
             scope_builder.rebuild_mini_scope()
 
             # Phase 6: Clean up orphan nodes
@@ -94,7 +102,7 @@ class GraphUpdater:
             self.neo4j_mgr.update_project_node(self.project_path, {'commit_hash': new_commit})
             logger.info(f"Successfully updated PROJECT node to commit: {new_commit}")
 
-            # Phase 6: Run targeted RAG update if any symbols were re-ingested
+            # Phase 7: Run targeted RAG update if any symbols were re-ingested  
             if mini_symbol_parser:
                 self._regenerate_summary(mini_symbol_parser, git_changes, impacted_from_graph)
 

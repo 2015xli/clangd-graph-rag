@@ -8,6 +8,7 @@ from collections import defaultdict
 from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 # Neo4j connection settings
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
@@ -136,11 +137,22 @@ class Neo4jManager:
             result = session.run(cypher, **(params or {}))
             return [record.data() for record in result]
 
-    def cleanup_orphan_nodes(self) -> int:
-        query = "MATCH (n) WHERE COUNT { (n)--() } = 0 DETACH DELETE n"
+    def cleanup_orphan_nodes(self):
+        query = """
+                MATCH (n)
+                WHERE NOT (n)--()
+                WITH collect( properties(n)) AS deleted_nodes,
+                     collect(n) AS nodes
+                FOREACH (x IN nodes | DETACH DELETE x)
+                RETURN deleted_nodes
+        """
+
         with self.driver.session() as session:
-            result = session.run(query)
-            return result.consume().counters.nodes_deleted
+            record = session.run(query).single()
+            deleted_nodes = record["deleted_nodes"]
+            logger.debug(f"Deleted {len(deleted_nodes)} orphan nodes.")
+            logger.debug(json.dumps(deleted_nodes, indent=2, default=str))
+            return len(deleted_nodes)
 
     def total_nodes_in_graph(self) -> int:
         query = "MATCH (n) RETURN count(n)"
@@ -270,11 +282,6 @@ class Neo4jManager:
                 total_deleted += deleted_count
                 logger.info(f"Cleaned up {deleted_count} orphaned NAMESPACE nodes in this iteration.")
         return total_deleted
-        with self.driver.session() as session:
-            result = session.run(query)
-            deleted_count = result.single()['deletedCount']
-            logger.info(f"Cleaned up {deleted_count} orphaned NAMESPACE nodes.")
-            return deleted_count
 
     def create_vector_indices(self) -> None:
         """Creates vector indices for summary embeddings."""

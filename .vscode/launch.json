@@ -5,11 +5,11 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "Python Debugger: LLama Graph RAG builder",
+            "name": "Python Debugger: LLama Graph RAG builder original_4",
             "type": "debugpy",
             "request": "launch",
             "program": "clangd_graph_rag_builder.py",
-            "args": ["~/Public/llama.cpp/llama_cpp_clangd_index.yaml", "~/Public/llama.cpp/", "--compile-commands", "~/Public/llama.cpp/compile_commands.json", "--num-parse-workers", "10"]
+            "args": ["~/Public/llama.cpp/llama_cpp_original_4.yaml", "~/Public/llama.cpp/",  "--compile-commands=~/Public/llama.cpp/compile_commands.json", "--new-commit", "original_4"]
         },
         {
             "name": "Python Debugger: WSL2 Graph RAG builder",
@@ -48,11 +48,11 @@
             "args": ["../../mini-jvm/graphrag/update/korp_clangd_21.x.yaml", "../../mini-jvm", "--compile-commands", "../../mini-jvm/graphrag/update/update_compile_commands.json", "--generate-summary", "--llm-api", "fake", "--ingest-batch-size", "10", "--log-batch-size", "10"]
         },
         {
-            "name": "Python Debugger: Llama.cpp Graph RAG updater",
+            "name": "Python Debugger: Llama.cpp Graph RAG updater original_5",
             "type": "debugpy",
             "request": "launch",
             "program": "clangd_graph_rag_updater.py",
-            "args": ["~/Public/llama.cpp/update/llama_cpp.yaml", "~/Public/llama.cpp/", "--compile-commands=~/Public/llama.cpp/update/compile_commands.json"]
+            "args": ["~/Public/llama.cpp/llama_cpp_original_5.yaml", "~/Public/llama.cpp/",  "--compile-commands=~/Public/llama.cpp/compile_commands.json", "--new-commit", "original_5"]
         }
     ]
 }

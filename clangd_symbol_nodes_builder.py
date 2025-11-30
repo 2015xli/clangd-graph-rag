@@ -99,9 +99,6 @@ class SymbolProcessor:
         if hasattr(sym, 'parent_id') and sym.parent_id:
             symbol_data["parent_id"] = sym.parent_id
 
-        if sym.kind in ("Method", "Field") and not sym.parent_id:
-            logger.debug(f"{sym.kind}: {sym.scope}{sym.name} ID: {sym.id} at {primary_location.file_uri}:{primary_location.start_line}:{primary_location.start_column} has no parent_id.")
-            
         # --- Namespace Parent Check ---
         namespace_id = qualified_namespace_to_id.get(sym.scope)
         if namespace_id:
@@ -128,6 +125,9 @@ class SymbolProcessor:
                 ]
 
         elif sym.kind in ("InstanceMethod", "StaticMethod", "Constructor", "Destructor", "ConversionFunction"):
+            if not sym.parent_id:
+                logger.debug(f"{sym.kind}: {sym.scope}{sym.name} ID: {sym.id} at {primary_location.file_uri}:{primary_location.start_line}:{primary_location.start_column} has no parent_id.")
+            
             symbol_data["node_label"] = "METHOD"
             symbol_data.update({
                 "signature": sym.signature,
@@ -166,6 +166,9 @@ class SymbolProcessor:
                 ]
 
         elif sym.kind in ("Union", "Enum"):
+            if not sym.parent_id:
+                logger.debug(f"{sym.kind}: {sym.scope}{sym.name} ID: {sym.id} at {primary_location.file_uri}:{primary_location.start_line}:{primary_location.start_column} has no parent_id.")
+
             symbol_data["node_label"] = "DATA_STRUCTURE"
             if hasattr(sym, 'body_location') and sym.body_location:
                 symbol_data["body_location"] = [
@@ -466,7 +469,7 @@ class SymbolProcessor:
         logger.info(f"Creating {len(method_data_list)} HAS_METHOD relationships in batches...")
         query = """
         UNWIND $method_data AS data
-        MATCH (parent:CLASS_STRUCTURE {id: data.parent_id})
+        MATCH (parent) WHERE (parent:DATA_STRUCTURE OR parent:CLASS_STRUCTURE) AND parent.id = data.parent_id
         MATCH (child:METHOD {id: data.id})
         MERGE (parent)-[:HAS_METHOD]->(child)
         """
