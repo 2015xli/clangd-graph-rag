@@ -139,35 +139,54 @@ class GraphUpdater:
         return impacted_files
 
     def _purge_stale_graph_data(self, dirty_files_rel: Set[str], deleted_files_rel: List[str]):
+        """ Purge all the nodes of deleted files, and 
+        all the nodes defined/declared by both deleted and dirty files (and relationships to/from the nodes).
+        NOTE: We don't prune empty NAMESPACE and PATH nodes recursively after files and symbols are purged
+        because if the parent's parent namespace node is deleted, 
+        the seed symbol nodes will not be able to find a namespace node to attach to.
+        This may lead to some nodes becoming orphans and getting deleted finally.
+        So we only prune the empty NAMESPACE and PATH nodes in the final cleanup phase.
+        """
         logger.info("\n--- Phase 3: Purging Stale Graph Data ---")
         files_to_purge_symbols_from = list(dirty_files_rel | set(deleted_files_rel))
 
         if files_to_purge_symbols_from:
             logger.info(f"Purging symbols and includes from {len(files_to_purge_symbols_from)} files.")
             self.neo4j_mgr.purge_symbols_defined_in_files(files_to_purge_symbols_from)
+            self.neo4j_mgr.purge_symbols_declared_in_files(files_to_purge_symbols_from)
             self.neo4j_mgr.purge_include_relations_from_files(files_to_purge_symbols_from)
 
         if deleted_files_rel:
             logger.info(f"Deleting {len(deleted_files_rel)} FILE nodes.")
             self.neo4j_mgr.purge_files(deleted_files_rel)
         
-        # NEW: Cleanup orphaned NAMESPACE nodes after files and symbols are purged
-        logger.info("Cleaning up orphaned NAMESPACE nodes...")
-        deleted_namespaces_count = self.neo4j_mgr.cleanup_orphaned_namespaces()
-        if deleted_namespaces_count > 0:
-            logger.info(f"Removed {deleted_namespaces_count} orphaned NAMESPACE nodes.")
-
     def _cleanup_graph(self):
         neo4j_mgr = self.neo4j_mgr
         if not self.args.keep_orphans:
             logger.info("\n--- Phase 6: Cleaning up Orphan Nodes ---")
             deleted_nodes_count = neo4j_mgr.cleanup_orphan_nodes()
             logger.info(f"Removed {deleted_nodes_count} orphan nodes.")
-            logger.info(f"Total nodes in graph: {neo4j_mgr.total_nodes_in_graph()}")
-            logger.info(f"Total relationships in graph: {neo4j_mgr.total_relationships_in_graph()}")
-            logger.info("--- Finished Phase 6 ---")
         else:
             logger.info("\n--- Skipping Phase 6: Keeping orphan nodes as requested ---")
+        
+        # NOTE: It is fine to prune the empty NAMESPACE nodes. 
+        # We just keep them here since they can be regarded as kinds of defines.
+
+        #deleted_ns = neo4j_mgr.cleanup_empty_namespaces_recursively()
+        #logger.info(f"Removed {deleted_ns} empty NAMESPACE nodes.")
+        
+        # NOTE: Some files although don't define/declare any symbols, are still needed to be included in the graph
+        # because they are source files anyway, such as a file has only "#PRAGMA ONCE"
+        # or they have function declarations while those functions have been defined in other files.
+        # For the latter case, we only keep the function definition relationships in the graph currently.
+        # In future, we may include more nodes in the graph such as macro definitions, etc. 
+        # Then those files will have define/declare relationships to other nodes.
+        
+        #deleted_files, deleted_folders = neo4j_mgr.cleanup_empty_paths_recursively()
+        #logger.info(f"Removed {deleted_files} empty FILE nodes and {deleted_folders} empty FOLDER nodes.")
+        
+        logger.info(f"Total nodes in graph: {neo4j_mgr.total_nodes_in_graph()}")
+        logger.info(f"Total relationships in graph: {neo4j_mgr.total_relationships_in_graph()}")
 
     def _regenerate_summary(self, mini_symbol_parser: SymbolParser, git_changes: Dict[str, List[str]], impacted_from_graph: Set[str]):
         if not self.args.generate_summary:

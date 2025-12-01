@@ -167,9 +167,8 @@ class Neo4jManager:
             return result.single()[0]
 
     def purge_files(self, file_paths: List[str]) -> Tuple[int, int]:
-        """Deletes FILE nodes for the given paths and prunes empty FOLDERs."""
+        """Deletes FILE nodes for the given paths. Not pruning empty folders."""
         deleted_files = 0
-        deleted_folders = 0
         if not file_paths:
             return 0, 0
 
@@ -180,11 +179,24 @@ class Neo4jManager:
             deleted_files = result.consume().counters.nodes_deleted
             logger.info(f"Purged {deleted_files} FILE nodes.")
 
+        return deleted_files
+
+    def cleanup_empty_paths_recursively(self) -> Tuple[int, int]:
+        """Deletes FILE nodes for the empty paths and recursively prunes empty FOLDERs."""
+        deleted_files = 0
+        deleted_folders = 0
+
+        with self.driver.session() as session:
+            # Delete the specified FILE nodes
+            del_files_query = "MATCH (f:FILE) WHERE NOT (f)-->() DETACH DELETE f"
+            result = session.run(del_files_query)
+            deleted_files = result.consume().counters.nodes_deleted
+            logger.info(f"Deleted {deleted_files} empty FILE nodes.")
+
             # Iteratively delete empty folders
             while True:
                 del_folders_query = """
                 MATCH (d:FOLDER)
-                // WHERE NOT EXISTS((d)<-[:CONTAINS]-()) AND NOT (d)-[:CONTAINS]->()
                 WHERE NOT (d)-[:CONTAINS]->()
                 DETACH DELETE d
                 RETURN count(d)
@@ -199,21 +211,69 @@ class Neo4jManager:
         logger.info(f"Total empty FOLDER nodes pruned: {deleted_folders}")
         return deleted_files, deleted_folders
 
+    def cleanup_empty_namespaces_recursively(self) -> int:
+        """
+        Deletes NAMESPACE nodes that do not contain any other nodes.
+        This process is run iteratively to handle cascading deletions of nested namespaces.
+        """
+        total_deleted = 0
+        while True:
+            query = """
+            MATCH (ns:NAMESPACE)
+            WHERE NOT EXISTS((ns)-[:SCOPE_CONTAINS]->())
+            DETACH DELETE ns
+            RETURN count(ns) AS deletedCount
+            """
+            with self.driver.session() as session:
+                result = session.run(query)
+                deleted_count = result.single()['deletedCount']
+                if deleted_count == 0:
+                    break # No more namespaces to delete in this iteration
+                total_deleted += deleted_count
+                logger.info(f"Cleaned up {deleted_count} empty NAMESPACE nodes in this iteration.")
+        return total_deleted
+
     def purge_symbols_defined_in_files(self, file_paths: List[str]) -> int:
-        """Finds and deletes all symbols defined in the given file paths."""
+        """
+        Finds and deletes all symbols defined in the given file paths, including
+        all their owned descendant symbols (methods, fields, nested types, etc.).
+        """
+        if not file_paths:
+            return 0
+        
+        # This query uses APOC to find the entire subgraph of "owned" symbols
+        # starting from the top-level symbols defined in a file.
+        # The ">" in the relationship filter ensures we only traverse outwards
+        # from the defined symbol to its children.
+        query = """
+        UNWIND $paths AS path
+        MATCH (file:FILE {path: path})-[:DEFINES]->(s)
+        CALL apoc.path.subgraphNodes(s, {
+            relationshipFilter: "HAS_METHOD|HAS_FIELD|HAS_NESTED>"
+        }) YIELD node
+        DETACH DELETE node
+        """
+        with self.driver.session() as session:
+            result = session.run(query, paths=file_paths)
+            deleted_symbols = result.consume().counters.nodes_deleted
+            logger.info(f"Purged {deleted_symbols} symbols (including descendants) defined in {len(file_paths)} files.")
+            return deleted_symbols
+
+    def purge_symbols_declared_in_files(self, file_paths: List[str]) -> int:
+        """Finds and deletes all symbols declared in the given file paths."""
         if not file_paths:
             return 0
         
         query = """
         UNWIND $paths AS path
-        MATCH (file:FILE {path: path})-[:DEFINES]->(s)
-        WHERE s:FUNCTION OR s:METHOD OR s:CLASS_STRUCTURE OR s:DATA_STRUCTURE OR s:FIELD OR s:VARIABLE
+        MATCH (file:FILE {path: path})-[:DECLARES]->(s)
+        WHERE s:FUNCTION OR s:CLASS_STRUCTURE OR s:DATA_STRUCTURE OR s:NAMESPACE
         DETACH DELETE s
         """
         with self.driver.session() as session:
             result = session.run(query, paths=file_paths)
             deleted_symbols = result.consume().counters.nodes_deleted
-            logger.info(f"Purged {deleted_symbols} symbols defined in {len(file_paths)} files.")
+            logger.info(f"Purged {deleted_symbols} symbols declared in {len(file_paths)} files.")
             return deleted_symbols
 
     def ingest_include_relations(self, relations: List[Dict], batch_size: int = 1000):
@@ -259,29 +319,6 @@ class Neo4jManager:
             count = result.single()[0]
             logger.info(f"Purged {count} :INCLUDES relationships from {len(file_paths)} files.")
             return count
-
-    def cleanup_orphaned_namespaces(self) -> int:
-        """
-        Deletes NAMESPACE nodes that are no longer declared by any file and contain no other nodes.
-        This process is run iteratively to handle cascading deletions of nested namespaces.
-        """
-        total_deleted = 0
-        while True:
-            query = """
-            MATCH (ns:NAMESPACE)
-            WHERE NOT EXISTS((ns)<-[:DECLARES]-(:FILE))
-              AND NOT EXISTS((ns)-[:CONTAINS]->())
-            DETACH DELETE ns
-            RETURN count(ns) AS deletedCount
-            """
-            with self.driver.session() as session:
-                result = session.run(query)
-                deleted_count = result.single()['deletedCount']
-                if deleted_count == 0:
-                    break # No more namespaces to delete in this iteration
-                total_deleted += deleted_count
-                logger.info(f"Cleaned up {deleted_count} orphaned NAMESPACE nodes in this iteration.")
-        return total_deleted
 
     def create_vector_indices(self) -> None:
         """Creates vector indices for summary embeddings."""

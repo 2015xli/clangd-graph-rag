@@ -286,7 +286,14 @@ class SymbolProcessor:
         self._ingest_nesting_relationships(grouped_nested_relations, neo4j_mgr)
         
         # Ingest other relationships
-        self._ingest_file_declarations(processed_symbols.get('NAMESPACE', []), neo4j_mgr)
+        self._ingest_file_namespace_declarations(processed_symbols.get('NAMESPACE', []), neo4j_mgr)
+
+        declares_function_list = [d for d in processed_symbols.get('FUNCTION', []) if not 'file_path' in d]
+        declares_variable_list = [d for d in processed_symbols.get('VARIABLE', []) if not 'file_path' in d]
+        declares_data_structure_list = [d for d in processed_symbols.get('DATA_STRUCTURE', []) if not 'file_path' in d]
+        declares_class_list = [d for d in processed_symbols.get('CLASS_STRUCTURE', []) if not 'file_path' in d]
+        declares_list = declares_function_list + declares_variable_list + declares_data_structure_list + declares_class_list
+        self._ingest_other_declares_relationships(declares_list, neo4j_mgr)
 
         defines_function_list = [d for d in processed_symbols.get('FUNCTION', []) if 'file_path' in d]
         defines_variable_list = [d for d in processed_symbols.get('VARIABLE', []) if 'file_path' in d]
@@ -847,8 +854,14 @@ class SymbolProcessor:
             n.path = data.path,
             n.name_location = data.name_location
         """
-        counters = neo4j_mgr.execute_autocommit_query(query, {"ns_data": namespace_data_list})
-        logger.info(f"  Total NAMESPACE nodes created/updated: {counters.nodes_created}")
+
+        total_nodes_created = 0
+        for i in tqdm(range(0, len(namespace_data_list), self.ingest_batch_size), desc=align_string("Ingesting NAMESPACE nodes")):
+            batch = namespace_data_list[i:i + self.ingest_batch_size]
+            counters = neo4j_mgr.execute_autocommit_query(query, {"ns_data": batch})
+            total_nodes_created += counters.nodes_created
+
+        logger.info(f"  Total NAMESPACE nodes created/updated: {total_nodes_created}")
 
     def _ingest_scope_contains_relationships(self, scope_relations: List[Dict], neo4j_mgr: Neo4jManager):
         if not scope_relations:
@@ -896,20 +909,46 @@ class SymbolProcessor:
         
         logger.info(f"  Total HAS_NESTED relationships created: {total_rels_created}")
 
-    def _ingest_file_declarations(self, namespace_data_list: List[Dict], neo4j_mgr: Neo4jManager):
+    def _ingest_file_namespace_declarations(self, namespace_data_list: List[Dict], neo4j_mgr: Neo4jManager):
         relations_data = [ns for ns in namespace_data_list if ns.get('path')]
         if not relations_data:
             return
         logger.info(f"Creating {len(relations_data)} FILE-[:DECLARES]->NAMESPACE relationships...")
         
         query = """
-        UNWIND $relations AS rel
+        UNWIND $batch_relations AS rel
         MATCH (f:FILE {path: rel.path})
         MATCH (ns:NAMESPACE {id: rel.id})
         MERGE (f)-[:DECLARES]->(ns)
         """
-        counters = neo4j_mgr.execute_autocommit_query(query, {"relations": relations_data})
-        logger.info(f"  Total FILE-[:DECLARES]->NAMESPACE relationships created: {counters.relationships_created}")
+        total_rel_created = 0
+        for i in tqdm(range(0, len(namespace_data_list), self.ingest_batch_size), desc=align_string("Ingesting (FILE)-[:DECLARES]->(NAMESPACE)")):
+            batch_relations = namespace_data_list[i:i + self.ingest_batch_size]
+            counters = neo4j_mgr.execute_autocommit_query(query, {"batch_relations": batch_relations})
+            total_rel_created += counters.relationships_created
+
+        logger.info(f"  Total FILE-[:DECLARES]->NAMESPACE relationships created: {total_rel_created}")
+
+    def _ingest_other_declares_relationships(self, declare_data_list: List[Dict], neo4j_mgr: Neo4jManager):
+        relations_data = [ sym for sym in declare_data_list if sym.get('path')]
+        if not relations_data:
+            return
+        logger.info(f"Creating {len(relations_data)} FILE-[:DECLARES]->Symbols (that have only declaration)")
+        
+        query = """
+        UNWIND $batch_relations AS rel
+        MATCH (f:FILE {path: rel.path})
+        MATCH (node) WHERE (node:DATA_STRUCTURE OR node:CLASS_STRUCTURE or node:FUNCTION or node:VARIABLE) AND node.id = rel.id
+        MERGE (f)-[:DECLARES]->(node)
+        """
+
+        total_rels_created = 0
+        for i in tqdm(range(0, len(relations_data), self.ingest_batch_size), desc=align_string("Ingesting FILE-[:DECLARES]->Declarations")):
+            batch_relations = relations_data[i:i + self.ingest_batch_size]
+            counters = neo4j_mgr.execute_autocommit_query(query, {"batch_relations": batch_relations})
+            total_rels_created += counters.relationships_created
+
+        logger.info(f"  Total FILE-[:DECLARES]->Declarations (symbols that have only declaration) created: {total_rels_created}")
 
 class PathProcessor:
     """Discovers and ingests file/folder structure into Neo4j."""
