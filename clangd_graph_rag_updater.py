@@ -20,6 +20,7 @@ from llm_client import get_llm_client, get_embedding_client
 from include_relation_provider import IncludeRelationProvider
 from compilation_parser import CompilationParser # Import CompilationParser
 from graph_update_scope_builder import GraphUpdateScopeBuilder
+from summary_manager import SummaryManager
 
 from log_manager import init_logging
 init_logging()
@@ -194,26 +195,31 @@ class GraphUpdater:
 
         logger.info("\n--- Phase 7: Running targeted RAG update ---")
 
-        llm_client = get_llm_client(self.args.llm_api)
         embedding_client = get_embedding_client(self.args.llm_api)
+        
+        summary_mgr = SummaryManager(
+            project_path=self.project_path,
+            llm_api=self.args.llm_api,
+            token_encoding=self.args.token_encoding,
+            max_context_token_size=self.args.max_context_size
+        )
+
         rag_generator = RagGenerator(
             neo4j_mgr=self.neo4j_mgr,
             project_path=self.project_path,
-            llm_client=llm_client,
             embedding_client=embedding_client,
+            summary_mgr=summary_mgr,
             num_local_workers=self.args.num_local_workers,
             num_remote_workers=self.args.num_remote_workers,
-            max_context_size=self.args.max_context_size,
         )
         
+        # For Rag seeds we need the both function/methods and other core symbols that we need summarize
+        # The other symbols include Class and Struct in C++. 
+        # Here we provide both of them. If it is C project, they will be filtered out when summarizing CLASS_STRUCTURE nodes
         rag_seed_ids = {s.id for s in mini_symbol_parser.symbols.values()
-                        if s.is_function() or s.kind == 'Class'}
-        
-        structurally_changed_files_for_rag = {
-            'added': git_changes['added'],
-            'modified': list(set(git_changes['modified']) | impacted_from_graph),
-            'deleted': git_changes['deleted']
-         }
+                        if s.is_function() or s.kind == 'Class' or s.kind == 'Struct'}
+
+        #rag_seed_ids = {s.id for s in mini_symbol_parser.functions.values()}
          
         # for graph operations, we need relative paths
         structurally_changed_files_for_rag = {

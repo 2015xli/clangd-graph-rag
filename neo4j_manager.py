@@ -245,6 +245,14 @@ class Neo4jManager:
         # starting from the top-level symbols defined in a file.
         # The ">" in the relationship filter ensures we only traverse outwards
         # from the defined symbol to its children.
+
+        # Currently,  the graph schema is (FILE) -[:DEFINES]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE), 
+        # meaning all the nodes in the other end of DEFINES relationship are ensured to be (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE). 
+        # That means, we don't need to know the label of the other end node, but to match any node of the DEFINES relationship. 
+        # If we use  (FILE) -[:DEFINES]-> (s), I guess it can avoid a match for the label of the other end node, 
+        # compared to  (FILE) -[:DEFINES]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE). 
+        # Of course, this optimization is very marginal.
+
         query = """
         UNWIND $paths AS path
         MATCH (file:FILE {path: path})-[:DEFINES]->(s)
@@ -508,6 +516,7 @@ def _format_schema_for_display(schema_info: dict, args) -> str:
             "path": "Relative path to the project root if it is within the project folder. Otherwise, it is absolute path, including the PROJECT node",
             "name_location": "Entity's name location in the file, showing the start position: [line, column].",
             "body_location": "Entity's body location in the file, showing the range: [start_line, start_column, end_line, end_column].",
+            "code_hash": "MD5 hashing value of entity's original source code body. Used to detect changed code.",
             "kind": "Type of symbol (e.g., Function, Struct, Variable).",
             "scope": "Visibility scope (e.g., global, static).",
             "language": "Programming language of the source code.",

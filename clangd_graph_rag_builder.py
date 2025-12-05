@@ -31,6 +31,7 @@ from compilation_manager import CompilationManager
 from include_relation_provider import IncludeRelationProvider
 import logging
 import sys
+from summary_manager import SummaryManager
 
 from log_manager import init_logging
 init_logging()
@@ -194,18 +195,22 @@ class GraphBuilder:
 
         logger.info("\n--- Starting Phase 8: Generating Summaries and Embeddings ---")
         from code_graph_rag_generator import RagGenerator
-        from llm_client import get_llm_client, get_embedding_client
+        from llm_client import get_embedding_client
 
-        llm_client = get_llm_client(self.args.llm_api)
         embedding_client = get_embedding_client(self.args.llm_api)
+        
+        summary_mgr = SummaryManager(
+            project_path=self.args.project_path,
+            llm_api=self.args.llm_api,
+            token_encoding=self.args.token_encoding,
+            max_context_token_size=self.args.max_context_size
+        )
 
         rag_generator = RagGenerator(
             neo4j_mgr=neo4j_mgr,
             project_path=self.args.project_path,
-            # No longer needs span_provider
-            llm_client=llm_client,
-            max_context_size=self.args.max_context_size,
             embedding_client=embedding_client,
+            summary_mgr=summary_mgr,
             num_local_workers=self.args.num_local_workers,
             num_remote_workers=self.args.num_remote_workers
         )

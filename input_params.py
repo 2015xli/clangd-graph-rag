@@ -44,6 +44,8 @@ def add_rag_args(parser: argparse.ArgumentParser):
                         help='The LLM API to use for summarization. (default fake)')
     rag_group.add_argument('--max-context-size', type=int, default=30000,
                         help='The maximum context token size for a single LLM call. (default: 30000)')
+    rag_group.add_argument('--token-encoding', type=str, default='cl100k_base',
+                        help='The token encoding to use for tiktoken. (default: cl100k_base)')
 
 def add_ingestion_strategy_args(parser: argparse.ArgumentParser):
     """Adds arguments that control ingestion strategy."""

@@ -11,6 +11,8 @@ Node Properties:
     node_label: STRING
     path: STRING
     scope: STRING
+    summary: STRING
+    summaryEmbedding: LIST
   (DATA_STRUCTURE)
     body_location: LIST
     file_path: STRING
@@ -39,11 +41,17 @@ Node Properties:
   (FILE)
     name: STRING
     path: STRING (INDEXED) (UNIQUE)
+    summary: STRING
+    summaryEmbedding: LIST
   (FOLDER)
     name: STRING
     path: STRING (INDEXED) (UNIQUE)
+    summary: STRING
+    summaryEmbedding: LIST
   (FUNCTION)
     body_location: LIST
+    codeSummary: STRING
+    code_hash: STRING
     file_path: STRING
     has_definition: BOOLEAN
     id: STRING (INDEXED) (UNIQUE)
@@ -56,9 +64,13 @@ Node Properties:
     return_type: STRING
     scope: STRING
     signature: STRING
+    summary: STRING
+    summaryEmbedding: LIST
     type: STRING
   (METHOD)
     body_location: LIST
+    codeSummary: STRING
+    code_hash: STRING
     file_path: STRING
     has_definition: BOOLEAN
     id: STRING (INDEXED) (UNIQUE)
@@ -71,17 +83,14 @@ Node Properties:
     return_type: STRING
     scope: STRING
     signature: STRING
+    summary: STRING
+    summaryEmbedding: LIST
     type: STRING
-  (NAMESPACE)
-    id: STRING (INDEXED) (UNIQUE)
-    name: STRING
-    name_location: LIST
-    path: STRING
-    qualified_name: STRING
   (PROJECT)
-    commit_hash: STRING
     name: STRING
     path: STRING
+    summary: STRING
+    summaryEmbedding: LIST
   (VARIABLE)
     file_path: STRING
     has_definition: BOOLEAN
@@ -96,24 +105,32 @@ Node Properties:
     type: STRING
 
 Relationships:
-  (CLASS_STRUCTURE) -[:HAS_FIELD]-> (FIELD)
   (CLASS_STRUCTURE) -[:HAS_METHOD]-> (METHOD)
-  (CLASS_STRUCTURE) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION)
-  (CLASS_STRUCTURE) -[:INHERITS]-> (CLASS_STRUCTURE)
-  (DATA_STRUCTURE) -[:HAS_FIELD]-> (FIELD)
   (DATA_STRUCTURE) -[:HAS_METHOD]-> (METHOD)
-  (DATA_STRUCTURE) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE)
-  (FILE) -[:DECLARES]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|NAMESPACE)
+  (CLASS_STRUCTURE) -[:HAS_FIELD]-> (FIELD)
+  (DATA_STRUCTURE) -[:HAS_FIELD]-> (FIELD)
+  (CLASS_STRUCTURE) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION)
+  (DATA_STRUCTURE) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION)
+  (FUNCTION) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION)
+  (METHOD) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION)
+  (FILE) -[:DECLARES]-> (NAMESPACE|CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE)
   (FILE) -[:DEFINES]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE)
   (FILE) -[:INCLUDES]-> (FILE)
   (FOLDER) -[:CONTAINS]-> (FILE|FOLDER)
   (FUNCTION) -[:CALLS]-> (FUNCTION|METHOD)
-  (FUNCTION) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE)
   (METHOD) -[:CALLS]-> (FUNCTION|METHOD)
-  (METHOD) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE)
-  (METHOD) -[:OVERRIDDEN_BY]-> (METHOD)
-  (NAMESPACE) -[:SCOPE_CONTAINS]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|NAMESPACE|VARIABLE)
-  (PROJECT) -[:CONTAINS]-> (FOLDER)
+  (PROJECT) -[:CONTAINS]-> (FOLDER|FILE)
+
+Condensed form of Relationships:
+  (CLASS_STRUCTURE|DATA_STRUCTURE) -[:HAS_METHOD]-> (METHOD)
+  (CLASS_STRUCTURE|DATA_STRUCTURE) -[:HAS_FIELD]-> (FIELD)
+  (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|METHOD) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION)
+  (FUNCTION|METHOD) -[:CALLS]-> (FUNCTION|METHOD)
+  (FILE) -[:DECLARES]-> (NAMESPACE|CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE)
+  (FILE) -[:DEFINES]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE)
+  (FILE) -[:INCLUDES]-> (FILE)
+  (FOLDER|PROJECT) -[:CONTAINS]-> (FILE|FOLDER)
+
 
 Property Explanations:
   id: Unique identifier for the node.
@@ -121,6 +138,7 @@ Property Explanations:
   path: Relative path to the project root if it is within the project folder. Otherwise, it is absolute path, including the PROJECT node
   name_location: Entity's name location in the file, showing the start position: [line, column].
   body_location: Entity's body location in the file, showing the range: [start_line, start_column, end_line, end_column].
+  code_hash: MD5 hashing value of entity's original source code body. Used to detect changed code.
   kind: Type of symbol (e.g., Function, Struct, Variable).
   scope: Visibility scope (e.g., global, static).
   language: Programming language of the source code.
@@ -128,4 +146,7 @@ Property Explanations:
   return_type: Return type of a function/method.
   signature: Full signature of a function/method.
   has_definition: Boolean indicating if a symbol has a definition/implementation, not just a declaration.
+  codeSummary: LLM-generated summary of the code's literal function.
+  summary: LLM-generated context-aware summary of the node's purpose.
+  summaryEmbedding: Vector embedding of the 'summary' for similarity search.
   file_path: Absolute path to the file containing the symbol.
