@@ -315,18 +315,14 @@ These are simple, standalone scripts created to assist with development, debuggi
 
 ### 5.3: Performance: Data Ingestion Strategies
 
-*   **The Challenge**: Ingesting millions of `:DEFINES` relationships can be a major bottleneck. The system provides three strategies, allowing users to choose the best trade-off between speed, safety, and dependencies.
-*   **1. `unwind-sequential`**
+*   **The Challenge**: Ingesting millions of `:DEFINES` relationships can be a major bottleneck. The system provides two strategies, allowing users to choose the best trade-off between speed, safety, and dependencies.
+*   **1. `unwind-sequential`(Default)**
     *   **How**: Uses a standard `UNWIND` clause to process batches of relationships sequentially in a single transaction.
     *   **Pros**: Simple, 100% idempotent (uses `MERGE`), and requires no special database plugins.
     *   **Cons**: Slower than parallel methods for large-scale initial imports.
-*   **2. `isolated-parallel` (Default for Updates)**
+*   **2. `isolated-parallel`**
     *   **How**: Groups all relationships by their source `:FILE` node *before* ingestion. It then uses `apoc.periodic.iterate` to process these groups in parallel.
     *   **Pros**: This is the safest parallel strategy. By ensuring all relationships for a given file are in the same unit of work, it guarantees that no two threads will ever try to lock the same `:FILE` node, completely **eliminating the risk of deadlocks**.
-*   **3. `batched-parallel` (Default for Builds)**
-    *   **How**: Sends raw batches of relationships directly to `apoc.periodic.iterate` for parallel processing without any pre-grouping.
-    *   **Pros**: The fastest method, as it avoids the client-side grouping overhead.
-    *   **Cons**: Carries a small, theoretical risk of deadlocks if multiple threads happen to write to the same file node at once. This risk is minimal on a clean build, making it the default for its speed.
 
 ### 5.4: Performance: Caching Mechanisms (Refactored)
 
