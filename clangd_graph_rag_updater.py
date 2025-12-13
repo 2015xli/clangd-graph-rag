@@ -15,12 +15,10 @@ from git_manager import GitManager
 from git.exc import InvalidGitRepositoryError
 from neo4j_manager import Neo4jManager
 from clangd_index_yaml_parser import SymbolParser
-from code_graph_rag_generator import RagGenerator
-from llm_client import get_llm_client, get_embedding_client
+from rag_updater import RagUpdater
 from include_relation_provider import IncludeRelationProvider
 from compilation_parser import CompilationParser # Import CompilationParser
 from graph_update_scope_builder import GraphUpdateScopeBuilder
-from summary_manager import SummaryManager
 
 from log_manager import init_logging
 init_logging()
@@ -141,7 +139,7 @@ class GraphUpdater:
 
     def _purge_stale_graph_data(self, dirty_files_rel: Set[str], deleted_files_rel: List[str]):
         """ Purge all the nodes of deleted files, and 
-        all the nodes defined/declared by both deleted and dirty files (and relationships to/from the nodes).
+        all the nodes defined/declared by either deleted or dirty files (and relationships to/from the nodes).
         NOTE: We don't prune empty NAMESPACE and PATH nodes recursively after files and symbols are purged
         because if the parent's parent namespace node is deleted, 
         the seed symbol nodes will not be able to find a namespace node to attach to.
@@ -195,22 +193,10 @@ class GraphUpdater:
 
         logger.info("\n--- Phase 7: Running targeted RAG update ---")
 
-        embedding_client = get_embedding_client(self.args.llm_api)
-        
-        summary_mgr = SummaryManager(
-            project_path=self.project_path,
-            llm_api=self.args.llm_api,
-            token_encoding=self.args.token_encoding,
-            max_context_token_size=self.args.max_context_size
-        )
-
-        rag_generator = RagGenerator(
+        rag_updater = RagUpdater(
             neo4j_mgr=self.neo4j_mgr,
             project_path=self.project_path,
-            embedding_client=embedding_client,
-            summary_mgr=summary_mgr,
-            num_local_workers=self.args.num_local_workers,
-            num_remote_workers=self.args.num_remote_workers,
+            args=self.args
         )
         
         # For Rag seeds we need the both function/methods and other core symbols that we need summarize
@@ -228,7 +214,7 @@ class GraphUpdater:
             'deleted': [os.path.relpath(f, self.project_path) for f in git_changes['deleted']]
         }
         
-        rag_generator.summarize_targeted_update(rag_seed_ids, structurally_changed_files_for_rag)
+        rag_updater.summarize_targeted_update(rag_seed_ids, structurally_changed_files_for_rag)
 
         logger.info("--- Summary regeneration complete ---")
         

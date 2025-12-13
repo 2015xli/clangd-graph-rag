@@ -18,7 +18,8 @@ from compilation_manager import CompilationManager
 from neo4j_manager import Neo4jManager
 
 # Ingestion components
-from clangd_symbol_nodes_builder import PathManager, PathProcessor, SymbolProcessor
+from clangd_symbol_nodes_builder import SymbolProcessor
+from path_processor import PathProcessor, PathManager
 from clangd_call_graph_builder import ClangdCallGraphExtractorWithContainer, ClangdCallGraphExtractorWithoutContainer
 from source_span_provider import SourceSpanProvider
 from include_relation_provider import IncludeRelationProvider

@@ -21,7 +21,8 @@ import math
 
 import input_params
 # Import processors and managers from the library scripts
-from clangd_symbol_nodes_builder import PathManager, PathProcessor, SymbolProcessor
+from clangd_symbol_nodes_builder import SymbolProcessor
+from path_processor import PathProcessor, PathManager
 from clangd_call_graph_builder import ClangdCallGraphExtractorWithContainer, ClangdCallGraphExtractorWithoutContainer
 from clangd_index_yaml_parser import SymbolParser
 from neo4j_manager import Neo4jManager
@@ -31,7 +32,6 @@ from compilation_manager import CompilationManager
 from include_relation_provider import IncludeRelationProvider
 import logging
 import sys
-from summary_manager import SummaryManager
 
 from log_manager import init_logging
 init_logging()
@@ -195,28 +195,14 @@ class GraphBuilder:
 
         logger.info("\n--- Starting Phase 8: Generating Summaries and Embeddings ---")
         from code_graph_rag_generator import RagGenerator
-        from llm_client import get_embedding_client
-
-        embedding_client = get_embedding_client(self.args.llm_api)
         
-        summary_mgr = SummaryManager(
-            project_path=self.args.project_path,
-            llm_api=self.args.llm_api,
-            token_encoding=self.args.token_encoding,
-            max_context_token_size=self.args.max_context_size
-        )
-
         rag_generator = RagGenerator(
             neo4j_mgr=neo4j_mgr,
             project_path=self.args.project_path,
-            embedding_client=embedding_client,
-            summary_mgr=summary_mgr,
-            num_local_workers=self.args.num_local_workers,
-            num_remote_workers=self.args.num_remote_workers
+            args=self.args
         )
 
         rag_generator.summarize_code_graph()
-        neo4j_mgr.create_vector_indices()
         logger.info("\n--- Finished Phase 8 ---")
 
 import input_params
