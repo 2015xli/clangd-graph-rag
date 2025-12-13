@@ -49,7 +49,7 @@ def add_rag_args(parser: argparse.ArgumentParser):
 
 def add_ingestion_strategy_args(parser: argparse.ArgumentParser):
     """Adds arguments that control ingestion strategy."""
-    parser.add_argument('--defines-generation', choices=['unwind-sequential', 'isolated-parallel', 'batched-parallel'], default='unwind-sequential',
+    parser.add_argument('--defines-generation', choices=['unwind-sequential', 'isolated-parallel'], default='unwind-sequential',
                         help='Strategy for ingesting DEFINES relationships. (default: unwind-sequential)')
     parser.add_argument('--keep-orphans', action='store_true',
                       help='Keep orphan nodes in the graph (skip cleanup)')

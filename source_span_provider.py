@@ -198,7 +198,7 @@ class SourceSpanProvider:
                     continue
 
                 if False:
-                    if sym.name == "testing_start_info":
+                    if sym.name == "XXH32_hashFromCanonical":
                         logger.info(f"Symbol with body: {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
 
                 key = CompilationParser.make_symbol_key(sym.name, loc.file_uri, loc.start_line, loc.start_column)

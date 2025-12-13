@@ -2,91 +2,65 @@
 
 ## 1. High-Level Role
 
-The `code_graph_rag_generator.py` script, through its `RagGenerator` class, serves as the primary **orchestrator** for the multi-pass RAG (Retrieval-Augmented Generation) enrichment process. Its sole responsibility is to control the *sequence* of summarization, traversing the code graph in a logical, dependency-aware order. It delegates all the complex logic of caching, staleness checking, and LLM interaction to the `SummaryManager`.
+The `code_graph_rag_generator.py` script, through its `RagGenerator` class, serves as the primary entry point and driver for a **full-build** RAG (Retrieval-Augmented Generation) enrichment process. It inherits from `RagOrchestrator` and its sole responsibility is to control the *sequence* of summarization passes for an entire graph, ensuring the process moves logically from low-level code constructs up to high-level architectural components.
 
-It operates in two distinct modes:
+It is invoked by `clangd_graph_rag_builder.py` to systematically summarize every relevant node in a newly created graph.
 
-*   **Full Build**: Invoked by `clangd_graph_rag_builder.py`, it systematically summarizes every relevant node in the entire graph.
-*   **Incremental Update**: Invoked by `clangd_graph_rag_updater.py`, it performs a "surgical" update, summarizing only the nodes affected by a specific set of code changes.
+## 2. Core Architectural Principle: Inherited Orchestration
 
-## 2. Core Architectural Principle: Orchestration vs. Provision
+The `RagGenerator`'s design is simple because it leverages the powerful, distributed architecture of its parent class, `RagOrchestrator`. It does not contain any complex logic itself. Instead, it makes a series of high-level calls to the methods it inherits, relying on the underlying machinery to handle the details.
 
-The refactored design establishes a clear separation of concerns between the `RagGenerator` and the `SummaryManager`.
+The architecture follows a clear separation of concerns:
+*   **`RagGenerator` (The Driver)**: Its job is to define the **"what"** and **"when"** of a full build. It dictates the sequence of passes (functions, then classes, then namespaces, etc.).
+*   **`RagOrchestrator` (The Logistics Layer)**: The parent class handles parallelism and all database I/O. Its worker functions fetch data for individual nodes.
+*   **`NodeSummaryProcessor` (The Logic Layer)**: The "brain" that performs the state-aware caching and generation logic for each node.
+*   **`SummaryCacheManager` (The Data Layer)**: The component that manages the persistence and state of the cache.
 
-*   **`RagGenerator` (The Orchestrator)**: Its job is to answer **"what"** and **"when"** to summarize.
-    1.  It determines the correct order of operations (e.g., functions before classes, children before parents).
-    2.  For each node, it queries the graph to fetch the entity itself and its direct dependencies (e.g., a function and its callers/callees).
-    3.  It makes a single, high-level call to the `SummaryManager` to request a summary.
-    4.  It persists the final result returned by the manager to the Neo4j database.
-
-*   **`SummaryManager` (The Provider)**: Its job is to answer **"how"** to provide a summary.
-    *   It encapsulates all logic for caching, staleness checks, prompt engineering, and LLM calls. It also internally manages the LLM client, tokenizer, and prompt manager. It is the intelligent engine of the summarization process. For more details, see `docs/summary_summary_manager.md`.
+For more details on the underlying components, see `docs/summary_rag_orchestrator.md`, `docs/summary_node_summary_processor.md`, and `docs/summary_summary_cache_manager.md`.
 
 ## 3. The Multi-Pass Summarization Workflow (`summarize_code_graph`)
 
-For a full build, `RagGenerator` executes a series of dependent passes in a strict sequence to ensure that contextual information flows correctly from the bottom of the hierarchy upwards.
+For a full build, `RagGenerator` executes a series of dependent passes in a strict sequence. This ensures that contextual information flows correctly from the bottom of the hierarchy upwards. At each step, it calls the appropriate summarization method from the parent `RagOrchestrator`, which handles the parallel execution.
 
-1.  **Pass 1: Individual Function Summaries (`summarize_functions_individually`)**
+1.  **Load Cache**: It begins by calling `self.summary_cache_manager.load()` to populate the in-memory cache from `summary_backup.json`, if it exists.
+
+2.  **Pass 1: Individual Function Summaries (`summarize_functions_individually`)**
     *   **Action**: Queries for all `:FUNCTION` and `:METHOD` nodes in the graph.
-    *   **Delegation**: For each function, it calls `_process_one_function_for_code_summary`, which retrieves the raw source code and delegates to `summary_mgr.get_code_summary()` to get a baseline, code-only summary.
+    *   **Delegation**: It calls the inherited `_summarize_functions_individually_with_ids()` method, passing it all the collected IDs. The underlying worker/processor logic then handles hashing the source code, checking the cache, and generating a `codeSummary` for each function as needed.
+    *   **Checkpoint**: After the pass completes, it calls `save(is_intermediate=True)` to persist the results to disk.
 
-2.  **Pass 2: Contextual Function Summaries (`summarize_functions_with_context`)**
+3.  **Pass 2: Contextual Function Summaries (`summarize_functions_with_context`)**
     *   **Action**: Queries for all functions/methods that now have a `codeSummary`.
-    *   **Delegation**: For each function, it calls `_process_one_function_for_contextual_summary`, which fetches its callers and callees from the graph and delegates to `summary_mgr.get_function_contextual_summary()` to produce the final, context-aware `summary`.
+    *   **Delegation**: It calls `_summarize_functions_with_context_with_ids()` on this full set of IDs. The workers then handle fetching dependencies and delegating to the processor, which determines if a new context-aware `summary` is needed.
+    *   **Checkpoint**: The cache is saved again.
 
-3.  **Pass 3: Class Summaries (`summarize_class_structures`)**
-    *   **Action**: Fetches all `:CLASS_STRUCTURE` nodes and groups them by inheritance depth using `_get_classes_by_inheritance_level`. It then processes these groups sequentially, from deepest to shallowest.
-    *   **Delegation**: For each class, it calls `_summarize_one_class_structure`, which fetches its parents, methods, and fields, and delegates to `summary_mgr.get_class_summary()`. This ordering guarantees parent summaries are available when processing derived classes.
+4.  **Pass 3: Class Summaries (`summarize_class_structures`)**
+    *   **Action**: Fetches all `:CLASS_STRUCTURE` nodes.
+    *   **Delegation**: It calls `_summarize_classes_with_ids()`. The orchestrator's logic processes the classes level-by-level through the inheritance hierarchy, ensuring parent summaries are generated before their children.
+    *   **Checkpoint**: The cache is saved.
 
-4.  **Pass 4: Namespace Summaries (`summarize_namespaces`)**
-    *   **Action**: Fetches all `:NAMESPACE` nodes and groups them by nesting depth (by counting `::` in the qualified name). It processes these groups from deepest to shallowest.
-    *   **Delegation**: For each namespace, it calls `_summarize_one_namespace`, which fetches its direct children and delegates to `summary_mgr.get_namespace_summary()`.
+5.  **Pass 4: Namespace Summaries (`summarize_namespaces`)**
+    *   **Action**: Fetches all `:NAMESPACE` nodes.
+    *   **Delegation**: It calls `_summarize_namespaces_with_ids()`. The orchestrator processes namespaces from the most deeply nested outwards.
+    *   **Checkpoint**: The cache is saved.
 
-5.  **Pass 5 & 6: File and Folder Roll-Up Summaries**
-    *   **Action**: The `_summarize_all_files()` and `_summarize_all_folders()` methods trigger the final roll-up. They process all files, and then all folders in a bottom-up fashion.
-    *   **Delegation**: The worker methods (`_summarize_one_file`, `_summarize_one_folder`) fetch the direct children from the graph and delegate to the corresponding `SummaryManager` methods (`get_file_summary`, `get_folder_summary`).
+6.  **Pass 5 & 6: File and Folder Roll-Up Summaries**
+    *   **Action**: The `_summarize_all_files()` and `_summarize_all_folders()` methods trigger the final roll-up.
+    *   **Delegation**: They call the corresponding orchestrator methods, which process all files, and then all folders in a bottom-up fashion.
+    *   **Checkpoint**: The cache is saved.
 
-6.  **Pass 7: Embedding Generation (`generate_embeddings`)**
-    *   **Action**: The final pass queries for *all* nodes that have a `summary` property but are missing a `summaryEmbedding`. This state-based approach elegantly handles both newly created and recently updated summaries.
+7.  **Pass 7: Embedding Generation (`generate_embeddings`)**
+    *   **Action**: The final generation pass queries for *all* nodes that have a `summary` property but are missing a `summaryEmbedding`.
     *   **Logic**: It calls the `EmbeddingClient` to generate vectors for the summary text and then updates the nodes in the database.
 
-## 4. Worker Methods: The Orchestration Pattern
+8.  **Final Save**: A final call to `summary_cache_manager.save(mode="builder")` is made. In "builder" mode, this performs a pruning step, removing any entries from the cache that were not "visited" during the run, keeping the cache file clean and in sync with the newly built graph.
 
-All the `_process_one_*` and `_summarize_one_*` methods follow the same clean, three-step orchestration pattern:
-
-1.  **Fetch Dependencies**: Execute one or more Cypher queries to get the primary entity and all the contextually relevant dependent entities from the graph.
-2.  **Delegate to Manager**: Make a single call to the appropriate `SummaryManager.get_*_summary()` method, passing the fetched entities. The manager handles all further logic.
-3.  **Persist Result**: If the manager returns a new summary string (indicating a "cache miss" and successful regeneration), execute a final Cypher query to `SET` the new summary on the node and `REMOVE` the now-stale embedding.
-
-## 5. Incremental Update Workflow (`summarize_targeted_update`)
-
-This workflow is optimized to perform the minimum work necessary.
-
-1.  **Input**: It receives a `seed_symbol_ids` set (functions in changed files) and a `structurally_changed_files` dictionary from the `GraphUpdater`.
-2.  **Pass 1 (Targeted Function Code Summaries)**: It calls `_summarize_functions_individually_with_ids()` on *only the seed IDs*.
-3.  **Scope Expansion (Functions)**: It performs a 1-hop graph query (`_get_neighbor_ids`) to find the direct callers and callees of the functions whose code summaries were just updated. This creates an expanded set of functions whose context may have changed.
-4.  **Pass 2 (Targeted Function Contextual Summaries)**: It calls `_summarize_functions_with_context_with_ids()` on this expanded set. The `SummaryManager`'s internal logic ensures that only functions with stale dependencies are actually regenerated.
-5.  **Pass 3 (Targeted Class Summaries)**: It identifies `CLASS_STRUCTURE` nodes whose methods were updated or whose defining files were changed. It then calls `_summarize_targeted_class_structures()` on these identified classes, processing them in inheritance order.
-6.  **Pass 4 (Targeted Namespace Summaries)**: It identifies `NAMESPACE` nodes whose children (functions, classes, nested namespaces) were updated or whose defining files were changed. It then calls `_summarize_targeted_namespaces()` on these identified namespaces, processing them from deepest to shallowest.
-7.  **Smart Roll-up (Files, Folders, Project)**: It identifies the specific files and parent folders affected by the updated function, class, and namespace summaries, as well as structural changes. It then triggers the summarization passes (`_summarize_files_with_paths`, `_summarize_folders_with_paths`, `_summarize_project`) for *only those entities*.
-8.  **Embedding Generation**: It runs the standard `generate_embeddings()` pass, which automatically finds and updates embeddings for any node whose summary was changed.
-
-## 6. Key Components & Dependencies
-
--   **`SummaryManager`**: The intelligent provider for all summaries. This is the `RagGenerator`'s most important dependency.
--   **`Neo4jManager`**: Used for all direct graph database interactions (querying and updating).
--   **`EmbeddingClient`**: Used in the final pass to generate vector embeddings.
--   **`input_params.py`**: Used to define and parse command-line arguments for standalone execution.
-
-## 7. Standalone Execution
+## 4. Standalone Execution
 
 The script can be run directly to perform a full-build summarization on an existing graph.
 
 ```bash
 # Example: Run a full RAG generation process
-python3 code_graph_rag_generator.py /path/to/project/ --generate-summary --llm-api openai --token-encoding cl100k_base
+python3 code_graph_rag_generator.py /path/to/project/ --generate-summary --llm-api openai
 ```
-The `main` function in the script handles:
-- Parsing command-line arguments.
-- Initializing the `EmbeddingClient` and `SummaryManager` (which internally manages `LlmClient`, `RagGenerationPromptManager`, and `tiktoken` tokenizer).
-- Initializing and running the `RagGenerator`. The `RagGenerator` itself is now responsible for loading and saving the summary cache.
+The `main` function handles parsing arguments and initializing the `RagGenerator` and its dependencies.

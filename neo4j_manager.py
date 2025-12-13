@@ -240,31 +240,39 @@ class Neo4jManager:
         """
         if not file_paths:
             return 0
-        
-        # This query uses APOC to find the entire subgraph of "owned" symbols
-        # starting from the top-level symbols defined in a file.
-        # The ">" in the relationship filter ensures we only traverse outwards
-        # from the defined symbol to its children.
 
         # Currently,  the graph schema is (FILE) -[:DEFINES]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE), 
         # meaning all the nodes in the other end of DEFINES relationship are ensured to be (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE). 
-        # That means, we don't need to know the label of the other end node, but to match any node of the DEFINES relationship. 
         # If we use  (FILE) -[:DEFINES]-> (s), I guess it can avoid a match for the label of the other end node, 
         # compared to  (FILE) -[:DEFINES]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE). 
         # Of course, this optimization is very marginal.
 
+        # NOTE: 1. Originally, this query uses APOC to find the entire subgraph of "owned" symbols
+        # starting from the top-level symbols defined in a file.
+        # The ">" in the relationship filter ensures we only traverse outwards
+        # from the defined symbol to its children.
+
+        # NOTE: 2. We reverse this query back to deleting the symbol nodes directly without traversing descendants, 
+        # which is more efficient and sufficient for our use case.
+        # The difference between deleting the subgraph and just the directly defined symbols is not visible.
+        # At least I don't see any differences in the final graph structure.
+        # The reason is, we use full_SymbolParser for parental relationships construction in SourceSpanProvider,
+        # so even if some children symbols in the subgraph are defined in other files (instead of the deleted and dirty ones),
+        # we still can find them and reconstruct the relationships when we build the mini_SymbolParser.
+
         query = """
         UNWIND $paths AS path
         MATCH (file:FILE {path: path})-[:DEFINES]->(s)
-        CALL apoc.path.subgraphNodes(s, {
-            relationshipFilter: "HAS_METHOD|HAS_FIELD|HAS_NESTED>"
-        }) YIELD node
-        DETACH DELETE node
+        //CALL apoc.path.subgraphNodes(s, {
+        //    relationshipFilter: "HAS_METHOD|HAS_FIELD|HAS_NESTED>"
+        //}) YIELD node
+        //DETACH DELETE node
+        DETACH DELETE s
         """
         with self.driver.session() as session:
             result = session.run(query, paths=file_paths)
             deleted_symbols = result.consume().counters.nodes_deleted
-            logger.info(f"Purged {deleted_symbols} symbols (including descendants) defined in {len(file_paths)} files.")
+            logger.info(f"Purged {deleted_symbols} symbols defined in {len(file_paths)} files.")
             return deleted_symbols
 
     def purge_symbols_declared_in_files(self, file_paths: List[str]) -> int:
@@ -275,7 +283,7 @@ class Neo4jManager:
         query = """
         UNWIND $paths AS path
         MATCH (file:FILE {path: path})-[:DECLARES]->(s)
-        WHERE s:FUNCTION OR s:CLASS_STRUCTURE OR s:DATA_STRUCTURE OR s:NAMESPACE
+        //WHERE (s:FUNCTION|CLASS_STRUCTURE|DATA_STRUCTURE|NAMESPACE|VARIABLE)
         DETACH DELETE s
         """
         with self.driver.session() as session:

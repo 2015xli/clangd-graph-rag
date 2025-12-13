@@ -2,134 +2,70 @@
 
 ## 1. Role in the Pipeline
 
-This script is responsible for **Passes 3 and 4** of the full ingestion pipeline (after symbols have been parsed and enriched by `SourceSpanProvider`). Its purpose is to build the structural foundation of the code graph in Neo4j. It creates:
+This module provides the `SymbolProcessor` class, which is responsible for the most complex part of the graph construction: **ingesting all logical code symbols and their intricate web of relationships**. It acts as the engine for **Pass 4** of the full ingestion pipeline, running after symbols have been parsed (`SymbolParser`) and enriched with lexical data (`SourceSpanProvider`).
 
-*   The physical file system hierarchy (`:PROJECT`, `:FOLDER`, `:FILE`).
-*   The logical code symbols (`:NAMESPACE`, `:FUNCTION`, `:METHOD`, `:CLASS_STRUCTURE`, `:DATA_STRUCTURE`, `:FIELD`, `:VARIABLE`).
-*   All the crucial relationships connecting these nodes, such as `:CONTAINS`, `:DEFINES`, `:HAS_NESTED`, `:SCOPE_CONTAINS`, `:HAS_METHOD`, `:HAS_FIELD`, `:INHERITS`, and `:OVERRIDDEN_BY`.
+Its purpose is to transform the final, in-memory collection of `Symbol` objects into a rich, interconnected graph in Neo4j. The logic for processing file and folder paths, which precedes this pass, resides in the separate `path_processor.py` module.
 
-It operates on the in-memory collection of enriched `Symbol` objects provided by the `clangd_index_yaml_parser` (after `SourceSpanProvider` has added `body_location` and `parent_id`).
+## 2. High-Level Workflow: `ingest_symbols_and_relationships`
 
-## 2. Standalone Usage
+The `SymbolProcessor`'s main entry point orchestrates a three-phase process designed for clarity, performance, and correctness:
 
-The script can be run directly to perform a partial ingestion of file structure and symbol definitions, which is useful for debugging.
-
-```bash
-# Example: Ingest symbols using the default batched-parallel strategy
-python3 clangd_symbol_nodes_builder.py /path/to/index.yaml /path/to/project/
-```
-
-**All Options:**
-
-*   `index_file`: Path to the clangd index YAML file (or a `.pkl` cache file).
-*   `project_path`: Root path of the project.
-*   `--defines-generation`: Strategy for ingesting `:DEFINES` relationships (`unwind-sequential`, `isolated-parallel`, `batched-parallel`). Default: `batched-parallel`.
-*   ... and other performance tuning arguments (`--num-parse-workers`, `--cypher-tx-size`, etc.).
+1.  **Phase 1: Data Preparation**: All raw `Symbol` objects are processed, enriched with linking information, and grouped into a structure optimized for ingestion.
+2.  **Phase 2: Node Ingestion**: All symbol nodes (`:FUNCTION`, `:CLASS_STRUCTURE`, etc.) are created in the database. A special de-duplication step is run here.
+3.  **Phase 3: Relationship Ingestion**: All relationships between the newly created nodes (`:HAS_METHOD`, `:HAS_NESTED`, `:DEFINES`, etc.) are created in a specific, optimized order.
 
 ---
-*The following sections describe the library's internal logic.*
 
-## 3. Path Management (`PathManager`)
+## 3. Deep Dive: Data Preparation
 
-The `PathManager` class provides utility functions for handling file paths consistently across the project:
+*   **Problem**: How to efficiently process tens of thousands of raw `Symbol` objects into a format ready for Neo4j, while also resolving necessary information for relationship linking (like namespace or lexical containment) *before* any database writes occur?
 
-*   `uri_to_relative_path(uri: str)`: Converts a file URI (e.g., `file:///path/to/project/src/file.cpp`) to a path relative to the project root (e.g., `src/file.cpp`).
-*   `is_within_project(path: str)`: Checks if a given absolute path falls within the defined project root.
+*   **Solution**: A multi-step preparation pipeline is used:
+    1.  **`_build_scope_maps`**: This first pre-processes all symbols to create a critical lookup table that maps fully qualified namespace names (e.g., `std::chrono::`) to their unique symbol IDs. This is essential because a symbol's `scope` property is a string, not an ID, and this map allows for the later creation of `(:NAMESPACE)-[:SCOPE_CONTAINS]->(Symbol)` relationships.
+    2.  **`process_symbol`**: This method acts as a powerful translator, converting a `Symbol` object into a dictionary. During this translation, it:
+        *   **Filters** out symbols defined outside the project path (except for `Namespace` symbols, which are always processed).
+        *   **Assigns a `node_label`**: This is where the business logic for the C/C++ schema is enforced. It maps the `clangd` `kind` to a specific Neo4j label (e.g., `InstanceMethod` becomes `:METHOD`, `Class` becomes `:CLASS_STRUCTURE`). It also handles the important distinction where a `Struct` becomes a `:CLASS_STRUCTURE` if its language is C++, but a `:DATA_STRUCTURE` if its language is C.
+        *   **Attaches Temporary IDs**: It attaches temporary linking properties like **`parent_id`** (for lexical nesting, from `SourceSpanProvider`) and **`namespace_id`** (from the scope map). These are used only for relationship creation in Phase 3 and are not stored on the final node.
+    3.  **`_process_and_group_symbols`**: The final preparation step groups all the processed symbol dictionaries by their assigned `node_label`. This creates a clean, organized data structure (e.g., a list of all `FUNCTION` data, a list of all `CLASS_STRUCTURE` data) ready for efficient batch ingestion.
 
-These utilities ensure that all paths stored in the graph are relative to the project root, which is crucial for graph operations and consistency.
+*   **Benefit**: This "prepare-then-ingest" approach is highly efficient. It ensures all data is validated, grouped, and enriched with temporary linking IDs in-memory before a single node is created, minimizing complex queries during the database writing phase.
 
-## 4. Pass 3: Ingesting File & Folder Structure (`PathProcessor`)
+---
 
-This pass builds the graph representation of the physical file system hierarchy.
+## 4. Deep Dive: Node and Relationship Ingestion
 
-*   **Algorithm**:
-    1.  **Path Discovery**: The `PathProcessor` consolidates all unique file paths from two sources:
-        *   `_discover_paths_from_symbols()`: Iterates through every `Symbol` object's declaration and definition locations to find all files referenced by symbols within the project.
-        *   `_discover_paths_from_includes()`: Retrieves all files involved in `#include` relationships from the `CompilationManager`.
-        From this combined set of unique file paths, it then derives all unique parent folder paths using `_get_folders_from_files()`, ensuring the entire directory tree is captured.
-    2.  **Batched Ingestion of Folders**:
-        *   `_ingest_folder_nodes_and_relationships()`: Creates `:FOLDER` nodes for each unique folder path. Folders are sorted by depth to ensure parent folders are created before their children.
-        *   It then creates `[:CONTAINS]` relationships:
-            *   From the `:PROJECT` node to top-level `:FOLDER`s.
-            *   From parent `:FOLDER`s to child `:FOLDER`s.
-        This process uses efficient, batched Cypher `MERGE` queries.
-    3.  **Batched Ingestion of Files**:
-        *   `_ingest_file_nodes_and_relationships()`: Creates `:FILE` nodes for each unique file path.
-        *   It then creates `[:CONTAINS]` relationships:
-            *   From the `:PROJECT` node to top-level `:FILE`s.
-            *   From parent `:FOLDER`s to child `:FILE`s.
-        This also uses efficient, batched Cypher `MERGE` queries.
+### 4.1. Unified Node Ingestion
 
-## 5. Pass 4: Ingesting Symbols and Relationships (`SymbolProcessor`)
+*   **Problem**: Ingesting over ten different types of symbol nodes (`:FUNCTION`, `:METHOD`, `:CLASS_STRUCTURE`, etc.) could lead to a large amount of duplicated code.
 
-This pass populates the graph with logical code constructs (symbols) and their interconnections.
+*   **Solution**: A single, generic method, **`_ingest_nodes_by_label`**, is used for all node creation.
+    *   It accepts a list of data dictionaries and a `label` string.
+    *   It uses a generic Cypher query (`MERGE (n:{label} {{id: d.id}})...`) to create nodes in batches.
+    *   It intelligently uses `apoc.map.removeKeys` to prevent temporary linking properties like `parent_id` and `namespace_id` from being written to the node itself.
 
-### 5.1. Symbol Data Preparation
+*   **Benefit**: This unified design dramatically reduces code duplication and makes the system easier to maintain. Adding a new symbol type in the future only requires updating the label mapping, not writing a new ingestion method.
 
-The `SymbolProcessor` first prepares the raw `Symbol` objects (enriched by `SourceSpanProvider`) for ingestion:
+### 4.2. De-duplication of Structs/Classes
 
-1.  **`_build_scope_maps()`**: Creates a lookup table (`qualified_namespace_to_id`) mapping fully qualified namespace names (e.g., `std::chrono::`) to their corresponding `Symbol.id`. This is used to link symbols to their containing namespaces.
-2.  **`process_symbol(sym: Symbol, ...)`**: This crucial method transforms a raw `Symbol` object into a dictionary of properties suitable for Neo4j.
-    *   **Filtering**: It filters out symbols not within the project path, with the exception of `NAMESPACE` symbols, which can be external but still relevant for scope.
-    *   **Property Mapping**: It extracts common properties like `id`, `name`, `kind`, `scope`, `language`, `has_definition`.
-    *   **Path Conversion**: Converts `file_uri` to `file_path` (relative to project root).
-    *   **Location Data**: Populates `name_location` and `body_location` (if available from `SourceSpanProvider`).
-    *   **Parent IDs**: Copies `parent_id` (lexical parent from `SourceSpanProvider`) and `namespace_id` (semantic parent from `_build_scope_maps`) if present on the `Symbol` object.
-    *   **Node Label Assignment**: This is where `clangd`'s `sym.kind` is mapped to the appropriate Neo4j node label based on the refined C++ schema:
-        *   `Namespace` -> `:NAMESPACE` (with `qualified_name`)
-        *   `Function` -> `:FUNCTION`
-        *   `InstanceMethod`, `StaticMethod`, `Constructor`, `Destructor`, `ConversionFunction` -> `:METHOD`
-        *   `Class` -> `:CLASS_STRUCTURE`
-        *   `Struct` -> `:CLASS_STRUCTURE` (if C++) or `:DATA_STRUCTURE` (if C)
-        *   `Union`, `Enum` -> `:DATA_STRUCTURE`
-        *   `Field`, `StaticProperty`, `EnumConstant` -> `:FIELD` (with `is_static` property)
-        *   `Variable` -> `:VARIABLE`
-    *   **Specific Properties**: Adds `signature`, `return_type`, `type` for functions/methods/variables, and `is_static` for fields.
-3.  **`_process_and_filter_symbols()`**: Groups all processed symbol data dictionaries by their assigned `node_label` (e.g., all `FUNCTION` data in one list, all `CLASS_STRUCTURE` data in another).
+*   **Problem**: A header file might be included by both C and C++ source files. This can cause the `ClangParser` to see the same `struct` in two different language contexts, leading to the creation of two nodes with the same `id` but different labels (`:DATA_STRUCTURE` and `:CLASS_STRUCTURE`).
+*   **Solution**: After all nodes are ingested, the `_dedup_nodes` method runs a specific query: `MATCH (ds:DATA_STRUCTURE), (cs:CLASS_STRUCTURE {id: ds.id}) DETACH DELETE ds`. This finds and removes the C-style `:DATA_STRUCTURE` node if a C++-style `:CLASS_STRUCTURE` with the same ID exists.
+*   **Benefit**: This ensures the C++ representation is preferred when ambiguity exists, maintaining a clean and accurate graph without duplicates.
 
-### 5.2. Node Ingestion
+### 4.3. Multi-Stage Relationship Ingestion
 
-After preparation, the `ingest_symbols_and_relationships()` method orchestrates the creation of all symbol nodes in batches:
+*   **Problem**: The graph's value comes from its rich relationships. How can these be created efficiently and correctly after the nodes exist, using the temporary IDs attached during data preparation?
 
-*   `_ingest_namespace_nodes()`: Creates `:NAMESPACE` nodes.
-*   `_ingest_data_structure_nodes()`: Creates `:DATA_STRUCTURE` nodes.
-*   `_ingest_class_nodes()`: Creates `:CLASS_STRUCTURE` nodes.
-*   `_ingest_function_nodes()`: Creates `:FUNCTION` nodes.
-*   `_ingest_method_nodes()`: Creates `:METHOD` nodes. Note that `parent_id` is removed from properties using `apoc.map.removeKey` before setting, as it's used for relationship creation, not as a node property.
-*   `_ingest_field_nodes()`: Creates `:FIELD` nodes. Similar to methods, `parent_id` is removed.
-*   `_ingest_variable_nodes()`: Creates `:VARIABLE` nodes.
+*   **Solution**: After all nodes are created, a series of specialized methods are called to create each type of relationship in batches.
+    1.  **Parental Relationships (`:SCOPE_CONTAINS`, `:HAS_NESTED`)**: The `_ingest_parental_relationships` method uses the `namespace_id` and `parent_id` on the processed symbol data. It pre-groups the relationships in Python by the `(parent_label, child_label)` combination. This allows it to generate highly specific and fast Cypher queries (e.g., `MATCH (p:CLASS_STRUCTURE)... MATCH (c:METHOD)...`) that make full use of database indexes.
+    2.  **File Relationships (`:DEFINES`, `:DECLARES`)**: These methods link files to the symbols they contain. The `:DEFINES` relationship logic is particularly complex and offers multiple performance-tuned strategies to handle the massive volume of these relationships without causing database deadlocks.
+    3.  **Member & Inheritance Relationships**: Other methods (`_ingest_has_member_relationships`, `_ingest_inheritance_relationships`, etc.) follow a similar pattern of using the temporary IDs and batched `UNWIND` queries to create `:HAS_FIELD`, `:HAS_METHOD`, `:INHERITS`, and `:OVERRIDDEN_BY` edges.
 
-All node ingestion methods use batched `MERGE` queries for efficiency.
+*   **Benefit**: This multi-stage approach breaks down a highly complex task into a series of clear, manageable, and individually optimized steps, resulting in a correctly and efficiently constructed graph.
 
-### 5.3. Relationship Ingestion
+### 4.4. Deep Dive: The `:DEFINES` Relationship Strategies
 
-This is the most complex phase, where all inter-symbol relationships are created:
-
-1.  **`id_to_label_map`**: A quick in-memory lookup is built to map every symbol's ID to its Neo4j node label, enabling efficient filtering and dynamic Cypher query construction.
-2.  **`SCOPE_CONTAINS` Relationships**:
-    *   `_ingest_scope_contains_relationships()`: Creates `(parent:NAMESPACE)-[:SCOPE_CONTAINS]->(child)` relationships. These represent the logical containment of symbols (and nested namespaces) within namespaces.
-3.  **`HAS_NESTED` Relationships**:
-    *   `_ingest_nesting_relationships()`: Creates `(parent)-[:HAS_NESTED]->(child)` relationships. These represent the lexical nesting of structures (classes, structs, functions) as determined by `SourceSpanProvider`. Relationships are pre-grouped by `(parent_label, child_label)` combinations, allowing for highly optimized Cypher queries that specify node labels directly in the `MATCH` clause.
-4.  **`FILE-[:DECLARES]->NAMESPACE` Relationships**:
-    *   `_ingest_file_declarations()`: Links `:FILE` nodes to the `:NAMESPACE` nodes they contribute to.
-5.  **The `:DEFINES` Relationship Challenge**:
-    Creating `(f:FILE)-[:DEFINES]->(s:Symbol)` relationships (linking a file to the symbols it defines) is a major performance challenge due to the sheer volume. The script offers three strategies via the `--defines-generation` flag:
-    *   **`batched-parallel` (Default)**:
-        *   **Algorithm**: Uses `apoc.periodic.iterate` with `parallel: false` (due to potential deadlocks on file nodes if `parallel: true` is used without careful locking). This means it effectively runs sequentially but still benefits from APOC's batching within a single transaction.
-        *   **Use Case**: Generally a good balance for performance and safety on clean builds.
-    *   **`isolated-parallel` (Idempotent & Deadlock-Safe)**:
-        *   **Algorithm**: Relationships are first grouped by their target `:FILE` node on the client side. These groups are then passed to `apoc.periodic.iterate` with `parallel: true`. Since all relationships for a given file are processed within a single group, no two parallel threads will contend for the same file node, eliminating deadlocks.
-        *   **Use Case**: Safest for incremental updates or when there's a high risk of contention.
-    *   **`unwind-sequential`**:
-        *   **Algorithm**: A simple, idempotent, and sequential strategy using client-side batching with `UNWIND` and `MERGE`. It does not use the APOC library.
-        *   **Use Case**: Extremely safe, easy to debug, and does not require APOC. Performance is comparable to `batched-parallel` when node labels are specified in the `MATCH` clause.
-6.  **`HAS_FIELD` Relationships**:
-    *   `_ingest_has_field_relationships()`: Creates `(parent:DATA_STRUCTURE|CLASS_STRUCTURE)-[:HAS_FIELD]->(child:FIELD)` relationships.
-7.  **`HAS_METHOD` Relationships**:
-    *   `_ingest_has_method_relationships()`: Creates `(parent:CLASS_STRUCTURE)-[:HAS_METHOD]->(child:METHOD)` relationships.
-8.  **`INHERITS` Relationships**:
-    *   `_ingest_inheritance_relationships()`: Creates `(child:CLASS_STRUCTURE)-[:INHERITS]->(parent:CLASS_STRUCTURE)` relationships based on data from `SymbolParser`.
-9.  **`OVERRIDDEN_BY` Relationships**:
-    *   `_ingest_override_relationships()`: Creates `(base_method:METHOD)-[:OVERRIDDEN_BY]->(derived_method:METHOD)` relationships based on data from `SymbolParser`.
-
-All relationship ingestion methods utilize batched Cypher queries for optimal performance. 
+*   **Problem**: Creating the `(FILE)-[:DEFINES]->(Symbol)` relationship for every symbol in the project is a major performance challenge. A naive parallel approach can easily cause database deadlocks when multiple threads try to acquire a write lock on the same `:FILE` node simultaneously.
+*   **Solution**: The system offers two distinct strategies, controlled by the `--defines-generation` flag, allowing the user to choose the best trade-off between speed and safety for their environment.
+    1.  **`unwind-sequential`**: This is a simple and safe strategy that uses standard, non-APOC Cypher. It processes batches of relationships sequentially using `UNWIND` and `MERGE`. While not parallel, it is idempotent and easy to debug.
+    2.  **`isolated-parallel`**: This is the deadlock-safe parallel strategy. It first groups all relationships by their source `:FILE` node on the client side. These groups are then passed to `apoc.periodic.iterate` with `parallel: true`. Because all relationships for a given file are processed within a single group by a single thread, no two parallel threads will ever contend for the same `:FILE` node, completely eliminating the risk of deadlocks.
+*   **Benefit**: This provides tunable performance. The `isolated-parallel` strategy allows for significant speedups on multi-core machines during large-scale ingestion, while the `unwind-sequential` strategy provides a robust, dependency-free alternative.

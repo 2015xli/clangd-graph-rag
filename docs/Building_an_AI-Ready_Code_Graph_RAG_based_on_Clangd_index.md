@@ -140,17 +140,25 @@ To solve the header dependency problem, the system must have a complete understa
 *   **The `[:INCLUDES]` Relationship**: The graph schema is enriched with an `[:INCLUDES]` relationship between `:FILE` nodes. During a full build, the entire project is parsed to populate this graph.
 *   **Robust Dependency Analysis**: When a header is changed, the incremental updater can now perform a transitive query on the `[:INCLUDES]` graph (`MATCH (source)-[:INCLUDES*]->(changed_header)`) to find every single source file that depends on it, ensuring the "dirty scope" is complete and correct.
 
+### 1.7： Lexical Nesting and Anonymous Symbols
+
+An accurate source code graph needs to model the lexical nesting of code (e.g., a class inside another class). The info is necessary to build nesting/parental relationships.
+*   **Problem: The `scope` string**. In some cases, the `scope` string provided by `clangd` index file is unreliable for cases of anonymous structures, template specializations, and function signatures. E.g., `(anonymous struct)::Myclass::`, `symbol_name_A<type-parameter-0-0 (type-parameter-0-1...)>::`). 
+*   **Problem: Missing anonymous entities**. Anonymous entities (like anonymous functions, structs or classes) do not appear in the `clangd` index at all, making them invisible to the graph. A symbol must have a name.
+*   **Source code provides the ground truth**: Recursive walk of each file's AST to figure out the anonymous entities and their hierarchical structure.
+
 ### 1.7: Tying It Together: The Need for Source Code Parsing
 
-As we've seen, the project has two fundamental needs that cannot be met by the `clangd` index alone:
+As we've seen, the project has three fundamental needs that cannot be met by the `clangd` index alone:
 
 1.  **Function Spans**: To build a call graph for legacy `clangd` indexes.
 2.  **Include Relations**: To build an include graph for robust incremental updates.
+3.  **Lexical Nesting**: To build accurate parent-child relationships for nested code structures and anonymous entities.
 
-Both of these require parsing the source code itself. The project uses two technologies for this:
+All of these require parsing the source code itself. The project uses two technologies for this:
 
-*   **`clang.cindex`**: This is the primary, recommended engine. It uses a `compile_commands.json` file to parse code with full compiler context, making it semantically accurate. It is the only method that can reliably extract the `#include` graph.
-*   **`tree-sitter`**: This is a much faster, but purely syntactic parser. It is not aware of macros or include paths and is primarily used as a fallback for getting function spans when a compilation database is not available.
+*   **`clang.cindex`**: This is the primary engine. It uses a `compile_commands.json` file to parse code with full compiler context, making it semantically accurate. It is the only method that can reliably extract the `#include` graph and handle complex lexical nesting.
+*   **`tree-sitter`**: This is a much faster, but purely syntactic parser. It is not aware of macros or include paths and is primarily used as a fallback for getting function spans when a compilation database is not available. (May be deprecated in the future.)
 
 ### 1.8: A Note on `RefKind`
 
@@ -230,11 +238,19 @@ This process was completely rewritten for correctness and robustness, using a de
 *   **`code_graph_rag_generator.py`**: The AI enrichment engine. It is now simpler and reads `body_location` data directly from the graph.
 *   **`source_span_provider.py`**: This component's role has been significantly reduced. It now acts as a simple, temporary "enricher" used in an early pipeline pass to attach span data to in-memory symbols.
 
-### 3.2: Orchestrator Deep Dive (Refactored)
+### 3.2: Orchestrator Deep Dive (Graph Construction)
 
 *   **`clangd_graph_rag_builder.py` (`GraphBuilder`)**: This class orchestrates the new, robust 8-pass pipeline for full builds. It now runs all parsing and enrichment passes first before creating any nodes in the database, ensuring all file nodes are created correctly and function nodes are created with their `body_location` property from the start.
 
 *   **`clangd_graph_rag_updater.py` (`GraphUpdater`)**: This class was completely rewritten to use a dependency-aware algorithm. It no longer uses a simple "1-hop neighbor" approach. Instead, it uses the `[:INCLUDES]` graph to find the full scope of files affected by a change, purges that scope, and then runs a "mini" version of the new builder pipeline to surgically patch the graph.
+
+### 3.3: Orchestrator Deep Dive (RAG Summary Generation)
+The orchestrators responsible for the AI-enrichment (RAG) phase, which runs after the main graph structure is in place.
+
+*   **`code_graph_rag_generator.py` (`RagGenerator`)**: This orchestrator performs a **full RAG build**. It is responsible for generating summaries for every relevant node in the entire graph. It queries the database for all nodes of a given type (e.g., all `:FUNCTION` nodes) and feeds them into the multi-pass summarization engine defined in the base `RagOrchestrator`.
+
+*   **`rag_updater.py` (`RagUpdater`)**: This orchestrator performs a **targeted, incremental RAG update**. Its goal is maximum efficiency by touching the minimum number of nodes required. It is seeded with a small set of symbols identified as changed by the `GraphUpdater`, then expands the scope with dependency analysis and runs targeted summarization for efficient updates.
+
 
 ---
 
@@ -274,18 +290,16 @@ These are simple, standalone scripts created to assist with development, debuggi
 
 *   **The Challenge**: How do you support both a full, from-scratch graph build and a surgical, incremental update without writing the core logic twice?
 *   **The Principle**: Decouple the **Orchestrators** from the **Processors**.
-    *   **Orchestrators** (`GraphBuilder`, `GraphUpdater`) are responsible for *what* data to process.
-    *   **Processors** (`SymbolProcessor`, `RagGenerator`, etc.) are responsible for *how* to process the data they are given.
+    *   **Orchestrators** (`GraphBuilder` & `GraphUpdater`, `RagGenerator` & `RagUpdater`) are responsible for *what* data to process.
+    *   **Processors** (`SymbolProcessor`, `RagOrchestrator`, etc.) are responsible for *how* to process the data they are given.
 *   **Example 1: `SymbolProcessor`**
     *   This class ingests symbol data. Its methods operate on a dictionary of `Symbol` objects.
     *   In a full build, `GraphBuilder` passes it the *entire* symbol dictionary from the main parser.
     *   In an update, `GraphUpdater` passes it the much smaller dictionary from the "mini-index".
     *   The `SymbolProcessor`'s code is identical in both cases; it is agnostic to the overall context.
-*   **Example 2: `RagGenerator`**
-    *   This class has two entry points: `summarize_code_graph()` for a full build and `summarize_targeted_update()` for an incremental one.
-    *   The full build method queries for *all* nodes needing a summary.
-    *   The targeted update method receives a small set of "seed" IDs and intelligently expands the scope just enough to update the affected parts of the graph and its hierarchy.
-    *   Both entry points ultimately use the same underlying worker methods (e.g., `_process_one_function...`), achieving maximum code reuse.
+*   **Example 2: `RagOrchestrator`**
+    *   This class is the base class of `RagGenerator` and `RagUpdater`, it provides common logic and shared methods for both full and incremental processing.
+    *   Both `RagGenerator` and `RagUpdater` use `RagOrchestrator`'s `_parallel_process` for all of their actual summary generation, which uses the same set of underlying worker methods (e.g., `_process_one_function`, `_process_one_class`, `_process_one_namespace`, etc.), achieving maximum code reuse.
 
 ### 5.2: Performance: Parallelism Strategy
 
