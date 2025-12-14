@@ -230,7 +230,7 @@ class NodeSummaryProcessor:
         ]
         if not child_summaries:
             logger.debug(f"Cannot generate summary for namespace {node_id}: no child summaries found.")
-            return "unchanged", {"summary": db_summary or cache_summary}
+            return "no_children", {"summary": db_summary or cache_summary}
 
         final_summary = self._generate_hierarchical_summary(
             context_name=node_data['name'],
@@ -272,7 +272,7 @@ class NodeSummaryProcessor:
         ]
         if not child_summaries:
             logger.debug(f"Cannot generate summary for file {node_id}: no child summaries found.")
-            return "unchanged", {"summary": db_summary or cache_summary}
+            return "no_children", {"summary": db_summary or cache_summary}
 
         final_summary = self._generate_hierarchical_summary(
             context_name=node_data['name'],
@@ -312,7 +312,7 @@ class NodeSummaryProcessor:
         ]
         if not child_summaries:
             logger.debug(f"Cannot generate summary for folder {node_id}: no child summaries found.")
-            return "unchanged", {"summary": db_summary or cache_summary}
+            return "no_children", {"summary": db_summary or cache_summary}
 
         final_summary = self._generate_hierarchical_summary(
             context_name=node_data['name'],
@@ -352,7 +352,7 @@ class NodeSummaryProcessor:
         ]
         if not child_summaries:
             logger.debug(f"Cannot generate summary for project {node_id}: no child summaries found.")
-            return "unchanged", {"summary": db_summary or cache_summary}
+            return "no_children", {"summary": db_summary or cache_summary}
 
         final_summary = self._generate_hierarchical_summary(
             context_name=node_data['name'],

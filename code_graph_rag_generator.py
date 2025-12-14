@@ -51,6 +51,9 @@ class RagGenerator(RagOrchestrator):
         # Final save before embeddings
         self.summary_cache_manager.save(mode="builder", neo4j_mgr=self.neo4j_mgr)
 
+        logging.info(f"Total number of summaries processed: {self.n_restored + self.n_generated + self.n_unchanged + self.n_nochildren + self.n_failed}")
+        logging.info(f"  Restored: {self.n_restored}, Generated: {self.n_generated}, Unchanged: {self.n_unchanged}, No children: {self.n_nochildren}, Failed: {self.n_failed}")
+
         self.generate_embeddings()
         self.neo4j_mgr.create_vector_indices()
 

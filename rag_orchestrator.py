@@ -28,6 +28,11 @@ class RagOrchestrator:
         self.project_path = os.path.abspath(project_path)
         self.embedding_client = get_embedding_client(args.llm_api)
         self.args = args
+        self.n_restored = 0
+        self.n_generated = 0
+        self.n_unchanged = 0
+        self.n_nochildren = 0
+        self.n_failed = 0
 
         # New component-based architecture
         self.summary_cache_manager = SummaryCacheManager(project_path)
@@ -58,6 +63,11 @@ class RagOrchestrator:
             return set()
 
         updated_keys = set()
+        n_restored = 0
+        n_generated = 0
+        n_unchanged = 0
+        n_nochildren = 0
+        n_failed = 0
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {executor.submit(process_func, item): item for item in items}
             
@@ -85,6 +95,17 @@ class RagOrchestrator:
                         if status in ["summary_regenerated", "summary_restored", "code_summary_regenerated", "code_summary_restored"]:
                             updated_keys.add(key)
 
+                            if status in ["summary_regenerated", "code_summary_regenerated"]:
+                                n_generated += 1
+                            elif status in ["summary_restored", "code_summary_restored"]:
+                                n_restored += 1
+                        elif status == "no_children":
+                            n_nochildren += 1
+                        elif status == "unchanged":
+                            n_unchanged += 1
+                        else: # "generation_failed"
+                            n_failed += 1
+
                         # Conditionally set flags for dependency tracking
                         if status == "code_summary_regenerated":
                             self.summary_cache_manager.set_runtime_status(label, key, "code_summary_changed")
@@ -96,7 +117,13 @@ class RagOrchestrator:
                         logging.error(f"Error processing item {item}: {e}", exc_info=True)
                     finally:
                         pbar.update(1)
-        
+
+        self.n_restored += n_restored
+        self.n_generated += n_generated
+        self.n_unchanged += n_unchanged
+        self.n_nochildren += n_nochildren
+        self.n_failed += n_failed
+        logging.info(f"Restored: {n_restored}, Generated: {n_generated}, Unchanged: {n_unchanged}, No children: {n_nochildren}, Failed: {n_failed}")
         return updated_keys
 
     def generate_embeddings(self):

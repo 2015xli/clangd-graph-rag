@@ -97,6 +97,9 @@ class RagUpdater(RagOrchestrator):
         # Final save with healing/pruning logic
         self.summary_cache_manager.save(mode="updater", neo4j_mgr=self.neo4j_mgr)
 
+        logging.info(f"Total number of summaries processed: {self.n_restored + self.n_generated + self.n_unchanged + self.n_nochildren + self.n_failed}")
+        logging.info(f"  Restored: {self.n_restored}, Generated: {self.n_generated}, Unchanged: {self.n_unchanged}, No children: {self.n_nochildren}, Failed: {self.n_failed}")
+
         # --- Final Pass ---
         self.generate_embeddings()
         logging.info("--- Finished Targeted RAG Update ---")
