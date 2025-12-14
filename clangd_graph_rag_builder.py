@@ -115,16 +115,16 @@ class GraphBuilder:
         logger.info("--- Finished Phase 2 ---")
 
     def _setup_database(self, neo4j_mgr):
-        neo4j_mgr.reset_database()
+        init_property = {}
         try:
             git_mgr = GitManager(self.args.project_path)
             commit_hash = git_mgr.repo.head.object.hexsha
-            neo4j_mgr.update_project_node(self.args.project_path, {"commit_hash": commit_hash})
+            init_property = {"commit_hash": commit_hash}
             logger.info(f"Stamped PROJECT node with commit hash: {commit_hash}")
         except Exception as e:
             logger.warning(f"Could not get git commit hash: {e}. Proceeding without it.")
-            neo4j_mgr.update_project_node(self.args.project_path, {})
-        neo4j_mgr.create_constraints()
+       
+        neo4j_mgr.setup_database(self.args.project_path, init_property)
 
     def _pass_3_ingest_paths(self, neo4j_mgr):
         logger.info("\n--- Starting Phase 3: Ingesting File & Folder Structure ---")

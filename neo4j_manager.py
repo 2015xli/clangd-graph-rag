@@ -37,6 +37,7 @@ class Neo4jManager:
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.driver: self.driver.close()
     
+
     def check_connection(self) -> bool:
         try:
             self.driver.verify_connectivity()
@@ -45,7 +46,13 @@ class Neo4jManager:
         except Exception as e:
             logger.error(f"❌ Connection failed: {e}")
             return False
-        
+
+    def setup_database(self, project_path: str, init_property: Dict[str, Any]) -> None:
+        self.reset_database()
+        self.update_project_node(project_path, init_property)
+        self.create_constraints()
+        self.bootstrap_schema()
+
     def reset_database(self) -> None:
         with self.driver.session() as session:
             logger.info("Deleting existing data...")
@@ -74,15 +81,15 @@ class Neo4jManager:
         schema_cypher = """
             MERGE (s:__SCHEMA__)
             SET
-            s.code_hash = null,
-            s.codeSummary = null,
-            s.body_location = null,
-            s.dummy = true;
-
-            MERGE (s)-[:INHERITS]->(s);
-            MERGE (s)-[:OVERRIDDEN_BY]->(s);
-            MERGE (s)-[:HAS_METHOD]->(s);
-            MERGE (s)-[:HAS_FIELD]->(s);
+            s.code_hash = '',
+            s.codeSummary = '',
+            s.body_location = [],
+            s.dummy = true
+            WITH s
+            MERGE (s)-[:INHERITS]->(s)
+            MERGE (s)-[:OVERRIDDEN_BY]->(s)
+            MERGE (s)-[:HAS_METHOD]->(s)
+            MERGE (s)-[:HAS_FIELD]->(s)
         """
         with self.driver.session() as session:
             session.run(schema_cypher)

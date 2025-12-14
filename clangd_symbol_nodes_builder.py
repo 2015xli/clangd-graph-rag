@@ -493,10 +493,7 @@ def main():
     path_manager = PathManager(args.project_path)
     with Neo4jManager() as neo4j_mgr:
         if not neo4j_mgr.check_connection(): return 1
-        neo4j_mgr.reset_database()
-        neo4j_mgr.update_project_node(path_manager.project_path, {})
-        neo4j_mgr.create_constraints()
-        neo4j_mgr.bootstrap_schema()
+        neo4j_mgr.setup_database(path_manager.project_path, {})
         
         logger.info("\n--- Starting Phase 3: Ingesting File & Folder Structure ---")
         path_processor = PathProcessor(path_manager, neo4j_mgr, args.log_batch_size, args.ingest_batch_size)
