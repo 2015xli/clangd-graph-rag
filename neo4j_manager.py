@@ -69,6 +69,24 @@ class Neo4jManager:
             for constraint in constraints:
                 session.run(constraint)
     
+    def bootstrap_schema(self) -> None:
+        """Registers optional property keys and relationship types to silence planner warnings."""
+        schema_cypher = """
+            MERGE (s:__SCHEMA__)
+            SET
+            s.code_hash = null,
+            s.codeSummary = null,
+            s.body_location = null,
+            s.dummy = true;
+
+            MERGE (s)-[:INHERITS]->(s);
+            MERGE (s)-[:OVERRIDDEN_BY]->(s);
+            MERGE (s)-[:HAS_METHOD]->(s);
+            MERGE (s)-[:HAS_FIELD]->(s);
+        """
+        with self.driver.session() as session:
+            session.run(schema_cypher)
+
     def update_project_node(self, project_path: str, properties: Dict[str, Any]) -> None:
         """Finds or creates the PROJECT node and updates its properties."""
         with self.driver.session() as session:

@@ -256,7 +256,7 @@ class RagOrchestrator:
 
         # 3. Finalization: Update DB if changed
         if status in ["summary_regenerated", "summary_restored"]:
-            update_query = "MATCH (n {id: $id}) SET n.summary = $summary REMOVE n.summaryEmbedding"
+            update_query =f"MATCH (n:{node_data['label']} {{id: $id}}) SET n.summary = $summary REMOVE n.summaryEmbedding"
             self.neo4j_mgr.execute_autocommit_query(
                 update_query,
                 {"id": func_id, "summary": data["summary"]}

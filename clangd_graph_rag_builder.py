@@ -137,7 +137,7 @@ class GraphBuilder:
         logger.info("--- Finished Phase 3 ---")
 
     def _pass_4_ingest_symbols(self, neo4j_mgr):
-        logger.info("\n--- Starting Phase 4: Ingesting Symbol Definitions ---")
+        logger.info("\n--- Starting Phase 4: Ingesting Symbol and Relationships ---")
         path_manager = PathManager(self.args.project_path)
         symbol_processor = SymbolProcessor(
             path_manager,
