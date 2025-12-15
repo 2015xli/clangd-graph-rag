@@ -1,9 +1,11 @@
 # Schema Specification for C/C++ Support
 
-This document outlines the Neo4j graph schema designed to represent C and C++ source code. The schema provides a rich, semantic understanding of the codebase, with explicit support for object-oriented constructs.
+This document outlines the Neo4j graph schema designed to represent both C and C++ source code. The schema provides a rich, semantic understanding of the codebase, with explicit support for object-oriented constructs.
 
-THis is original schema:
-Node Properties:
+This is the original schema that only supports C language projects:
+
+```
+Node Labels and Properties:
   (DATA_STRUCTURE)   
     file_path: STRING
     has_definition: BOOLEAN
@@ -72,8 +74,9 @@ Property Explanations:
   summary: LLM-generated context-aware summary of the node's purpose.
   summaryEmbedding: Vector embedding of the 'summary' for similarity search.
   type: Data type of the symbol (e.g., int, void*).
-
+```
 For C++, this is the additional kinds of symbols in a small C++ project extracted by clangd-indexer. I don't necessarily support all of them for my purpose.
+```
   Kind:            Class
   Kind:            Constructor
   Kind:            ConversionFunction
@@ -91,7 +94,7 @@ For C++, this is the additional kinds of symbols in a small C++ project extracte
   Kind:            Union
   Kind:            Using
   Kind:            Variable
-
+```
 
 
 # New planned schema
