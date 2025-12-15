@@ -99,7 +99,7 @@ These scripts are the core components of the pipeline and can also be run standa
 ### Documentation
 
 Detailed design documents for each component can be found at [docs/README.md](docs/README.md) under [docs/](docs/) folder. 
-For a comprehensive overview of the project's architecture, design principles, and pipelines, please refer to [docs/Building_an_AI-Ready_Code_Graph_RAG_based_on_Clangd_index.md](docs/Building_an_AI-Ready_Code_Graph_RAG_based_on_Clangd_index.md), or its [PDF version](docs/Building_an_AI-Ready_Code_Graph_RAG_based_on_Clangd_index.pdf). 
+For a comprehensive overview of the project's architecture, design principles, and pipelines, please refer to [docs/Building_an_AI-Ready_Code_Graph_RAG_based_on_Clangd_index.md](docs/Building_an_AI-Ready_Code_Graph_RAG_based_on_Clangd_index.md).
 
 ### Contributing
 
@@ -109,4 +109,3 @@ Contributions are welcome! This includes bug reports, feature requests, and pull
 
 The current roadmap includes:
 -   Adding a wrapper layer for AI agentic tasks (e.g., an MCP server).
--   Keep polishing the C++ support by using Clang parser directly.
