@@ -17,7 +17,8 @@ from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
 from multiprocessing import get_context
 from tqdm import tqdm
 
-from memory_debugger import Debugger # Import Debugger
+from memory_debugger import Debugger
+from neo4j_manager import align_string # Import Debugger
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -342,7 +343,7 @@ class SymbolParser:
                 except StopIteration:
                     break
 
-            with tqdm(desc="Parsing YAML", unit="batch", total=0) as pbar:
+            with tqdm(desc=align_string("Parsing YAML"), unit="batch", total=0) as pbar:
                 while futures:
                     done, _ = wait(futures, return_when=FIRST_COMPLETED)
 

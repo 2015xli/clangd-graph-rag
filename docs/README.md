@@ -1,4 +1,4 @@
-# Project Documentation
+# Project Design Documentation
 
 This directory contains detailed design documents for the `clangd-graph-rag` project. 
 
@@ -59,6 +59,13 @@ These documents describe the helper modules that provide essential services like
 -   **[summary_llm_client.md](./summary_llm_client.md)**: The factory for providing model-agnostic LLM and embedding clients.
 -   **[summary_input_params.md](./summary_input_params.md)**: The centralized module for handling command-line arguments.
 -   **[summary_memory_debugger.md](./summary_memory_debugger.md)**: A simple utility for debugging memory usage.
+
+### Agentic Components
+
+These documents describe components designed to allow AI agents to interact with the generated code graph.
+
+-   **[summary_graph_mcp_server.md](./summary_graph_mcp_server.md)**: An example MCP server that exposes the code graph as a set of tools for an AI agent.
+-   **[summary_rag_adk_agent.md](./summary_rag_adk_agent.md)**: An example AI coding agent that uses the MCP server to answer questions about a codebase.
 
 ### References
 

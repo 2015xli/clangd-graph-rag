@@ -4,15 +4,10 @@ This module consumes parsed clangd symbol data and function span data
 to produce a function-level call graph.
 """
 
-import yaml
-import re
 from typing import Dict, List, Tuple, Optional, Any, Set
 import logging
 import gc
-import os
-import sys, argparse
-import json
-import math
+import argparse
 from tqdm import tqdm
 from collections import defaultdict
 

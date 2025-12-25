@@ -1,5 +1,6 @@
 import os
 from neo4j import GraphDatabase
+import threading
 import logging
 import argparse
 import json
@@ -28,15 +29,37 @@ class Neo4jManager:
     """Manages Neo4j database operations."""
     def __init__(self, uri: str = NEO4J_URI, user: str = NEO4J_USER, password: str = NEO4J_PASSWORD) -> None:
         self.uri, self.user, self.password = uri, user, password
-        self.driver = None
-        
+        self._driver = None
+        self._lock = threading.Lock()
+
+    # ---------- lifecycle ----------
+    def _ensure_driver(self):
+        if self._driver is None:
+            with self._lock:
+                if self._driver is None:  # double-checked
+                    self._driver = GraphDatabase.driver(
+                        self.uri,
+                        auth=(self.user, self.password)
+                    )
+
+    def close(self):
+        if self._driver:
+            self._driver.close()
+            self._driver = None
+
     def __enter__(self):
-        self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
+        self._ensure_driver()
         return self
-    
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.driver: self.driver.close()
-    
+
+    def __exit__(self, exc_type, exc, tb):
+        # keep existing behavior
+        self.close()
+
+
+    @property
+    def driver(self):
+        self._ensure_driver()
+        return self._driver
 
     def check_connection(self) -> bool:
         try:
@@ -51,7 +74,8 @@ class Neo4jManager:
         self.reset_database()
         self.update_project_node(project_path, init_property)
         self.create_constraints()
-        self.bootstrap_schema()
+        # To create virtual node for predefined schema so that neo4j does not complain for missing properties
+        #self.bootstrap_schema()
 
     def reset_database(self) -> None:
         with self.driver.session() as session:
@@ -451,6 +475,110 @@ class Neo4jManager:
             logger.info(f"Removed property '{property_key}' from {count} nodes.")
             return count
 
+    def format_schema_for_display(self, schema_info: dict, args=None) -> str:
+        output_lines = []
+        all_present_property_keys = set()
+
+        output_only_relations = False
+        output_with_node_counts = False
+        if args:
+            output_only_relations = args.only_relations
+            output_with_node_counts = args.with_node_counts
+
+        # --- Node Properties Section ---
+        if not output_only_relations:
+            output_lines.append("Node Properties:")
+            
+            # Group properties by label from apoc.meta.schema() output
+            props_by_label = defaultdict(dict)
+            # The apoc.meta.schema() returns a list with one dict, where the actual schema is under 'value'
+            apoc_schema_data = schema_info.get("node_properties_meta", [])
+            if apoc_schema_data and isinstance(apoc_schema_data[0], dict) and "value" in apoc_schema_data[0]:
+                for label, details in apoc_schema_data[0]["value"].items():
+                    if details.get("type") == "node": # Ensure it's a node schema
+                        for prop_key, prop_details in details.get("properties", {}).items():
+                            props_by_label[label][prop_key] = prop_details
+
+            # Get node counts from graph_meta for display
+            node_counts = {}
+            for node_obj in schema_info['graph_meta'].get("nodes", []):
+                if node_obj.get('name'): # 'name' is the label in this context
+                    node_counts[node_obj['name']] = node_obj.get('count', 0)
+
+            for label in sorted(props_by_label.keys()):
+                count_str = f" (count: {node_counts.get(label, 0)})" if output_with_node_counts else ""
+                output_lines.append(f"  ({label}){count_str}")
+                for prop_key in sorted(props_by_label[label].keys()):
+                    prop_details = props_by_label[label][prop_key]
+                    prop_type = prop_details.get("type", "unknown")
+                    is_indexed = " (INDEXED)" if prop_details.get("indexed") else ""
+                    is_unique = " (UNIQUE)" if prop_details.get("unique") else ""
+                    output_lines.append(f"    {prop_key}: {prop_type}{is_indexed}{is_unique}")
+                    # Collect unique property keys for later explanation
+                    if prop_key not in all_present_property_keys:
+                        all_present_property_keys.add(prop_key)
+            output_lines.append("") # Blank line for separation
+
+        # --- Relationships Section ---
+        output_lines.append("Relationships:")
+        
+        # Group relationships by (start_label, rel_type)
+        grouped_relations = defaultdict(lambda: defaultdict(set)) # (start_label) -> (rel_type) -> set(end_labels)
+
+        for rel_list_item in schema_info['graph_meta'].get("relationships", []):
+            if isinstance(rel_list_item, (list, tuple)) and len(rel_list_item) == 3:
+                start_node_map = dict(rel_list_item[0]) if isinstance(rel_list_item[0], tuple) else rel_list_item[0]
+                rel_type = rel_list_item[1]
+                end_node_map = dict(rel_list_item[2]) if isinstance(rel_list_item[2], tuple) else rel_list_item[2]
+
+                start_label = start_node_map.get('name', 'UNKNOWN')
+                end_label = end_node_map.get('name', 'UNKNOWN')
+                
+                grouped_relations[start_label][rel_type].add(end_label)
+            else:
+                logger.warning(f"Unexpected relationship format in graph_meta: {rel_list_item}")
+
+        # Format and print grouped relationships
+        for start_label in sorted(grouped_relations.keys()):
+            for rel_type in sorted(grouped_relations[start_label].keys()):
+                end_labels = sorted(list(grouped_relations[start_label][rel_type]))
+                end_labels_str = "|".join(end_labels)
+                
+                # Find count for the start_label if available
+                start_node_count = node_counts.get(start_label, 0) if output_with_node_counts else None
+                count_str = f" (count: {start_node_count})" if start_node_count is not None else ""
+
+                output_lines.append(f"  ({start_label}){count_str} -[:{rel_type}]-> ({end_labels_str})")
+
+        # --- Property Explanations Section ---
+        if not output_only_relations and all_present_property_keys:
+            output_lines.append("\nProperty Explanations:")
+            property_explanations = {
+                "id": "Unique identifier for the node.",
+                "name": "Name of the entity (e.g., function name, file name).",
+                "path": "Relative path to the project root if it is within the project folder. Otherwise, it is absolute path, including the PROJECT node",
+                "name_location": "Entity's name location in the file, showing the start position: [line, column].",
+                "body_location": "Entity's body location in the file, showing the range: [start_line, start_column, end_line, end_column].",
+                "code_hash": "MD5 hashing value of entity's original source code body. Used to detect changed code.",
+                "kind": "Type of symbol (e.g., Function, Struct, Variable).",
+                "scope": "Visibility scope (e.g., global, static).",
+                "language": "Programming language of the source code.",
+                "type": "Data type of the symbol (e.g., int, void*).",
+                "return_type": "Return type of a function/method.",
+                "signature": "Full signature of a function/method.",
+                "has_definition": "Boolean indicating if a symbol has a definition/implementation, not just a declaration.",
+                "codeSummary": "LLM-generated summary of the code's literal function.",
+                "summary": "LLM-generated context-aware summary of the node's purpose.",
+                "summaryEmbedding": "Vector embedding of the 'summary' for similarity search.",
+                "file_path": "Absolute path to the file containing the symbol."
+            }
+            #for prop_key in sorted(list(all_present_property_keys)):
+            for prop_key, explanation in property_explanations.items():
+                if prop_key in all_present_property_keys:
+                    output_lines.append(f"  {prop_key}: {explanation}")
+
+        return "\n".join(output_lines)
+
 def _recursive_type_check(data, indent=0, path="", output_lines: list = None): # NEW HELPER
     if output_lines is None:
         output_lines = []
@@ -470,104 +598,6 @@ def _recursive_type_check(data, indent=0, path="", output_lines: list = None): #
     else:
         output_lines.append(f"{prefix}{path} ({type(data).__name__}) = {str(data)[:50]}")
     return output_lines
-
-def _format_schema_for_display(schema_info: dict, args) -> str:
-    output_lines = []
-    all_present_property_keys = set()
-
-    # --- Node Properties Section ---
-    if not args.only_relations:
-        output_lines.append("Node Properties:")
-        
-        # Group properties by label from apoc.meta.schema() output
-        props_by_label = defaultdict(dict)
-        # The apoc.meta.schema() returns a list with one dict, where the actual schema is under 'value'
-        apoc_schema_data = schema_info.get("node_properties_meta", [])
-        if apoc_schema_data and isinstance(apoc_schema_data[0], dict) and "value" in apoc_schema_data[0]:
-            for label, details in apoc_schema_data[0]["value"].items():
-                if details.get("type") == "node": # Ensure it's a node schema
-                    for prop_key, prop_details in details.get("properties", {}).items():
-                        props_by_label[label][prop_key] = prop_details
-
-        # Get node counts from graph_meta for display
-        node_counts = {}
-        for node_obj in schema_info['graph_meta'].get("nodes", []):
-            if node_obj.get('name'): # 'name' is the label in this context
-                node_counts[node_obj['name']] = node_obj.get('count', 0)
-
-        for label in sorted(props_by_label.keys()):
-            count_str = f" (count: {node_counts.get(label, 0)})" if args.with_node_counts else ""
-            output_lines.append(f"  ({label}){count_str}")
-            for prop_key in sorted(props_by_label[label].keys()):
-                prop_details = props_by_label[label][prop_key]
-                prop_type = prop_details.get("type", "unknown")
-                is_indexed = " (INDEXED)" if prop_details.get("indexed") else ""
-                is_unique = " (UNIQUE)" if prop_details.get("unique") else ""
-                output_lines.append(f"    {prop_key}: {prop_type}{is_indexed}{is_unique}")
-                # Collect unique property keys for later explanation
-                if prop_key not in all_present_property_keys:
-                    all_present_property_keys.add(prop_key)
-        output_lines.append("") # Blank line for separation
-
-    # --- Relationships Section ---
-    output_lines.append("Relationships:")
-    
-    # Group relationships by (start_label, rel_type)
-    grouped_relations = defaultdict(lambda: defaultdict(set)) # (start_label) -> (rel_type) -> set(end_labels)
-
-    for rel_list_item in schema_info['graph_meta'].get("relationships", []):
-        if isinstance(rel_list_item, (list, tuple)) and len(rel_list_item) == 3:
-            start_node_map = dict(rel_list_item[0]) if isinstance(rel_list_item[0], tuple) else rel_list_item[0]
-            rel_type = rel_list_item[1]
-            end_node_map = dict(rel_list_item[2]) if isinstance(rel_list_item[2], tuple) else rel_list_item[2]
-
-            start_label = start_node_map.get('name', 'UNKNOWN')
-            end_label = end_node_map.get('name', 'UNKNOWN')
-            
-            grouped_relations[start_label][rel_type].add(end_label)
-        else:
-            logger.warning(f"Unexpected relationship format in graph_meta: {rel_list_item}")
-
-    # Format and print grouped relationships
-    for start_label in sorted(grouped_relations.keys()):
-        for rel_type in sorted(grouped_relations[start_label].keys()):
-            end_labels = sorted(list(grouped_relations[start_label][rel_type]))
-            end_labels_str = "|".join(end_labels)
-            
-            # Find count for the start_label if available
-            start_node_count = node_counts.get(start_label, 0) if args.with_node_counts else None
-            count_str = f" (count: {start_node_count})" if start_node_count is not None else ""
-
-            output_lines.append(f"  ({start_label}){count_str} -[:{rel_type}]-> ({end_labels_str})")
-
-    # --- Property Explanations Section ---
-    if not args.only_relations and all_present_property_keys:
-        output_lines.append("\nProperty Explanations:")
-        property_explanations = {
-            "id": "Unique identifier for the node.",
-            "name": "Name of the entity (e.g., function name, file name).",
-            "path": "Relative path to the project root if it is within the project folder. Otherwise, it is absolute path, including the PROJECT node",
-            "name_location": "Entity's name location in the file, showing the start position: [line, column].",
-            "body_location": "Entity's body location in the file, showing the range: [start_line, start_column, end_line, end_column].",
-            "code_hash": "MD5 hashing value of entity's original source code body. Used to detect changed code.",
-            "kind": "Type of symbol (e.g., Function, Struct, Variable).",
-            "scope": "Visibility scope (e.g., global, static).",
-            "language": "Programming language of the source code.",
-            "type": "Data type of the symbol (e.g., int, void*).",
-            "return_type": "Return type of a function/method.",
-            "signature": "Full signature of a function/method.",
-            "has_definition": "Boolean indicating if a symbol has a definition/implementation, not just a declaration.",
-            "codeSummary": "LLM-generated summary of the code's literal function.",
-            "summary": "LLM-generated context-aware summary of the node's purpose.",
-            "summaryEmbedding": "Vector embedding of the 'summary' for similarity search.",
-            "file_path": "Absolute path to the file containing the symbol."
-        }
-        #for prop_key in sorted(list(all_present_property_keys)):
-        for prop_key, explanation in property_explanations.items():
-            if prop_key in all_present_property_keys:
-                output_lines.append(f"  {prop_key}: {explanation}")
-
-    return "\n".join(output_lines)
 
 def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -607,7 +637,7 @@ def main():
             if args.json_format:
                 output_content = json.dumps(schema_info, default=str, indent=2)
             else:
-                output_content = _format_schema_for_display(schema_info, args)
+                output_content = neo4j_mgr.format_schema_for_display(schema_info, args)
 
             if args.output:
                 try:

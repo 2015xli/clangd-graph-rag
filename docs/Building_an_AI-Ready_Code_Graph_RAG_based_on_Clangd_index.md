@@ -459,3 +459,31 @@ These are simple, standalone scripts created to assist with development, debuggi
     *   **Solution**: A `FakeLlmClient` was created that conforms to the same base `LlmClient` interface but simply returns a hardcoded string. The `get_llm_client` factory returns this client when the user specifies `--llm-api fake`.
     *   **Benefit**: This is a clean, polymorphic design. The `RagGenerator` is completely unaware it is using a fake client; it just calls the `generate_summary` method. This allows for a powerful debugging/dry-run mode without adding any conditional `if/else` logic to the core application or production clients.
 
+---
+
+## Part 6: AI Agent Support Design
+
+### 6.1: The MCP Server: A Tool-Based Gateway to the Graph
+
+The `graph_mcp_server.py` is designed as a stateless gateway that decouples the AI agent from the underlying database and filesystem. This design allows the agent to operate on a higher level of abstraction, focusing on reasoning rather than implementation details.
+
+*   **Tool-Centric API**: The server's core design principle is to expose functionality as a set of discrete, well-defined tools (e.g., `get_graph_schema`, `execute_cypher_query`, `get_source_code`). This aligns with modern agentic frameworks like the Google ADK, which are built around the concept of tool use. The agent does not need to know about Neo4j or Cypher; it only needs to know how to call a tool with specific parameters.
+
+*   **Dynamic Path Resolution**: A critical design feature is the server's ability to resolve file paths. On startup, it queries the `:PROJECT` node in the graph to discover the project's absolute root path. It uses this path to translate the relative paths stored in the graph (e.g., `src/main.c`) into absolute paths on the filesystem. This is essential for the `get_source_code` tool to read file contents correctly.
+
+*   **Read-Only Safety**: The `execute_cypher_query` tool incorporates a vital safety layer. It is designed to explicitly block any query containing write-operation keywords (`CREATE`, `SET`, `DELETE`, `MERGE`, etc.). This design choice is a security measure to prevent the AI agent from accidentally or maliciously modifying the graph, ensuring the integrity of the database.
+
+### 6.2: The ADK Agent: An Example Reasoning Engine
+
+The example agent in `rag_adk_agent/` demonstrates how a reasoning engine can be built on top of the MCP server. Its design highlights several key principles of modern agent architecture.
+
+*   **Decoupled Tool Consumption**: The agent is designed as a pure "client" of the tool server. It is initialized with a list of tools that are loaded at runtime from the MCP server. This is demonstrated in `run_agent.py`, which dynamically loads the tools before instantiating the agent. This decoupling makes the agent portable and independent of the tool's specific implementation.
+
+*   **Instruction-Driven Logic**: The agent's core behavior is not defined in hard-coded conditional logic but in its `persona` and `instructions` provided to the LLM. This design allows its reasoning process to be easily modified by changing the prompt. The agent's instructions define a clear, multi-step reasoning loop:
+    1.  **Orient**: First, use tools like `get_graph_schema` and `get_project_info` to understand the environment.
+    2.  **Query**: Formulate and execute Cypher queries to find relevant information in the graph.
+    3.  **Read**: Use `get_source_code` to inspect the code of specific nodes found via queries.
+    4.  **Synthesize**: Combine all gathered information to formulate a final answer.
+
+*   **Separation of Concerns**: The implementation separates the agent's "brain" (`agent.py`, which defines the persona and instructions) from the "runtime" (`run_agent.py`, which handles server connections and the interactive CLI). This is a clean design that improves modularity and maintainability.
+
