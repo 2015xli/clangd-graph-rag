@@ -28,6 +28,10 @@ The project provides the graph RAG building and updating tools, along with an ex
 
 ---
 
+### Current Schema
+![Current Schema](docs/neo4j_current_schema.png)
+
+
 ## Table of Contents
 - [Why This Project?](#why-this-project)
 - [Key Features & Design Principles](#key-features--design-principles)
@@ -177,3 +181,7 @@ The support to C/C++ is basically done. For next steps, we can focus on:
 - Support data-dependence relationships. 
 - Support to merge multiple projects into one graph.
 - Support macro definition node and expansion relationship. 
+
+## License
+
+This project is licensed under the Apache License 2.0.
