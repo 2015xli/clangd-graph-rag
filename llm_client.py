@@ -121,7 +121,7 @@ class EmbeddingClient:
     """Base class for embedding clients."""
     is_local: bool = False
 
-    def generate_embeddings(self, texts: list[str]) -> list[list[float]]:
+    def generate_embeddings(self, texts: list[str], show_progress_bar: bool = True) -> list[list[float]]:
         """Generates embedding vectors for a given list of texts."""
         raise NotImplementedError
 
@@ -141,9 +141,19 @@ class SentenceTransformerClient(EmbeddingClient):
         self.model = SentenceTransformer(model_name)
         logger.info("SentenceTransformer model loaded successfully.")
 
-    def generate_embeddings(self, texts: list[str]) -> list[list[float]]:
+    def generate_embeddings(self, texts: list[str], show_progress_bar: bool = True) -> list[list[float]]:
+        """
+        Generates embedding vectors for a given list of texts.
+        
+        Args:
+            texts: List of text strings to embed
+            show_progress_bar: Whether to show a progress bar during encoding
+            
+        Returns:
+            List of embedding vectors as lists of floats
+        """
         # The encode method can show its own progress bar, which is useful for large batches.
-        embeddings = self.model.encode(texts, show_progress_bar=True)
+        embeddings = self.model.encode(texts, show_progress_bar=show_progress_bar)
         # Convert numpy arrays to standard lists for JSON/Neo4j compatibility
         return [emb.tolist() for emb in embeddings]
 

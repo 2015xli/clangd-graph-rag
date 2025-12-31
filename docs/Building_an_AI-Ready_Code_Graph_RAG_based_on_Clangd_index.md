@@ -190,7 +190,7 @@ Defining the "dirty scope" is harder than it looks. A simple `git diff` is not e
 *   **The Problem**: A small change in a header file (e.g., modifying a macro or a `struct` definition) can have a cascading semantic impact on dozens or hundreds of source files that `#include` it, even if those source files themselves were not textually modified.
 *   **The "Invisible Header" Problem**: An even more subtle issue occurs if a developer modifies a header file that previously did not define any symbols and thus did not exist as a `:FILE` node in the graph. If the dependency analysis relies only on the existing graph, it would have no way of knowing which files included this now-modified "invisible" header.
 
-### 2.2.2: Solution: The Include Graph
+#### 2.2.2: Solution: The Include Graph
 
 To solve the header dependency problem, the system must have a complete understanding of the project's include graph.
 
@@ -226,7 +226,7 @@ All of these require parsing the source code itself. The project uses two techno
 *   **`clang.cindex`**: This is the primary engine. It uses a `compile_commands.json` file to parse code with full compiler context, making it semantically accurate. It is the only method that can reliably extract the `#include` graph and handle complex lexical nesting.
 *   **`tree-sitter`**: This is a much faster, but purely syntactic parser. It is not aware of macros or include paths and is primarily used as a fallback for getting function spans when a compilation database is not available. (May be deprecated in the future.)
 
-#### 2.5: A Note on `RefKind`
+### 2.5: A Note on `RefKind`
 
 *   **What is `RefKind`?**: A numeric value in the Clangd index that specifies the *type* of a symbol reference (e.g., declaration, definition, call).
 *   **The Change**: The numeric values for a function call changed in newer versions of Clangd.
@@ -304,7 +304,7 @@ This process was completely rewritten for correctness and robustness, using a de
 *   **`code_graph_rag_generator.py`**: The AI enrichment engine. It is now simpler and reads `body_location` data directly from the graph.
 *   **`source_span_provider.py`**: This component's role has been significantly reduced. It now acts as a simple, temporary "enricher" used in an early pipeline pass to attach span data to in-memory symbols.
 
-### 3.2: Orchestrator Deep Dive (Graph Construction)
+### 4.2: Orchestrator Deep Dive (Graph Construction)
 
 *   **`clangd_graph_rag_builder.py` (`GraphBuilder`)**: This class orchestrates the new, robust 8-pass pipeline for full builds. It now runs all parsing and enrichment passes first before creating any nodes in the database, ensuring all file nodes are created correctly and function nodes are created with their `body_location` property from the start.
 
@@ -320,9 +320,9 @@ The orchestrators responsible for the AI-enrichment (RAG) phase, which runs afte
 
 ---
 
-## Part 4: Supporting Modules & Developer Tools
+## Part 5: Supporting Modules & Developer Tools
 
-### 4.1: Supporting Modules
+### 5.1: Supporting Modules
 
 *   **`neo4j_manager.py`**
     *   **Purpose**: A Data Access Layer (DAL) for the Neo4j database.
@@ -337,7 +337,7 @@ The orchestrators responsible for the AI-enrichment (RAG) phase, which runs afte
     *   **Purpose**: Centralizes command-line argument definitions.
     *   **Functionality**: Provides functions that add logical groups of arguments to a parser, ensuring consistency and eliminating duplicate definitions across the multiple executable scripts.
 
-### 4.2: Developer Tools (`tools/`)
+### 5.2: Developer Tools (`tools/`)
 
 These are simple, standalone scripts created to assist with development, debugging, and direct interaction with the project's dependencies.
 
@@ -350,9 +350,9 @@ These are simple, standalone scripts created to assist with development, debuggi
 
 ---
 
-## Part 5: Deep Dive into Design & Performance
+## Part 6: Deep Dive into Design & Performance
 
-### 5.1: Design for Reuse: Full vs. Incremental Pipelines
+### 6.1: Design for Reuse: Full vs. Incremental Pipelines
 
 *   **The Challenge**: How do you support both a full, from-scratch graph build and a surgical, incremental update without writing the core logic twice?
 *   **The Principle**: Decouple the **Orchestrators** from the **Processors**.
@@ -367,7 +367,7 @@ These are simple, standalone scripts created to assist with development, debuggi
     *   This class is the base class of `RagGenerator` and `RagUpdater`, it provides common logic and shared methods for both full and incremental processing.
     *   Both `RagGenerator` and `RagUpdater` use `RagOrchestrator`'s `_parallel_process` for all of their actual summary generation, which uses the same set of underlying worker methods (e.g., `_process_one_function`, `_process_one_class`, `_process_one_namespace`, etc.), achieving maximum code reuse.
 
-### 5.2: Performance: Parallelism Strategy
+### 6.2: Performance: Parallelism Strategy
 
 *   **The Principle**: Use the right tool for the right job: Processes for CPU-bound tasks and Threads for I/O-bound tasks.
 
@@ -379,7 +379,7 @@ These are simple, standalone scripts created to assist with development, debuggi
     *   **Task**: Generating summaries involves making hundreds or thousands of network calls to an LLM API. The program spends most of its time waiting for responses.
     *   **Solution**: The `RagGenerator` uses a `ThreadPoolExecutor` to manage a large number of lightweight threads, allowing for massive concurrency on network requests.
 
-### 5.3: Performance: Data Ingestion Strategies
+### 6.3: Performance: Data Ingestion Strategies
 
 *   **The Challenge**: Ingesting millions of `:DEFINES` relationships can be a major bottleneck. The system provides two strategies, allowing users to choose the best trade-off between speed, safety, and dependencies.
 *   **1. `unwind-sequential`(Default)**
@@ -390,7 +390,7 @@ These are simple, standalone scripts created to assist with development, debuggi
     *   **How**: Groups all relationships by their source `:FILE` node *before* ingestion. It then uses `apoc.periodic.iterate` to process these groups in parallel.
     *   **Pros**: This is the safest parallel strategy. By ensuring all relationships for a given file are in the same unit of work, it guarantees that no two threads will ever try to lock the same `:FILE` node, completely **eliminating the risk of deadlocks**.
 
-### 5.4: Performance: Caching Mechanisms
+### 6.4: Performance: Caching Mechanisms
 *   **The Principle**: Never do the same expensive work twice.
 
 *   **Major caches**:
@@ -400,7 +400,7 @@ These are simple, standalone scripts created to assist with development, debuggi
 *   **Minor caches**:
        * Header File Parsing Cache: An in-memory cache to avoid re-parsing the same header file hundreds of times within a single run in large projects.
 
-#### 5.4.1: Index Parsing Cache (.pkl)
+#### 6.4.1: Index Parsing Cache (.pkl)
 
 *   **What**: After the initial, slow parse of the clangd YAML file, the resulting in-memory SymbolParser object is serialized to a .pkl file.
 *   **How**:
@@ -410,7 +410,7 @@ These are simple, standalone scripts created to assist with development, debuggi
      .pkl cache file. If the cache is newer, it is loaded directly.
 
 
-#### 5.4.2: Compilation Parser Cache (.compilation_parser.pkl)
+#### 6.4.2: Compilation Parser Cache (.compilation_parser.pkl)
 
 *   **What**: The CompilationManager caches the results of the expensive source code parsing pass. It saves the extracted SourceSpan data (including body locations and parent-child links) and include relations to a pickle file.
 *   **How:**
@@ -420,7 +420,7 @@ These are simple, standalone scripts created to assist with development, debuggi
 *   **Validity Check (Fallback)**: If not in a Git repository, it falls back to storing a hash of the complete list of file
      paths being parsed. The cache is only used if the current file list produces an identical hash.
 
-#### 5.4.3: Summary Cache (summary_backup.json)
+#### 6.4.3: Summary Cache (summary_backup.json)
 
 *   **What**: The SummaryCacheManager caches the output of LLM calls (codeSummary and summary) and the code_hash of the
      source code they were generated from.
@@ -429,7 +429,7 @@ These are simple, standalone scripts created to assist with development, debuggi
     *   *Save*: It uses a "Promote-on-Success" strategy for safety. During a run, intermediate saves are written to a temporary (.tmp) file. At the end of a successful run, a sanity check is performed. If it passes, rolling backups are created (.json -> .bak.1, etc.) and the temporary file is promoted to become the new official cache.
 *   **Validity Check**: The sanity check is performed during the final save. It compares the number of entries in the new temporary cache against the current main cache. The promotion is aborted if the new cache is suspiciously smaller (e.g., < 95% of the old size), preventing a bad run from destroying a good cache.
 
-#### 5.4.4: Header File Parsing Cache (In-Memory)
+#### 6.4.4: Header File Parsing Cache (In-Memory)
 
 *   **What**: Since the same header file can be included by hundreds of source files, the ClangParser uses an in-memory cache to avoid re-parsing the same header's Abstract Syntax Tree (AST) repeatedly within a single run.
 *   **How:**
@@ -437,7 +437,7 @@ These are simple, standalone scripts created to assist with development, debuggi
     *   *Restore*: Before parsing an included header, a worker checks if that header has already been parsed with an identical compilation context (the same hash). If so, it skips parsing the header entirely.
 *   **Validity Check**: The validity check is the hash of the compilation context (_tu_hash). This ensures that if a header is included in two different source files with different preprocessor macros (-D flags), it is correctly re-parsed for each unique context, as the macros could change its AST.
 
-### 5.5: Memory Optimization
+### 6.5: Memory Optimization
 
 *   **The Challenge**: The in-memory `SymbolParser` object, holding the entire project index, can consume many gigabytes of RAM.
 *   **The Solution**: The refactored pipeline is much more memory efficient.
@@ -448,7 +448,7 @@ These are simple, standalone scripts created to assist with development, debuggi
     5.  The `GraphBuilder` now explicitly deletes the `SymbolParser` object immediately after the call graph is built, allowing the Python garbage collector to free gigabytes of memory *before* the memory-intensive RAG process begins. This provides a much cleaner separation and more stable memory footprint.
     6.  The `RagOrchestrator` will retrieve the `body_location` data from the Neo4j graph and use it to extract source code and generate summaries.
 
-### 5.6: Developer Experience Designs
+### 6.6: Developer Experience Designs
 
 *   **1. Centralized Arguments (`input_params.py`)**
     *   **Problem**: Multiple scripts with shared command-line options led to duplicated code and inconsistencies.
@@ -461,9 +461,9 @@ These are simple, standalone scripts created to assist with development, debuggi
 
 ---
 
-## Part 6: AI Agent Support Design
+## Part 7: AI Agent Support Design
 
-### 6.1: The MCP Server: A Tool-Based Gateway to the Graph
+### 7.1: The MCP Server: A Tool-Based Gateway to the Graph
 
 The `graph_mcp_server.py` is designed as a stateless gateway that decouples the AI agent from the underlying database and filesystem. This design allows the agent to operate on a higher level of abstraction, focusing on reasoning rather than implementation details.
 
@@ -471,9 +471,9 @@ The `graph_mcp_server.py` is designed as a stateless gateway that decouples the 
 
 *   **Dynamic Path Resolution**: A critical design feature is the server's ability to resolve file paths. On startup, it queries the `:PROJECT` node in the graph to discover the project's absolute root path. It uses this path to translate the relative paths stored in the graph (e.g., `src/main.c`) into absolute paths on the filesystem. This is essential for the `get_source_code` tool to read file contents correctly.
 
-*   **Read-Only Safety**: The `execute_cypher_query` tool incorporates a vital safety layer. It is designed to explicitly block any query containing write-operation keywords (`CREATE`, `SET`, `DELETE`, `MERGE`, etc.). This design choice is a security measure to prevent the AI agent from accidentally or maliciously modifying the graph, ensuring the integrity of the database.
+*   **Read-Only Safety**: The `execute_cypher_query` tool incorporates a vital safety layer. It is designed to explicitly block any query containing write-operation keywords (`CREATE`, `SET`, `DELETE`, `MERGE`, etc.). This design choice is a security measure to prevent the agent from accidentally or maliciously modifying the graph, ensuring the integrity of the database.
 
-### 6.2: The ADK Agent: An Example Reasoning Engine
+### 7.2: The ADK Agent: An Example Reasoning Engine
 
 The example agent in `rag_adk_agent/` demonstrates how a reasoning engine can be built on top of the MCP server. Its design highlights several key principles of modern agent architecture.
 
