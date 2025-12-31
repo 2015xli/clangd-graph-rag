@@ -30,8 +30,6 @@ from memory_debugger import Debugger
 from git_manager import GitManager
 from compilation_manager import CompilationManager
 from include_relation_provider import IncludeRelationProvider
-import logging
-import sys
 
 from log_manager import init_logging
 init_logging()

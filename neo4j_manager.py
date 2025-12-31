@@ -427,6 +427,21 @@ class Neo4jManager:
         self.drop_vector_indices()
         self.create_vector_indices()
 
+    def get_vector_indexes(self) -> dict:
+        """Fetches the vector index for summary embeddings."""
+        logger.info("Fetching vector index...")
+        try:
+            query = """
+                SHOW INDEXES
+                YIELD name, type, labelsOrTypes, state, properties
+                WHERE type = 'VECTOR' AND state = 'ONLINE'
+                RETURN name, labelsOrTypes
+            """
+            return self.execute_read_query(query)
+        except Exception as e:
+            logger.error(f"Error fetching vector index: {e}")
+            return {"error": str(e)}
+
     def get_schema(self) -> dict:
         """Fetches the graph schema using APOC meta procedures."""
         logger.info("Fetching graph schema...")

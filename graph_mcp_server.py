@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Optional
 
 from fastmcp import FastMCP
 from neo4j_manager import Neo4jManager
+from llm_client import get_embedding_client
 
 # --- Configuration and Initialization ---
 logger = logging.getLogger(__name__)
@@ -60,18 +61,50 @@ def get_graph_schema() -> str:
     Retrieves the content of the neo4j_current_schema.txt file.
     """
     schema_file_path = os.path.join(os.path.dirname(__file__), "neo4j_current_schema.txt")
+    schema_content = ""
     if os.path.isfile(schema_file_path):
         try:
             with open(schema_file_path, 'r') as f:
                 schema_content = f.read()
-                return schema_content
         except Exception as e:
             logger.error(f"Error reading graph schema file: {e}")
             return f"Error: Could not read graph schema: {e}"
     else: 
         logger.info(f"Schema file not found at {schema_file_path}. Read schema from graph directly.")
         schema_content =  neo4j_mgr.format_schema_for_display(neo4j_mgr.get_schema())
-        return schema_content
+        
+    return schema_content
+
+@mcp.tool(name="get_embedding_vector_indexes", description="Retrieves the Neo4j vector embedding indexes available for similarity search.")
+def get_embedding_vector_indexes() -> str:
+    """
+    Retrieves the vector embedding indexes from the Neo4j database for semantic search.
+    """
+    vector_indexes = neo4j_mgr.get_vector_indexes()
+    if vector_indexes:
+        indexes_content = "The following embedding vector indexes are available for similarity search:\n"
+        for index in vector_indexes:
+            indexes_content += f"- {index['name']} on {index['labelsOrTypes']}\n"
+        return indexes_content
+
+    return "No embedding vector indexes found."
+
+
+@mcp.tool(name="generate_embeddings", description="Generates vector embeddings for a query string to be used for semantic similarity search.")
+def generate_embeddings(query: str) -> list[float]:
+    """
+    Generates vector embeddings for the given query string to be used for semantic similarity search.
+    
+    Args:
+        query (str): The query string to embed.
+        
+    Returns:
+        list[float]: A list of embedding vectors for the query.
+    """
+    embedding_client = get_embedding_client("local")
+    embeddings = embedding_client.generate_embeddings([query], show_progress_bar=False)
+    
+    return embeddings[0] if embeddings else []
 
 @mcp.tool(name="get_project_info", description="Retrieves the project's name, root path and its high-level summary.")
 def get_project_info() -> Dict[str, str]:

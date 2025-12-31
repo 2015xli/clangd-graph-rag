@@ -57,6 +57,14 @@ def sync_agent():
             "- Identification of the root cause of bugs or race conditions"
             "- Documentation of software design"
             "- Feature implementation based on user requirements"
+            "For content search, you can use startswith or contains to search for relevant code or summary information; or,"
+            "you can do semantic similarity search first, which is usually more effective if only for semantic query. "
+            "For semantic search, you can use the mcp tool to list all available embedding vector indexes, "
+            "then use the embedding generation tool to create embeddings for the query text, "
+            "and use the vector index name to perform semantic search with the generated embeddings."
+            "An example cypher query for similarity search can be:"
+            "CALL db.index.vector.queryNodes('vector_index_name', 5, embeddings) YIELD node, score RETURN node.name, node.summary, score"
+            "Of course, you can always use the graph query tools directly and combine with source code retrieval to provide comprehensive answers."
         ),
         tools=[toolset],
         output_key="last_response",

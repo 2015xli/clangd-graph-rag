@@ -1,0 +1,15 @@
+google-adk==1.21.0
+deprecated
+fastapi
+litellm
+clang==21.1.7
+fastmcp==2.0.0
+GitPython==3.1.45
+neo4j==5.28.1
+sentence_transformers==4.1.0
+tiktoken==0.9.0
+tqdm==4.67.1
+tree_sitter==0.25.2
+tree_sitter_c==0.24.1
+tree_sitter_cpp==0.23.4
+
