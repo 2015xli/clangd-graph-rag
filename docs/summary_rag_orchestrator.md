@@ -25,10 +25,10 @@ This method is the heart of the orchestrator. It implements a map-reduce pattern
 
 *   **Reduce Phase & Data Validation**: As each worker thread completes its task and returns a `result_packet`, the `_parallel_process` loop (running in the main thread) performs the "reduce" step serially:
     1.  It parses the `status` (`unchanged`, `restored`, `regenerated`, `generation_failed`) and `data` from the packet.
-    2.  **Centralized Cache Validation**: It acts as the single gatekeeper for cache quality. It inspects the `data` payload and calls `summary_cache_manager.update_cache_entry()` **only if the data contains a valid, non-empty summary** (`summary` or `codeSummary`). This is a critical feature that prevents `null` or empty data from ever polluting the cache, even if a generation task fails.
+    2.  **Centralized Cache Validation**: It acts as the single gatekeeper for cache quality. It inspects the `data` payload and calls `summary_cache_manager.update_cache_entry()` **only if the data contains a valid, non-empty summary** (`summary` or `code_analysis`). This is a critical feature that prevents `null` or empty data from ever polluting the cache, even if a generation task fails.
     3.  It marks the node as `"visited"` in the `runtime_status` dictionary for use in cache pruning.
     4.  It updates the `updated_keys` set **only if the status indicates a successful database write** (`..._regenerated` or `..._restored`). This set is used for accurate reporting of how many nodes were truly changed in a pass.
-    5.  If the `status` indicates a true regeneration, it sets the `summary_changed` (or `code_summary_changed`) flag in the `runtime_status`. This ensures that only truly new content triggers upstream dependency updates in later passes.
+    5.  If the `status` indicates a true regeneration, it sets the `summary_changed` (or `code_analysis_changed`) flag in the `runtime_status`. This ensures that only truly new content triggers upstream dependency updates in later passes.
 
 ### The Worker Function Pattern
 

@@ -72,6 +72,8 @@ class Neo4jManager:
 
     def setup_database(self, project_path: str, init_property: Dict[str, Any]) -> None:
         self.reset_database()
+        self.reset_vector_indexes()
+        self.reset_constraints()
         self.update_project_node(project_path, init_property)
         self.create_constraints()
         # To create virtual node for predefined schema so that neo4j does not complain for missing properties
@@ -82,7 +84,44 @@ class Neo4jManager:
             logger.info("Deleting existing data...")
             session.run("MATCH (n) DETACH DELETE n")
             logger.info("Database cleared.")
-    
+
+    def reset_vector_indexes(self):
+        """
+        Drops all VECTOR indexes.
+        """
+        with self.driver.session() as session:
+            # Drop vector indexes
+            vector_indexes = session.run("""
+                SHOW INDEXES
+                YIELD name, type
+                WHERE type = 'VECTOR'
+                RETURN name
+            """).value()
+
+            for name in vector_indexes:
+                session.run(f"DROP INDEX {name} IF EXISTS")
+        
+        logger.info(f"Vector indexes dropped: {vector_indexes}")
+        return {"vector_indexes_dropped": vector_indexes}
+
+    def reset_constraints(self):
+        """
+        Drops all constraints.
+        """
+        with self.driver.session() as session:
+            # Drop constraints
+            constraints = session.run("""
+                SHOW CONSTRAINTS
+                YIELD name
+                RETURN name
+            """).value()
+
+            for name in constraints:
+                session.run(f"DROP CONSTRAINT {name} IF EXISTS")
+        
+        logger.info(f"Constraints dropped: {constraints}")
+        return {"constraints_dropped": constraints}
+
     def create_constraints(self) -> None:
         constraints = [
             "CREATE CONSTRAINT IF NOT EXISTS FOR (f:FILE) REQUIRE f.path IS UNIQUE",
@@ -106,7 +145,7 @@ class Neo4jManager:
             MERGE (s:__SCHEMA__)
             SET
             s.code_hash = '',
-            s.codeSummary = '',
+            s.code_analysis = '',
             s.body_location = [],
             s.dummy = true
             WITH s
@@ -582,7 +621,7 @@ class Neo4jManager:
                 "return_type": "Return type of a function/method.",
                 "signature": "Full signature of a function/method.",
                 "has_definition": "Boolean indicating if a symbol has a definition/implementation, not just a declaration.",
-                "codeSummary": "LLM-generated summary of the code's literal function.",
+                "code_analysis": "LLM-generated analysis of the code's literal functionality.",
                 "summary": "LLM-generated context-aware summary of the node's purpose.",
                 "summaryEmbedding": "Vector embedding of the 'summary' for similarity search.",
                 "file_path": "Absolute path to the file containing the symbol."

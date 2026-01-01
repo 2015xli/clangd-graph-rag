@@ -207,8 +207,8 @@ class SummaryCacheManager:
         if key not in self.runtime_status[label]:
             self.runtime_status[label][key] = {'visited': True}
         
-        if status == 'code_summary_changed':
-            self.runtime_status[label][key]['code_summary_changed'] = True
+        if status == 'code_analysis_changed':
+            self.runtime_status[label][key]['code_analysis_changed'] = True
         elif status == 'summary_changed':
             self.runtime_status[label][key]['summary_changed'] = True
 
@@ -241,7 +241,7 @@ class SummaryCacheManager:
         query_configs = {
             "id_based_full": {
                 "labels": ["FUNCTION", "METHOD"],
-                "query": "MATCH (n:{label}) WHERE n.summary IS NOT NULL OR n.codeSummary IS NOT NULL RETURN n.id AS identifier, n.code_hash as code_hash, n.codeSummary AS codeSummary, n.summary AS summary ORDER BY n.id SKIP $skip LIMIT $limit"
+                "query": "MATCH (n:{label}) WHERE n.summary IS NOT NULL OR n.code_analysis IS NOT NULL RETURN n.id AS identifier, n.code_hash as code_hash, n.code_analysis AS code_analysis, n.summary AS summary ORDER BY n.id SKIP $skip LIMIT $limit"
             },
             "id_based_simple": {
                 "labels": ["NAMESPACE", "CLASS_STRUCTURE"],

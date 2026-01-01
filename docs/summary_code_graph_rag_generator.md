@@ -24,13 +24,13 @@ For a full build, `RagGenerator` executes a series of dependent passes in a stri
 
 1.  **Load Cache**: It begins by calling `self.summary_cache_manager.load()` to populate the in-memory cache from `summary_backup.json`, if it exists.
 
-2.  **Pass 1: Individual Function Summaries (`summarize_functions_individually`)**
+2.  **Pass 1: Individual Function Analyses (`analyze_functions_individually`)**
     *   **Action**: Queries for all `:FUNCTION` and `:METHOD` nodes in the graph.
-    *   **Delegation**: It calls the inherited `_summarize_functions_individually_with_ids()` method, passing it all the collected IDs. The underlying worker/processor logic then handles hashing the source code, checking the cache, and generating a `codeSummary` for each function as needed.
+    *   **Delegation**: It calls the inherited `_analyze_functions_individually_with_ids()` method, passing it all the collected IDs. The underlying worker/processor logic then handles hashing the source code, checking the cache, and generating a `code_analysis` for each function as needed.
     *   **Checkpoint**: After the pass completes, it calls `save(is_intermediate=True)` to persist the results to disk.
 
 3.  **Pass 2: Contextual Function Summaries (`summarize_functions_with_context`)**
-    *   **Action**: Queries for all functions/methods that now have a `codeSummary`.
+    *   **Action**: Queries for all functions/methods that now have a `code_analysis`.
     *   **Delegation**: It calls `_summarize_functions_with_context_with_ids()` on this full set of IDs. The workers then handle fetching dependencies and delegating to the processor, which determines if a new context-aware `summary` is needed.
     *   **Checkpoint**: The cache is saved again.
 

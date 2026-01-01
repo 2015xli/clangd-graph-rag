@@ -28,7 +28,7 @@ Node Labels and Properties:
     summaryEmbedding: LIST
   (FUNCTION)
     body_location: LIST
-    codeSummary: STRING
+    code_analysis: STRING
     file_path: STRING
     has_definition: BOOLEAN
     id: STRING (INDEXED) (UNIQUE)
@@ -59,7 +59,7 @@ Relationships:
 
 Property Explanations:
   body_location: Entity's body location in the file [start_line, start_column, end_line, end_column].
-  codeSummary: LLM-generated summary of the code's literal function.
+  code_analysis: LLM-generated summary of the code's literal function.
   file_path: Absolute path to the file containing the symbol.
   has_definition: Boolean indicating if a symbol has a definition.
   id: Unique identifier for the node.

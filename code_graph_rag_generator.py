@@ -31,7 +31,7 @@ class RagGenerator(RagOrchestrator):
         """Main orchestrator method to run all summarization passes for a full build."""
         self.summary_cache_manager.load()
         
-        self.summarize_functions_individually()
+        self.analyze_functions_individually()
         self.summary_cache_manager.save(mode="builder", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
 
         self.summarize_functions_with_context()
@@ -59,9 +59,9 @@ class RagGenerator(RagOrchestrator):
 
 
     # --- Pass 1 Methods ---
-    def summarize_functions_individually(self):
-        """PASS 1: Generates a code-only summary for all functions and methods in the graph."""
-        logging.info("\n--- Starting Pass 1: Summarizing Functions & Methods Individually ---")
+    def analyze_functions_individually(self):
+        """PASS 1: Generates a code-only analysis for all functions and methods in the graph."""
+        logging.info("\n--- Starting Pass 1: Analyzing Functions & Methods Individually ---")
         
         query = "MATCH (n) WHERE (n:FUNCTION OR n:METHOD) AND n.body_location IS NOT NULL RETURN n.id AS id"
         results = self.neo4j_mgr.execute_read_query(query)
@@ -71,7 +71,7 @@ class RagGenerator(RagOrchestrator):
             logging.warning("No functions or methods with body_location found. Exiting Pass 1.")
             return
         
-        self._summarize_functions_individually_with_ids(all_function_ids)
+        self._analyze_functions_individually_with_ids(all_function_ids)
         logging.info("--- Finished Pass 1 ---")
 
     # --- Pass 2 Methods ---
@@ -81,7 +81,7 @@ class RagGenerator(RagOrchestrator):
         
         query = """
         MATCH (n:FUNCTION|METHOD)
-        WHERE n.codeSummary IS NOT NULL
+        WHERE n.code_analysis IS NOT NULL
         RETURN n.id AS id
         """
         results = self.neo4j_mgr.execute_read_query(query)

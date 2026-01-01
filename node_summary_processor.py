@@ -51,15 +51,15 @@ class NodeSummaryProcessor:
         else:
             self.max_context_token_size = None
 
-    def get_function_code_summary(self, node_data: dict) -> Tuple[str, dict]:
+    def get_function_code_analysis(self, node_data: dict) -> Tuple[str, dict]:
         """
-        Performs the one-pass staleness check and generation for a function's codeSummary.
+        Performs the one-pass staleness check and generation for a function's code_analysis.
         Returns a status and a data dictionary.
         """
         node_id = node_data['id']
         label = node_data['label']
         db_code_hash = node_data.get('db_code_hash')
-        db_code_summary = node_data.get('db_codeSummary')
+        db_code_analysis = node_data.get('db_code_analysis')
 
         # 1. Read source code once
         start_line, _, end_line, _ = node_data.get('body_location')
@@ -68,7 +68,7 @@ class NodeSummaryProcessor:
             start_line, end_line
         )
         if not source_code:
-            logger.error(f"Cannot generate code summary for {label} {node_id}: source code not found.")
+            logger.error(f"Cannot generate code analysis for {label} {node_id}: source code not found.")
             return "generation_failed", {} # Cannot process
 
         # 2. Calculate new hash
@@ -76,23 +76,23 @@ class NodeSummaryProcessor:
 
         # 3. Staleness Check
         # Path A: DB is up-to-date
-        if db_code_hash == new_code_hash and db_code_summary:
-            return "unchanged", {"code_hash": new_code_hash, "codeSummary": db_code_summary}
+        if db_code_hash == new_code_hash and db_code_analysis:
+            return "unchanged", {"code_hash": new_code_hash, "code_analysis": db_code_analysis}
 
         # Path B: DB is stale, check historical cache
         cached_entry = self.cache_manager.get_cache_entry(label, node_id)
-        cache_code_summary = cached_entry.get('codeSummary') if cached_entry else None
+        cache_code_analysis = cached_entry.get('code_analysis') if cached_entry else None
         cache_code_hash = cached_entry.get('code_hash') if cached_entry else None
-        if cache_code_hash == new_code_hash and cache_code_summary:
-            return "code_summary_restored", {"code_hash": new_code_hash, "codeSummary": cache_code_summary}
+        if cache_code_hash == new_code_hash and cache_code_analysis:
+            return "code_analysis_restored", {"code_hash": new_code_hash, "code_analysis": cache_code_analysis}
 
-        # Path C: Cache miss, generate new summary
-        new_code_summary = self._summarize_function_text_iteratively(source_code, node_data)
-        if not new_code_summary: # Condition 2 Check
-            logger.error(f"Failed to generate code summary for {label} {node_id}")
-            return "generation_failed", {"code_hash": new_code_hash, "codeSummary": db_code_summary or cache_code_summary}
+        # Path C: Cache miss, generate new analysis
+        new_code_analysis = self._analyze_function_text_iteratively(source_code, node_data)
+        if not new_code_analysis: # Condition 2 Check
+            logger.error(f"Failed to generate code analysis for {label} {node_id}")
+            return "generation_failed", {"code_hash": new_code_hash, "code_analysis": db_code_analysis or cache_code_analysis}
 
-        return "code_summary_regenerated", {"code_hash": new_code_hash, "codeSummary": new_code_summary}
+        return "code_analysis_regenerated", {"code_hash": new_code_hash, "code_analysis": new_code_analysis}
 
     def get_function_contextual_summary(self, node_data: dict, caller_entities: List[dict], callee_entities: List[dict]) -> Tuple[str, dict]:
         """
@@ -105,9 +105,9 @@ class NodeSummaryProcessor:
         cache_summary = cached_entry.get('summary') if cached_entry else None
 
         # Staleness Check
-        is_self_stale = self.cache_manager.get_runtime_status(label, node_id).get('code_summary_changed', False)
+        is_self_stale = self.cache_manager.get_runtime_status(label, node_id).get('code_analysis_changed', False)
         is_neighbor_stale = any(
-            self.cache_manager.get_runtime_status(dep['label'], dep['id']).get('code_summary_changed')
+            self.cache_manager.get_runtime_status(dep['label'], dep['id']).get('code_analysis_changed')
             for dep in caller_entities + callee_entities
         )
         is_stale = is_self_stale or is_neighbor_stale
@@ -122,29 +122,29 @@ class NodeSummaryProcessor:
 
         # Path C: Must regenerate (either because it's stale, or no valid summary exists anywhere)
         own_cached_data = self.cache_manager.get_cache_entry(label, node_id)
-        code_summary = own_cached_data.get('codeSummary') if own_cached_data else None
+        code_analysis = own_cached_data.get('code_analysis') if own_cached_data else None
 
-        if not code_summary:
-            logger.error(f"Cannot generate contextual summary for {node_id}: missing own codeSummary in cache.")
+        if not code_analysis:
+            logger.error(f"Cannot generate contextual summary for {node_id}: missing own code_analysis in cache.")
             return "unchanged", {"summary": db_summary}
 
-        caller_summaries = [
+        caller_analyses = [
             summary
             for c in caller_entities
-            if (summary := (self.cache_manager.get_cache_entry(c['label'], c['id']) or {}).get('codeSummary'))
+            if (summary := (self.cache_manager.get_cache_entry(c['label'], c['id']) or {}).get('code_analysis'))
         ]
-        callee_summaries = [
+        callee_analyses = [
             summary
             for c in callee_entities
-            if (summary := (self.cache_manager.get_cache_entry(c['label'], c['id']) or {}).get('codeSummary'))
+            if (summary := (self.cache_manager.get_cache_entry(c['label'], c['id']) or {}).get('code_analysis'))
         ]
 
-        full_context_text = code_summary + " ".join(caller_summaries) + " ".join(callee_summaries)
+        full_context_text = code_analysis + " ".join(caller_analyses) + " ".join(callee_analyses)
         if self._get_token_count(full_context_text) < self.max_context_token_size:
-            prompt = self._build_function_contextual_prompt(code_summary, caller_summaries, callee_summaries)
+            prompt = self._build_function_contextual_prompt(code_analysis, caller_analyses, callee_analyses)
             final_summary = self.llm_client.generate_summary(prompt)
         else:
-            final_summary = self._summarize_function_context_iteratively(code_summary, caller_summaries, callee_summaries)
+            final_summary = self._summarize_function_context_iteratively(code_analysis, caller_analyses, callee_analyses)
 
         if not final_summary:
             logger.error(f"Failed to generate contextual summary for {node_id}.")
@@ -399,16 +399,16 @@ class NodeSummaryProcessor:
             base_summary = f"The {relation_name.split('_')[0]} '{context_name}' contains various components."
             return self._summarize_relations_iteratively(base_summary, relation_summaries, relation_name, context_name)
 
-    def _build_function_contextual_prompt(self, code_summary, caller_summaries, callee_summaries) -> str:
-        caller_text = ", ".join([s for s in caller_summaries if s]) or "none"
-        callee_text = ", ".join([s for s in callee_summaries if s]) or "none"
-        return self.prompt_manager.get_contextual_function_prompt(code_summary, caller_text, callee_text)
+    def _build_function_contextual_prompt(self, code_analysis, caller_analyses, callee_analyses) -> str:
+        caller_text = ", ".join([s for s in caller_analyses if s]) or "none"
+        callee_text = ", ".join([s for s in callee_analyses if s]) or "none"
+        return self.prompt_manager.get_contextual_function_prompt(code_analysis, caller_text, callee_text)
 
-    def _summarize_function_context_iteratively(self, code_summary: str, caller_summaries: List[str], callee_summaries: List[str]) -> str:
+    def _summarize_function_context_iteratively(self, code_analysis: str, caller_analyses: List[str], callee_analyses: List[str]) -> str:
         """Generates a contextual summary by iteratively processing batches of caller and callee summaries."""
         logger.info(f"Context for function is too large, starting iterative contextual summarization...")
-        caller_aware_summary = self._summarize_relations_iteratively(code_summary, caller_summaries, "function_has_callers")
-        final_summary = self._summarize_relations_iteratively(caller_aware_summary, callee_summaries, "function_has_callees")
+        caller_aware_summary = self._summarize_relations_iteratively(code_analysis, caller_analyses, "function_has_callers")
+        final_summary = self._summarize_relations_iteratively(caller_aware_summary, callee_analyses, "function_has_callees")
         return final_summary
 
     def _summarize_relations_iteratively(self, summary: str, relation_summaries: List[str], relation_name: str, context_name: Optional[str] = None) -> str:
@@ -443,7 +443,7 @@ class NodeSummaryProcessor:
             logger.error(f"Error reading file {full_path}: {e}")
             return ""
 
-    def _summarize_function_text_iteratively(self, text: str, func: dict) -> str:
+    def _analyze_function_text_iteratively(self, text: str, func: dict) -> str:
         token_count = self._get_token_count(text)
         if token_count <= self.max_context_token_size:
             chunks = [text]
@@ -454,7 +454,7 @@ class NodeSummaryProcessor:
         
         running_summary = ""
         for i, chunk in enumerate(chunks):
-            prompt = self.prompt_manager.get_code_summary_prompt(chunk, i == 0, i == len(chunks) - 1, running_summary)
+            prompt = self.prompt_manager.get_code_analysis_prompt(chunk, i == 0, i == len(chunks) - 1, running_summary)
             running_summary = self.llm_client.generate_summary(prompt)
             if not running_summary:
                 logger.error(f"Iterative summarization failed at chunk {i+1}.")

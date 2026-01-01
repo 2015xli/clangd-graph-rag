@@ -74,7 +74,7 @@ This mechanism ensures the integrity of the main cache file (`summary_backup.jso
 
 The `RagGenerator` and `RagUpdater` execute a series of passes in a specific order to ensure dependencies are met.
 
-1.  **Pass 1: Code Summaries**: Generates `codeSummary` for functions/methods.
+1.  **Pass 1: Code analyses**: Generates `code_analysis` for functions/methods.
 2.  **Pass 2: Contextual Summaries**: Generates final `summary` for functions/methods.
 3.  **Pass 3: Class Summaries**: Generates `summary` for classes.
 4.  **Pass 4: Namespace Summaries**: Generates `summary` for namespaces.

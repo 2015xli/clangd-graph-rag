@@ -28,17 +28,17 @@ class RagUpdater(RagOrchestrator):
         logging.info(f"--- Starting Targeted RAG Update for {len(seed_symbol_ids)} seed symbols and {sum(len(v) for v in structurally_changed_files.values())} structural file changes ---")
 
         # --- Function Summary Passes (Content Changes) ---
-        logging.info("Targeted Update - Pass 1: Summarizing changed functions individually...")
+        logging.info("Targeted Update - Pass 1: Analyzing changed functions individually...")
         
         # No need to pre-filter the seed IDs to only include functions and methods
-        # because the _summarize_functions_individually_with_ids function will do it for us
-        updated_code_summary_ids = self._summarize_functions_individually_with_ids(list(seed_symbol_ids))
-        logging.info(f"{len(updated_code_summary_ids)} functions received a new code summary.")
+        # because the _analyze_functions_individually_with_ids function will do it for us
+        updated_code_analysis_ids = self._analyze_functions_individually_with_ids(list(seed_symbol_ids))
+        logging.info(f"{len(updated_code_analysis_ids)} functions received a new code analysis.")
         self.summary_cache_manager.save(mode="updater", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
 
         logging.info("Targeted Update - Pass 2: Summarizing functions with context...")
-        neighbor_function_ids = self._get_neighbor_function_ids(updated_code_summary_ids)
-        all_function_ids_to_process = updated_code_summary_ids.union(neighbor_function_ids)
+        neighbor_function_ids = self._get_neighbor_function_ids(updated_code_analysis_ids)
+        all_function_ids_to_process = updated_code_analysis_ids.union(neighbor_function_ids)
         logging.info(f"Expanded scope for Pass 2 to {len(all_function_ids_to_process)} total functions.")
         
         updated_final_summary_ids = self._summarize_functions_with_context_with_ids(list(all_function_ids_to_process))

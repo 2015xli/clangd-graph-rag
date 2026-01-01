@@ -86,18 +86,18 @@ class RagOrchestrator:
 
                         # Only update the cache if the data packet contains a valid, non-empty summary.
                         # This prevents 'summary: None' or empty data from polluting the cache.
-                        if data and (data.get('summary') or data.get('codeSummary')):
+                        if data and (data.get('summary') or data.get('code_analysis')):
                             self.summary_cache_manager.update_cache_entry(label, key, data)
                         
                         self.summary_cache_manager.set_runtime_status(label, key, "visited")
 
                         # Add to updated_keys if the DB was successfully touched
-                        if status in ["summary_regenerated", "summary_restored", "code_summary_regenerated", "code_summary_restored"]:
+                        if status in ["summary_regenerated", "summary_restored", "code_analysis_regenerated", "code_analysis_restored"]:
                             updated_keys.add(key)
 
-                            if status in ["summary_regenerated", "code_summary_regenerated"]:
+                            if status in ["summary_regenerated", "code_analysis_regenerated"]:
                                 n_generated += 1
-                            elif status in ["summary_restored", "code_summary_restored"]:
+                            elif status in ["summary_restored", "code_analysis_restored"]:
                                 n_restored += 1
                         elif status == "no_children":
                             n_nochildren += 1
@@ -107,8 +107,8 @@ class RagOrchestrator:
                             n_failed += 1
 
                         # Conditionally set flags for dependency tracking
-                        if status == "code_summary_regenerated":
-                            self.summary_cache_manager.set_runtime_status(label, key, "code_summary_changed")
+                        if status == "code_analysis_regenerated":
+                            self.summary_cache_manager.set_runtime_status(label, key, "code_analysis_changed")
                         elif status == "summary_regenerated":
                             self.summary_cache_manager.set_runtime_status(label, key, "summary_changed")
 
@@ -174,52 +174,52 @@ class RagOrchestrator:
         """
         return self.neo4j_mgr.execute_read_query(query)
 
-    def _summarize_functions_individually_with_ids(self, function_ids: list[str]) -> set:
+    def _analyze_functions_individually_with_ids(self, function_ids: list[str]) -> set:
         """
-        Orchestrates the map-reduce process for generating code summaries.
+        Orchestrates the map-reduce process for generating code analyses.
         """
         if not function_ids:
             return set()
             
-        functions_to_process = self._get_functions_for_code_summary(function_ids)
+        functions_to_process = self._get_functions_for_code_analysis(function_ids)
         if not functions_to_process:
-            logging.info("No functions or methods from the provided list require a code summary.")
+            logging.info("No functions or methods from the provided list require a code analysis.")
             return set()
             
-        logging.info(f"Found {len(functions_to_process)} functions/methods that need code summaries.")
+        logging.info(f"Found {len(functions_to_process)} functions/methods that need code analyses.")
         max_workers = self.num_local_workers if self.is_local_llm else self.num_remote_workers
         logging.info(f"Using {max_workers} parallel workers for Pass 1.")
 
         updated_ids = self._parallel_process(
             items=functions_to_process,
-            process_func=self._process_one_function_for_code_summary,
+            process_func=self._process_one_function_for_code_analysis,
             max_workers=max_workers,
-            desc="Pass 1: Code Summaries"
+            desc="Pass 1: Code analyses"
         )
-        logging.info(f"Pass 1: Code Summaries - Updated {len(updated_ids)} nodes.")
+        logging.info(f"Pass 1: Code analyses - Updated {len(updated_ids)} nodes.")
         return updated_ids
 
-    def _get_functions_for_code_summary(self, function_ids: list[str]) -> list[dict]:
+    def _get_functions_for_code_analysis(self, function_ids: list[str]) -> list[dict]:
         query = """
         MATCH (n:FUNCTION|METHOD)
         WHERE n.id IN $function_ids AND n.body_location IS NOT NULL
         RETURN n.id AS id, n.name AS name, n.path AS path, n.body_location as body_location,
-               n.code_hash as db_code_hash, n.codeSummary as db_codeSummary, labels(n)[-1] as label
+               n.code_hash as db_code_hash, n.code_analysis as db_code_analysis, labels(n)[-1] as label
         """
         return self.neo4j_mgr.execute_read_query(query, {"function_ids": function_ids})
 
-    def _process_one_function_for_code_summary(self, node_data: dict) -> dict:
+    def _process_one_function_for_code_analysis(self, node_data: dict) -> dict:
         """
         Wrapper function for the parallel executor. Calls the stateless processor
         and then performs the Neo4j update.
         """
-        status, data = self.node_processor.get_function_code_summary(node_data)
+        status, data = self.node_processor.get_function_code_analysis(node_data)
 
-        if status in ["code_summary_regenerated", "code_summary_restored"]:
-            update_query = "MATCH (n:FUNCTION|METHOD {id: $id}) SET n.codeSummary = $code_summary, n.code_hash = $code_hash"
+        if status in ["code_analysis_regenerated", "code_analysis_restored"]:
+            update_query = "MATCH (n:FUNCTION|METHOD {id: $id}) SET n.code_analysis = $code_analysis, n.code_hash = $code_hash"
             self.neo4j_mgr.execute_autocommit_query(
                 update_query, 
-                {"id": node_data["id"], "code_summary": data["codeSummary"], "code_hash": data["code_hash"]}
+                {"id": node_data["id"], "code_analysis": data["code_analysis"], "code_hash": data["code_hash"]}
             )
         
         return {

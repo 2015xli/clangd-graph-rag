@@ -422,7 +422,7 @@ These are simple, standalone scripts created to assist with development, debuggi
 
 #### 6.4.3: Summary Cache (summary_backup.json)
 
-*   **What**: The SummaryCacheManager caches the output of LLM calls (codeSummary and summary) and the code_hash of the
+*   **What**: The SummaryCacheManager caches the output of LLM calls (code_analysis and summary) and the code_hash of the
      source code they were generated from.
 *   **How:**
     *   *Restore (Load)*: At the start of a run, the load() method reads summary_backup.json to populate the in-memory cache.

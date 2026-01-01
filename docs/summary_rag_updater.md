@@ -24,13 +24,13 @@ The `summarize_targeted_update` method orchestrates the entire workflow. It rece
 
 1.  **Load Cache**: It begins by calling `self.summary_cache_manager.load()` to populate the in-memory cache from `summary_backup.json`.
 
-2.  **Pass 1: Targeted Code Summaries**
-    *   **Action**: It calls `_summarize_functions_individually_with_ids()` on **only the `seed_symbol_ids`**.
-    *   **Logic**: The `NodeSummaryProcessor` checks the code hash for each of these seed functions against the cache. Only functions with changed code will be regenerated, and their `code_summary_changed` flag will be set in the `runtime_status`.
+2.  **Pass 1: Targeted Code Analyses**
+    *   **Action**: It calls `_analyze_functions_individually_with_ids()` on **only the `seed_symbol_ids`**.
+    *   **Logic**: The `NodeSummaryProcessor` checks the code hash for each of these seed functions against the cache. Only functions with changed code will be regenerated, and their `code_analysis_changed` flag will be set in the `runtime_status`.
     *   **Checkpoint**: An intermediate save of the cache is performed.
 
 3.  **Pass 2: Contextual Function Summaries**
-    *   **Scope Expansion**: It calls `_get_neighbor_ids()` to find the direct callers and callees of the functions whose code summaries were just updated. This expanded set (`all_function_ids_to_process`) becomes the input for the next step.
+    *   **Scope Expansion**: It calls `_get_neighbor_ids()` to find the direct callers and callees of the functions whose code analyses were just updated. This expanded set (`all_function_ids_to_process`) becomes the input for the next step.
     *   **Delegation**: It calls `_summarize_functions_with_context_with_ids()` on this expanded set. The distributed logic in the workers ensures that only functions that are themselves stale or have a stale neighbor are actually re-summarized.
     *   **Checkpoint**: The cache is saved.
 

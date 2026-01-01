@@ -4,31 +4,31 @@ class RagGenerationPromptManager:
     def __init__(self):
         pass
 
-    def get_code_summary_prompt(self, chunk: str, is_first_chunk: bool, is_last_chunk: bool, running_summary: str = "") -> str:
+    def get_code_analysis_prompt(self, chunk: str, is_first_chunk: bool, is_last_chunk: bool, running_summary: str = "") -> str:
         """
-        Returns the prompt for individual code summarization (Pass 1).
+        Returns the prompt for individual code analysis (Pass 1).
         Handles first, middle, and last chunks.
         """
         if is_first_chunk:
             if is_last_chunk:
-                return f"Summarize the purpose of this C/C++ function based on its code:\n\n```cpp\n{chunk}```"
+                return f"Analyze and summarize the purpose of this C/C++ function based on its code:\n\n```cpp\n{chunk}```"
             else:
-                return f"Summarize this C/C++ code, which is the beginning of a larger function/method:\n\n```cpp\n{chunk}```"
+                return f"Analyze and summarize this C/C++ code, which is the beginning of a larger function/method:\n\n```cpp\n{chunk}```"
         else:
             position_prompt = "This is the end of the function body." if is_last_chunk else "The function body continues after this code."
             return (
-                f"The summary of a function/method so far is: \n'{running_summary}'\n\n" 
+                f"The analysis and summary of a function/method so far is: \n'{running_summary}'\n\n" 
                 f"Here is the next part of the code:\n```cpp\n{chunk}```\n\n" 
                 f"{position_prompt}\n\n"
-                f"Please provide a new, single-paragraph summary that combines the previous summary with this new code."
+                f"Please provide a new, single-paragraph analysis and summary that combines the previous analysis and summary with this new code."
             )
 
-    def get_contextual_function_prompt(self, code_summary: str, caller_text: str, callee_text: str) -> str:
+    def get_contextual_function_prompt(self, code_analysis: str, caller_text: str, callee_text: str) -> str:
         """
         Returns the prompt for contextual function summarization (Pass 2, single pass).
         """
         return (
-            f"A C/C++ function or method is described as: '{code_summary}'.\n"
+            f"A C/C++ function or method is described as: '{code_analysis}'.\n"
             f"It is called by functions with these responsibilities: [{caller_text}].\n"
             f"It calls other functions to do the following: [{callee_text}].\n\n"
             f"Based on this context, what is the high-level purpose of this function/method in the overall system? "

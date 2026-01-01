@@ -122,12 +122,21 @@ For all the scripts that can run standalone, you can always use --help to see th
 Used for the initial, from-scratch ingestion of a project. Orchestrated by `clangd_graph_rag_builder.py`.
 
 ```bash
-# Basic build (graph structure only)
+# Basic build (graph structure only). You can generate LLM summary RAG data with a separate step later.
 python3 clangd_graph_rag_builder.py /path/to/clangd-index.yaml /path/to/project/
 
-# Build with RAG data generation
+# Build the graph with LLM summary RAG data generation (note: the default uses fake LLM unless you specify --llm-api)
 python3 clangd_graph_rag_builder.py /path/to/clangd-index.yaml /path/to/project/ --generate-summary
 ```
+Please check the detailed design document for more details: [Clangd Graph RAG Builder](./docs/summary_clangd_graph_rag_builder.md)
+
+### Summary RAG Data Generation
+
+After the graph is built, you can generate LLM summary RAG data with the following command:
+```bash
+python3 code_graph_rag_generator.py /path/to/clangd-index.yaml /path/to/project/
+```
+Please check the detailed design document for more details: [Code Graph RAG Data Generation](./docs/summary_code_graph_rag_generator.md)
 
 ### Incremental Graph Update
 
@@ -140,6 +149,7 @@ python3 clangd_graph_rag_updater.py /path/to/new/clangd-index.yaml /path/to/proj
 # Update between two specific commits
 python3 clangd_graph_rag_updater.py /path/to/new/clangd-index.yaml /path/to/project/ --old-commit <hash1> --new-commit <hash2>
 ```
+Please check the detailed design document for more details: [Clangd Graph RAG Updater](./docs/summary_clangd_graph_rag_updater.md)
 
 ### Common Options
 
@@ -158,7 +168,7 @@ Run any script with `--help` to see all available options.
 
 Once the code graph is built and enriched, you can interact with it using natural language through an AI agent. The project provides an example implementation of an MCP tool server and an agent built with the Google Agent Development Kit (ADK) to enable this.
 
-1.  **`graph_mcp_server.py`**: This is a tool server that exposes the Neo4j graph to an AI agent. It provides example tools like `get_graph_schema`, `execute_cypher_query`, and `get_source_code`. They are bare minimum yet super powerful tools for AI agent to interact with the graph.
+1.  **`graph_mcp_server.py`**: This is a tool server that exposes the Neo4j graph to an AI agent. It provides example tools like `get_graph_schema`, `execute_cypher_query`, and `get_file_source_code_by_path`. They are bare minimum yet super powerful tools for AI agent to interact with the graph.
 2.  **`rag_adk_agent/`**: This directory contains an example agent built with the Google Agent Development Kit (ADK). This agent is pre-configured to use the tools from the MCP server to answer questions about your codebase. It just scratches the surface of what is possible with the tools provided.
 
 ### Example Workflow
@@ -207,6 +217,7 @@ These scripts are the core components of the pipeline and can also be run standa
     *   **Purpose**: Runs the RAG enrichment process on an *existing* graph.
     *   **Assumption**: The structural graph (files, symbols, calls) must already be populated in the database.
     *   **Usage**: `python3 code_graph_rag_generator.py <index.yaml> <project_path/> --llm-api fake`
+    Please check the detailed design document for more details: [Code Graph RAG Generator](./docs/summary_code_graph_rag_generator.md)
 
 *   **`neo4j_manager.py`**:
     *   **Purpose**: A command-line utility for database maintenance.

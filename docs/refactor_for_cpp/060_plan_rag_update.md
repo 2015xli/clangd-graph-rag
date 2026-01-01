@@ -43,14 +43,14 @@ Instead of failing or truncating, the system chunks the context (source code or 
 *   **Goal**: Make key LLM-related constants configurable.
 *   **Implementation**: `MAX_CONTEXT_TOKEN_SIZE` is now an optional command-line argument (`--max-context-size`), defaulting to 30000. `ITERATIVE_CHUNK_SIZE` and `ITERATIVE_CHUNK_OVERLAP` are dynamically calculated as 50% and 10% of `max_context_size`, respectively.
 
-#### Pass 1: `codeSummary` for Functions and Methods (Implemented)
+#### Pass 1: `code_analysis` for Functions and Methods (Implemented)
 
 *   **Goal**: Generate a baseline summary for every function and method based purely on its source code.
 *   **Implementation**: Prompts are managed by `RagGenerationPromptManager`.
 
 #### Pass 2: Contextual `summary` for Functions and Methods (Implemented)
 
-*   **Goal**: Enrich the `codeSummary` with call graph context to create a final, high-level `summary`.
+*   **Goal**: Enrich the `code_analysis` with call graph context to create a final, high-level `summary`.
 *   **Implementation**: Prompts are managed by `RagGenerationPromptManager`.
 
 #### Pass 3: Class Summaries (Implemented)
@@ -80,7 +80,7 @@ Instead of failing or truncating, the system chunks the context (source code or 
 ## 4. Verification
 
 1.  Run the full builder pipeline with RAG generation on a C++ project.
-2.  Verify that `codeSummary` and `summary` properties are correctly generated for both `:FUNCTION` and `:METHOD` nodes.
+2.  Verify that `code_analysis` and `summary` properties are correctly generated for both `:FUNCTION` and `:METHOD` nodes.
 3.  **Verify that `summary` properties are correctly generated for `:CLASS_STRUCTURE` nodes, synthesizing information from their methods, fields, and parents.**
 4.  **Verify that `summary` properties are correctly generated for `:NAMESPACE` nodes, synthesizing information from their contained children.**
 5.  Inspect the summaries for large functions, classes, and namespaces to ensure they are coherent and complete.

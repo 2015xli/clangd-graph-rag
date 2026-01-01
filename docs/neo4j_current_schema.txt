@@ -50,7 +50,7 @@ Node Properties:
     summaryEmbedding: LIST
   (FUNCTION)
     body_location: LIST
-    codeSummary: STRING
+    code_analysis: STRING
     code_hash: STRING
     file_path: STRING
     has_definition: BOOLEAN
@@ -69,7 +69,7 @@ Node Properties:
     type: STRING
   (METHOD)
     body_location: LIST
-    codeSummary: STRING
+    code_analysis: STRING
     code_hash: STRING
     file_path: STRING
     has_definition: BOOLEAN
@@ -150,7 +150,7 @@ Property Explanations:
   return_type: Return type of a function/method.
   signature: Full signature of a function/method.
   has_definition: Boolean indicating if a symbol has a definition/implementation, not just a declaration.
-  codeSummary: LLM-generated summary of the code's literal function.
+  code_analysis: LLM-generated summary of the code's literal function.
   summary: LLM-generated context-aware summary of the node's purpose.
   summaryEmbedding: Vector embedding of the 'summary' for similarity search.
   file_path: Absolute path to the file containing the symbol.
