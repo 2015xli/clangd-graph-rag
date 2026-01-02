@@ -233,7 +233,7 @@ class NodeSummaryProcessor:
             return "no_children", {"summary": db_summary or cache_summary}
 
         final_summary = self._generate_hierarchical_summary(
-            context_name=node_data['name'],
+            entity_name=node_data['name'],
             relation_name="namespace_children",
             relation_summaries=child_summaries
         )
@@ -275,7 +275,7 @@ class NodeSummaryProcessor:
             return "no_children", {"summary": db_summary or cache_summary}
 
         final_summary = self._generate_hierarchical_summary(
-            context_name=node_data['name'],
+            entity_name=node_data['name'],
             relation_name="file_children",
             relation_summaries=child_summaries
         )
@@ -315,7 +315,7 @@ class NodeSummaryProcessor:
             return "no_children", {"summary": db_summary or cache_summary}
 
         final_summary = self._generate_hierarchical_summary(
-            context_name=node_data['name'],
+            entity_name=node_data['name'],
             relation_name="folder_children",
             relation_summaries=child_summaries
         )
@@ -355,7 +355,7 @@ class NodeSummaryProcessor:
             return "no_children", {"summary": db_summary or cache_summary}
 
         final_summary = self._generate_hierarchical_summary(
-            context_name=node_data['name'],
+            entity_name=node_data['name'],
             relation_name="project_children",
             relation_summaries=child_summaries
         )
@@ -371,7 +371,7 @@ class NodeSummaryProcessor:
         method_text = f"It has methods that perform these functions: [{'; '.join(method_summaries)}]." if method_summaries else ""
         return self.prompt_manager.get_class_summary_prompt(class_name, parent_text, field_text_prompt, method_text)
 
-    def _generate_hierarchical_summary(self, context_name: str, relation_name: str, relation_summaries: List[str]) -> Optional[str]:
+    def _generate_hierarchical_summary(self, entity_name: str, relation_name: str, relation_summaries: List[str]) -> Optional[str]:
         """
         Generic helper to generate a summary for a hierarchical node (namespace, file, folder).
         """
@@ -382,11 +382,11 @@ class NodeSummaryProcessor:
         
         if self._get_token_count(summaries_text) < self.max_context_token_size:
             if relation_name == "namespace_children":
-                prompt = self.prompt_manager.get_namespace_summary_prompt(context_name, summaries_text)
+                prompt = self.prompt_manager.get_namespace_summary_prompt(entity_name, summaries_text)
             elif relation_name == "file_children":
-                prompt = self.prompt_manager.get_file_summary_prompt(context_name, summaries_text)
+                prompt = self.prompt_manager.get_file_summary_prompt(entity_name, summaries_text)
             elif relation_name == "folder_children":
-                prompt = self.prompt_manager.get_folder_summary_prompt(context_name, summaries_text)
+                prompt = self.prompt_manager.get_folder_summary_prompt(entity_name, summaries_text)
             elif relation_name == "project_children": # project
                 prompt = self.prompt_manager.get_project_summary_prompt(summaries_text)
             else:
@@ -394,10 +394,10 @@ class NodeSummaryProcessor:
             return self.llm_client.generate_summary(prompt)
         else:
             # Fallback to iterative summarization for large contexts
-            logger.info(f"Context for {relation_name} '{context_name}' is too large, starting iterative summarization...")
+            logger.info(f"Context for {relation_name} '{entity_name}' is too large, starting iterative summarization...")
             
-            base_summary = f"The {relation_name.split('_')[0]} '{context_name}' contains various components."
-            return self._summarize_relations_iteratively(base_summary, relation_summaries, relation_name, context_name)
+            base_summary = f"The {relation_name.split('_')[0]} '{entity_name}' contains various components to be summarized iteratively."
+            return self._summarize_relations_iteratively(base_summary, relation_summaries, relation_name, entity_name)
 
     def _build_function_contextual_prompt(self, code_analysis, caller_analyses, callee_analyses) -> str:
         caller_text = ", ".join([s for s in caller_analyses if s]) or "none"
@@ -411,15 +411,15 @@ class NodeSummaryProcessor:
         final_summary = self._summarize_relations_iteratively(caller_aware_summary, callee_analyses, "function_has_callees")
         return final_summary
 
-    def _summarize_relations_iteratively(self, summary: str, relation_summaries: List[str], relation_name: str, context_name: Optional[str] = None) -> str:
+    def _summarize_relations_iteratively(self, summary: str, relation_summaries: List[str], relation_name: str, entity_name: Optional[str] = None) -> str:
         """Generic helper to iteratively fold a list of relation summaries into a base summary."""
         if not relation_summaries:
             return summary
-        relations_text = "\n - ".join(relation_summaries)
-        relation_chunks = self._chunk_text_by_tokens(relations_text, self.iterative_chunk_size, self.iterative_chunk_overlap)
+
+        relation_chunks = self._chunk_strings_by_tokens(relation_summaries, self.iterative_chunk_size)
         running_summary = summary
         for i, chunk in enumerate(relation_chunks):
-            prompt = self.prompt_manager.get_iterative_relation_prompt(relation_name, running_summary, chunk, context_name)
+            prompt = self.prompt_manager.get_iterative_relation_prompt(relation_name, running_summary, chunk, entity_name)
             running_summary = self.llm_client.generate_summary(prompt)
             if not running_summary:
                 logger.error(f"Iterative relation summarization failed at chunk {i+1}.")
@@ -489,3 +489,57 @@ class NodeSummaryProcessor:
                  chunks[-1] = tokens[i-stride:]
                  break
         return [self.tokenizer.decode(chunk) for chunk in chunks]
+
+
+    def _chunk_strings_by_tokens(self, strings: List[str],  chunk_size: int) -> List[str]:
+        """
+        Groups strings so that each group will contain as many strings as possible without exceeding the token limit.
+        Returns a list of joined string groups.
+        """
+        separator: str = "\n - "
+
+        if not strings:
+            return []
+
+        # Pre-tokenize each string
+        encoded = []
+        for s in strings:
+            safe = _sanitize_special_tokens(s)
+            tokens = self.tokenizer.encode(safe)
+            encoded.append((s, len(tokens)))
+
+        chunks = []
+        current_strings = []
+        current_token_count = 0
+
+        # Token cost of separator (important!)
+        sep_token_cost = len(self.tokenizer.encode(separator))
+
+        for s, n_tokens in encoded:
+            # Cost to add this string (include separator if not first)
+            additional_cost = n_tokens
+            if current_strings:
+                additional_cost += sep_token_cost
+
+            # If single string exceeds budget → force it alone
+            if n_tokens > chunk_size:
+                if current_strings:
+                    chunks.append(separator.join(current_strings))
+                    current_strings = []
+                    current_token_count = 0
+                chunks.append(s)
+                continue
+
+            # If adding exceeds budget → flush
+            if current_token_count + additional_cost > chunk_size:
+                chunks.append(separator.join(current_strings))
+                current_strings = [s]
+                current_token_count = n_tokens
+            else:
+                current_strings.append(s)
+                current_token_count += additional_cost
+
+        if current_strings:
+            chunks.append(separator.join(current_strings))
+
+        return chunks

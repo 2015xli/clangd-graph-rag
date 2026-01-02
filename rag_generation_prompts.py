@@ -17,7 +17,7 @@ class RagGenerationPromptManager:
         else:
             position_prompt = "This is the end of the function body." if is_last_chunk else "The function body continues after this code."
             return (
-                f"The analysis and summary of a function/method so far is: \n'{running_summary}'\n\n" 
+                f"The analysis of the first part of a large function/method so far is: \n'{running_summary}'\n\n" 
                 f"Here is the next part of the code:\n```cpp\n{chunk}```\n\n" 
                 f"{position_prompt}\n\n"
                 f"Please provide a new, single-paragraph analysis and summary that combines the previous analysis and summary with this new code."
@@ -32,22 +32,22 @@ class RagGenerationPromptManager:
             f"It is called by functions with these responsibilities: [{caller_text}].\n"
             f"It calls other functions to do the following: [{callee_text}].\n\n"
             f"Based on this context, what is the high-level purpose of this function/method in the overall system? "
-            f"Describe it in one concise sentence."
+            f"Describe it in concise sentences."
         )
 
     def get_iterative_caller_prompt_template(self) -> str:
         """Returns the template for iterative caller summarization."""
         return (
-            "The function being summarized has this purpose: {summary}. "
-            "It is used by other functions with the following responsibilities: {relations}. "
+            "The function being summarized has this purpose: {running_summary}. "
+            "It is used by other functions with the following responsibilities: {relation_summaries_chunk}. "
             "Describe the main function's role in relation to its callers."
         )
 
     def get_iterative_callee_prompt_template(self) -> str:
         """Returns the template for iterative callee summarization."""
         return (
-            "So far, a function's role is summarized as: {summary}. "
-            "It accomplishes this by calling other functions for these purposes: {relations}. "
+            "So far, a function's role is summarized as: {running_summary}. "
+            "It accomplishes this by calling other functions for these purposes: {relation_summaries_chunk}. "
             "Provide a final, comprehensive summary of the function's overall purpose."
         )
 
@@ -64,16 +64,16 @@ class RagGenerationPromptManager:
     def get_iterative_class_inheritance_prompt_template(self) -> str:
         """Returns the template for iterative class inheritance summarization."""
         return (
-            "A class is described as: {summary}. "
-            "It inherits from parent classes with these responsibilities: {relations}. "
+            "A class is described as: {running_summary}. "
+            "It inherits from parent classes with these responsibilities: {relation_summaries_chunk}. "
             "Refine the summary to include the role of its inheritance."
         )
 
     def get_iterative_class_method_prompt_template(self) -> str:
         """Returns the template for iterative class method summarization."""
         return (
-            "So far, a class's role is summarized as: {summary}. "
-            "It implements methods to perform these functions: {relations}. "
+            "So far, a class's role is summarized as: {running_summary}. "
+            "It implements methods to perform these functions: {relation_summaries_chunk}. "
             "Provide a final, comprehensive summary of the class's overall purpose."
         )
 
@@ -113,18 +113,18 @@ class RagGenerationPromptManager:
             f"What is this namespace's collective role and purpose?"
         )
 
-    def get_iterative_parent_children_prompt(self, relation_name: str, summary: str, relations: str, context_name: Optional[str] = None) -> str:
+    def get_iterative_parent_children_prompt(self, relation_name: str, entity_name: Optional[str] = None) -> str:
         """
         Returns the template for iterative parent children summarization.
         """
         label = relation_name.split('_')[0]
         return (
-            f"The {label} '{context_name}' in this C/C++ software is summarized as: {{summary}}. "
-            f"It also contains the following major components: {{relations}}. "
-            f"Provide a new, comprehensive summary of the {label} '{context_name}' on its role and overall purpose."
+            f"The {label} '{entity_name}' in this C/C++ software is summarized as: {{running_summary}}\n"
+            f"It also contains the following major components: {{relation_summaries_chunk}}\n"
+            f"Provide a new, comprehensive summary of the {label} '{entity_name}' on its role and overall purpose."
         )
 
-    def get_iterative_relation_prompt(self, relation_name: str, summary: str, relations: str, context_name: Optional[str] = None) -> str:
+    def get_iterative_relation_prompt(self, relation_name: str, running_summary: str, relation_summaries_chunk: str, entity_name: Optional[str] = None) -> str:
         """
         Returns the formatted prompt for iterative relation summarization based on relation_name.
         """
@@ -140,10 +140,10 @@ class RagGenerationPromptManager:
              relation_name == "project_children" or \
              relation_name == "folder_children" or \
              relation_name == "file_children": 
-            if context_name is None:
-                raise ValueError("context_name must be provided for namespace_children relation_name.")
-            return self.get_iterative_parent_children_prompt(relation_name, summary, relations, context_name) # This template is already formatted
+            if entity_name is None:
+                raise ValueError(f"entity_name must be provided for parent-children relation: {relation_name}.")
+            template = self.get_iterative_parent_children_prompt(relation_name, entity_name)
         else:
             raise ValueError(f"Unknown relation_name for iterative prompt: {relation_name}")
         
-        return template.format(summary=summary, relations=relations)
+        return template.format(running_summary=running_summary, relation_summaries_chunk=relation_summaries_chunk)
