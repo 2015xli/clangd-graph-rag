@@ -70,13 +70,36 @@ class OllamaClient(LlmClient):
     is_local: bool = True
 
     def __init__(self):
-        self.base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        #self.base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        self.base_url = os.environ.get("OLLAMA_BASE_URL", "http://xf-gpu.local:11434")
         if not self.base_url:
             raise ValueError("OLLAMA_BASE_URL environment variable not set.")
         self.api_url = f"{self.base_url.rstrip('/')}/api/generate"
-        self.model = os.environ.get("OLLAMA_MODEL", "codellama")
+        # TODO: the deepseek-r1:8b model generates response with tags like <think>...</think> that should be removed
+        #self.model = os.environ.get("OLLAMA_MODEL", "deepseek-r1:8b")
+        self.model = os.environ.get("OLLAMA_MODEL", "deepseek-llm:7b")
 
     def generate_summary(self, prompt: str) -> str:
+        return self.generate_summary_chat(prompt)
+
+    def generate_summary_chat(self, prompt: str) -> str:
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "user", "content": prompt}
+            ],
+            "stream": False
+        }
+
+        response = requests.post(
+            f"{self.base_url}/api/chat",
+            json=payload,
+            timeout=300
+        )
+        response.raise_for_status()
+        return response.json()["message"]["content"]
+
+    def generate_summary_reasoning(self, prompt: str) -> str:
         payload = {
             "model": self.model,
             "prompt": prompt,

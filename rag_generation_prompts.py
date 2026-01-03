@@ -11,16 +11,16 @@ class RagGenerationPromptManager:
         """
         if is_first_chunk:
             if is_last_chunk:
-                return f"Analyze and summarize the purpose of this C/C++ function based on its code:\n\n```cpp\n{chunk}```"
+                return f"Summarize the purpose of this C/C++ function based on its code. Don't respond with your reasoning process, but only give the summary.:\n\n```cpp\n{chunk}```"
             else:
-                return f"Analyze and summarize this C/C++ code, which is the beginning of a larger function/method:\n\n```cpp\n{chunk}```"
+                return f"Summarize this C/C++ code, which is the beginning of a larger function/method. Don't respond with your reasoning process, but only give the summary.:\n\n```cpp\n{chunk}```"
         else:
             position_prompt = "This is the end of the function body." if is_last_chunk else "The function body continues after this code."
             return (
-                f"The analysis of the first part of a large function/method so far is: \n'{running_summary}'\n\n" 
+                f"The summary of the first part of a large function/method so far is: \n'{running_summary}'\n\n" 
                 f"Here is the next part of the code:\n```cpp\n{chunk}```\n\n" 
                 f"{position_prompt}\n\n"
-                f"Please provide a new, single-paragraph analysis and summary that combines the previous analysis and summary with this new code."
+                f"Please provide a new, single-paragraph summary that combines the previous summary with this new code. Don't respond with your reasoning process, but only give the summary."
             )
 
     def get_contextual_function_prompt(self, code_analysis: str, caller_text: str, callee_text: str) -> str:
@@ -28,11 +28,11 @@ class RagGenerationPromptManager:
         Returns the prompt for contextual function summarization (Pass 2, single pass).
         """
         return (
-            f"A C/C++ function or method is described as: '{code_analysis}'.\n"
+            f"A C/C++ function or method is summarized as: '{code_analysis}'.\n"
             f"It is called by functions with these responsibilities: [{caller_text}].\n"
             f"It calls other functions to do the following: [{callee_text}].\n\n"
             f"Based on this context, what is the high-level purpose of this function/method in the overall system? "
-            f"Describe it in concise sentences."
+            f"Describe it in concise sentences. Don't respond with your reasoning process, but only give the summary."
         )
 
     def get_iterative_caller_prompt_template(self) -> str:
@@ -58,7 +58,7 @@ class RagGenerationPromptManager:
         return (
             f"A C++ class named '{class_name}' is defined. {parent_text} {field_text_prompt} {method_text}\n\n"
             f"Based on its inheritance, data members, and methods, what is the primary responsibility and role of the '{class_name}' class in the system? "
-            f"Describe it in one concise sentence."
+            f"Describe it in one concise sentence. Don't respond with your reasoning process, but only give the summary."
         )
 
     def get_iterative_class_inheritance_prompt_template(self) -> str:
