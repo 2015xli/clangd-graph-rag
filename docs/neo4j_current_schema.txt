@@ -86,7 +86,21 @@ Node Properties:
     summary: STRING
     summaryEmbedding: LIST
     type: STRING
+  (NAMESPACE)
+    has_definition: BOOLEAN
+    id: STRING (INDEXED) (UNIQUE)
+    kind: STRING
+    language: STRING
+    name: STRING
+    name_location: LIST
+    node_label: STRING
+    path: STRING
+    qualified_name: STRING
+    scope: STRING
+    summary: STRING
+    summaryEmbedding: LIST
   (PROJECT)
+    commit_hash: STRING
     name: STRING
     path: STRING
     summary: STRING
@@ -116,11 +130,12 @@ Relationships:
   (FILE) -[:DECLARES]-> (NAMESPACE|CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE)
   (FILE) -[:DEFINES]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE)
   (FILE) -[:INCLUDES]-> (FILE)
-  (FOLDER) -[:CONTAINS]-> (FILE|FOLDER)
   (FUNCTION) -[:CALLS]-> (FUNCTION|METHOD)
   (METHOD) -[:CALLS]-> (FUNCTION|METHOD)
   (CLASS_STRUCTURE) -[:INHERITS]-> (CLASS_STRUCTURE)
   (METHOD) -[:OVERRIDDEN_BY]-> (METHOD)
+  (NAMESPACE) -[:SCOPE_CONTAINS]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|NAMESPACE|VARIABLE)
+  (FOLDER) -[:CONTAINS]-> (FILE|FOLDER)
   (PROJECT) -[:CONTAINS]-> (FOLDER|FILE)
 
 Condensed form of Relationships:

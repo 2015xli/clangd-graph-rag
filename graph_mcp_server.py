@@ -20,10 +20,12 @@ mcp = FastMCP()
 # These will be initialized once when the server starts
 neo4j_mgr: Optional[Neo4jManager] = None
 project_root_path: Optional[str] = None
+embedding_client = get_embedding_client("local")
+HAS_EMBEDDINGS: bool = False
 
 # --- Helper Functions ---
 def _initialize_managers():
-    global neo4j_mgr, path_manager, project_root_path
+    global neo4j_mgr, path_manager, project_root_path, HAS_EMBEDDINGS
     if neo4j_mgr is None:
         neo4j_mgr = Neo4jManager()
         if not neo4j_mgr.check_connection():
@@ -39,6 +41,13 @@ def _initialize_managers():
         else:
             logger.critical("Could not determine project root path from Neo4j. A PROJECT node with a 'path' property must exist.")
             raise ValueError("Project root path not found in Neo4j.")
+
+        # Check for embeddings to enable/disable semantic search
+        HAS_EMBEDDINGS = neo4j_mgr.check_property_exists('summaryEmbedding')
+        if HAS_EMBEDDINGS:
+            logger.info("Graph contains embeddings. Semantic search is enabled.")
+        else:
+            logger.info("Graph does not contain embeddings. Semantic search will be disabled.")
 
 
 def _read_file_slice(file_path: str, start_line: int, end_line: int) -> str:
@@ -101,10 +110,55 @@ def generate_embeddings(query: str) -> list[float]:
     Returns:
         list[float]: A list of embedding vectors for the query.
     """
-    embedding_client = get_embedding_client("local")
+
     embeddings = embedding_client.generate_embeddings([query], show_progress_bar=False)
     
     return embeddings[0] if embeddings else []
+
+@mcp.tool(
+    name="search_nodes_for_semantic_similarity",
+    description="Performs a semantic similarity search across all nodes in the graph to find the most relevant ones for a given query."
+)
+def search_nodes_for_semantic_similarity(query: str, num_results: int = 5) -> Dict[str, Any]:
+    """
+    Generates an embedding for the query and uses it to perform a vector similarity search.
+
+    Args:
+        query (str): The natural language query to search for.
+        num_results (int): The desired number of results to return.
+
+    Returns:
+        A dictionary containing the search results or an error.
+        Example: {"results": [{"id": "123", "name": "function_name", "label": "FUNCTION", "summary": "function summary", "score": 0.95}]}
+    """
+    if not HAS_EMBEDDINGS:
+        return {"results": [], "message": "Semantic search is not available because no summary embeddings have been generated for this graph."}
+
+    try:
+        # Step 1: Generate embedding for the query
+        embedding = embedding_client.generate_embeddings([query], show_progress_bar=False)
+        if not embedding or not embedding[0]:
+            return {"error": "Failed to generate embedding for the query."}
+
+        # Step 2: Formulate and execute the vector search query
+        cypher_query = """
+            CALL db.index.vector.queryNodes('summary_embeddings', $num_results, $embedding)
+            YIELD node, score
+            RETURN node.id AS id, node.name AS name, labels(node)[0] AS label, node.summary AS summary, score
+        """
+        params = {
+            "num_results": num_results,
+            "embedding": embedding[0]
+        }
+        
+        results = neo4j_mgr.execute_read_query(cypher_query, params)
+        
+        # The direct result is already a list of dicts, which is JSON serializable.
+        return {"results": results}
+
+    except Exception as e:
+        logger.error(f"Error during semantic search for query '{query}': {e}")
+        return {"error": f"An error occurred during semantic search: {e}"}
 
 @mcp.tool(name="get_project_info", description="Retrieves the project's name, root path and its high-level summary.")
 def get_project_info() -> Dict[str, str]:
@@ -125,66 +179,92 @@ def get_project_info() -> Dict[str, str]:
         logger.error(f"Error getting project info: {e}")
         return {"name": "", "path": "", "summary": f"Error: Could not retrieve project info: {e}"}
 
-@mcp.tool(name="get_node_source_code_by_id", description="Retrieves the source code for a non-file node (function, class, etc.) by its ID.")
-def get_node_source_code_by_id(node_id: str) -> Dict[str, str]:
+@mcp.tool(name="get_source_code_by_id", description="Retrieves the source code for any node (file, function, class, etc.) by its unique ID.")
+def get_source_code_by_id(node_id: str) -> Dict[str, str]:
     """
-    Retrieves the source code for a given non-file node (function, class, etc.) by its node ID.
+    Retrieves the source code for a given node ID.
+    For file nodes, this returns the entire file content.
+    For other nodes (functions, classes), it returns their body content if available.
     """
     try:
-        # Query for path and body_location using the 'path' property
-        query = f"MATCH (n {{id: '{node_id}'}}) RETURN n.path AS path, n.body_location AS body_location"
-        result = neo4j_mgr.execute_read_query(query)
+        # The synthetic ID for files/folders is based on their path, so this query works for all node types.
+        query = "MATCH (n) WHERE n.id = $node_id RETURN n.path AS path, n.body_location AS body_location, labels(n) as labels"
+        result = neo4j_mgr.execute_read_query(query, {"node_id": node_id})
 
         if not result or not result[0]:
-            return {"id": node_id, "source_code": "Error: Entity not found in graph."}
+            return {"id": node_id, "source_code": "Error: Node not found in graph."}
 
         node_path = result[0].get('path')
         body_location = result[0].get('body_location')
+        labels = result[0].get('labels', [])
 
         if not node_path:
-            return {"id": node_id, "source_code": "Error: Entity has no associated file path."}
+            return {"id": node_id, "source_code": "Error: Node has no associated file path."}
         
-        # Construct absolute path
         abs_file_path = os.path.join(project_root_path, node_path)
 
         if not os.path.exists(abs_file_path):
             return {"id": node_id, "source_code": f"Error: File not found on disk: {abs_file_path}"}
 
-        if body_location and len(body_location) == 4:
-            start_line, _, end_line, _ = body_location
-            source_code_content = _read_file_slice(abs_file_path, start_line, end_line)
-        else:
-            # If no body_location, read the entire file
+        # For FILE nodes, or any node without a specific body location, read the whole file.
+        if 'FILE' in labels or not body_location or len(body_location) != 4:
             with open(abs_file_path, 'r', errors='ignore') as f:
                 source_code_content = f.read()
+        else:
+            # For functions, classes, etc., with a body location, read the slice.
+            start_line, _, end_line, _ = body_location
+            source_code_content = _read_file_slice(abs_file_path, start_line, end_line)
         
         return {"id": node_id, "source_code": source_code_content}
     except Exception as e:
         logger.error(f"Error getting source code for node {node_id}: {e}")
         return {"id": node_id, "source_code": f"Error: Could not retrieve source code: {e}"}
 
-@mcp.tool(name="get_file_source_code_by_path", description="Retrieves the source code for a specific file by its relative path.")
-def get_file_source_code_by_path(file_path: str) -> Dict[str, str]:
+
+@mcp.tool(name="get_source_code_by_path", description="Retrieves the source code of a file by its path.")
+def get_source_code_by_path(file_path: str) -> Dict[str, str]:
     """
     Retrieves the source code for a given file path.
     """
     try:
-        if not file_path:
-            return {"path": file_path, "source_code": "Error: File path is empty."}
-        
-        # Construct absolute path
-        abs_file_path = os.path.join(project_root_path, file_path)
+        if file_path.startswith("/"):
+            abs_file_path = file_path
+        else:
+            abs_file_path = os.path.join(project_root_path, file_path)
 
         if not os.path.exists(abs_file_path):
             return {"path": file_path, "source_code": f"Error: File not found on disk: {abs_file_path}"}
 
-        with open(abs_file_path, 'r', errors='ignore') as f:
+        with open(abs_file_path, 'r', encoding='utf-8', errors='ignore') as f:
             source_code_content = f.read()
         
         return {"path": file_path, "source_code": source_code_content}
     except Exception as e:
         logger.error(f"Error getting source code for file {file_path}: {e}")
         return {"path": file_path, "source_code": f"Error: Could not retrieve source code: {e}"}
+
+@mcp.tool(name="get_semantic_label", description="Retrieves the specific semantic label (e.g., 'FUNCTION', 'FILE') for a node by its ID.")
+def get_semantic_label(node_id: str) -> Dict[str, str]:
+    """
+    Finds the semantic label for a given node ID, excluding generic labels like 'ENTITY'.
+    """
+    try:
+        query = "MATCH (n) WHERE n.id = $node_id RETURN labels(n) AS labels"
+        result = neo4j_mgr.execute_read_query(query, {"node_id": node_id})
+
+        if not result or not result[0] or not result[0].get('labels'):
+            return {"id": node_id, "semantic_label": "Error: Node not found or has no labels."}
+
+        labels = result[0]['labels']
+        semantic_label = [label for label in labels if label != 'ENTITY']
+
+        if not semantic_label:
+            return {"id": node_id, "semantic_label": "Error: No semantic label found."}
+
+        return {"id": node_id, "semantic_label": semantic_label[0]}
+    except Exception as e:
+        logger.error(f"Error getting semantic label for node {node_id}: {e}")
+        return {"id": node_id, "semantic_label": f"Error: Could not retrieve semantic label: {e}"}
 
 @mcp.tool(name="execute_cypher_query", description="Executes a read-only Cypher query against the Neo4j graph and returns the results.")
 def execute_cypher_query(query: str) -> Dict[str, Any]:

@@ -74,6 +74,7 @@ class GraphBuilder:
 
                 self._pass_7_graph_cleanup(neo4j_mgr)
                 self._pass_8_generate_rag(neo4j_mgr)
+                self._pass_9_add_agent_schema(neo4j_mgr)
 
             logger.info("\n✅ All passes complete. Code graph ingestion finished.")
             return 0
@@ -177,15 +178,9 @@ class GraphBuilder:
         logger.info("--- Finished Phase 6 ---")
 
     def _pass_7_graph_cleanup(self, neo4j_mgr):
-        if not self.args.keep_orphans:
-            logger.info("\n--- Starting Phase 7: Cleaning up Orphan Nodes ---")
-            deleted_nodes_count = neo4j_mgr.cleanup_orphan_nodes()
-            logger.info(f"Removed {deleted_nodes_count} orphan nodes.")
-            logger.info(f"Total nodes in graph: {neo4j_mgr.total_nodes_in_graph()}")
-            logger.info(f"Total relationships in graph: {neo4j_mgr.total_relationships_in_graph()}")
-            logger.info("--- Finished Phase 7 ---")
-        else:
-            logger.info("\n--- Skipping Phase 7: Keeping orphan nodes as requested ---")
+        logger.info("\n--- Starting Phase 7: Cleaning up graph ---")
+        neo4j_mgr.wrapup_graph(self.args.keep_orphans)
+        logger.info("--- Finished Phase 7 ---")
 
     def _pass_8_generate_rag(self, neo4j_mgr):
         if not self.args.generate_summary:
@@ -202,6 +197,11 @@ class GraphBuilder:
 
         rag_generator.summarize_code_graph()
         logger.info("\n--- Finished Phase 8 ---")
+
+    def _pass_9_add_agent_schema(self, neo4j_mgr):
+        logger.info("\n--- Starting Phase 9: Adding Agent-Facing Schema ---")
+        neo4j_mgr.add_agent_facing_schema()
+        logger.info("--- Finished Phase 9 ---")
 
 import input_params
 from pathlib import Path

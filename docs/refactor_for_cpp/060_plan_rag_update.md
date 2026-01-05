@@ -13,7 +13,7 @@ With the graph schema now significantly changed to support C++, the RAG (Retriev
 
 ### 3.1. `neo4j_manager.py` (Implemented)
 
-*   In `create_vector_indices`, queries have been added to create vector indexes for all summarizable node types.
+*   In `create_vector_indexes`, queries have been added to create vector indexes for all summarizable node types.
     ```python
     "CREATE VECTOR INDEX method_summary_embeddings IF NOT EXISTS FOR (n:METHOD) ON (n.summaryEmbedding) OPTIONS {...}",
     "CREATE VECTOR INDEX class_summary_embeddings IF NOT EXISTS FOR (n:CLASS_STRUCTURE) ON (n.summaryEmbedding) OPTIONS {...}",

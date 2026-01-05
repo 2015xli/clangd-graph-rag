@@ -34,7 +34,7 @@ The manager contains specific, non-trivial logic required by the incremental upd
 The manager provides helpers for managing the graph's schema and vector indexes.
 
 *   **`get_schema()`**: Uses the APOC library (`apoc.meta.graph` and `apoc.meta.schema`) to introspect the database and return a structured representation of all node labels, properties, and relationships.
-*   **`create_vector_indices()`**: Executes the Cypher commands to create the vector indexes required for semantic search on the `summaryEmbedding` property. It is designed to fail gracefully if the installed version of Neo4j does not support vector indexes (e.g., Community Edition).
+*   **`create_vector_indexes()`**: Executes the Cypher commands to create the vector indexes required for semantic search on the `summaryEmbedding` property. It is designed to fail gracefully if the installed version of Neo4j does not support vector indexes (e.g., Community Edition).
 *   **`delete_property()`**: A powerful helper function that can remove a specific property (e.g., `summaryEmbedding`) from all nodes of a certain label, or from all nodes in the entire graph.
 
 ## 4. Standalone CLI Tool

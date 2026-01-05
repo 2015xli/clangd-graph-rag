@@ -55,7 +55,6 @@ class RagGenerator(RagOrchestrator):
         logging.info(f"  Restored: {self.n_restored}, Generated: {self.n_generated}, Unchanged: {self.n_unchanged}, No children: {self.n_nochildren}, Failed: {self.n_failed}")
 
         self.generate_embeddings()
-        self.neo4j_mgr.create_vector_indices()
 
 
     # --- Pass 1 Methods ---

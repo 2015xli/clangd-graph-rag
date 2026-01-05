@@ -1,6 +1,6 @@
 # Source Code Graph RAG (using Clang/Clangd)
 
-This project builds a Neo4j graph RAG (Retrieval-Augmented Generation) for a C/C++ software project based on clang/clangd, which can be queried for deep software project analysis.
+This project builds a Neo4j graph RAG (Retrieval-Augmented Generation) for a C/C++ software project based on clang/clangd, which can be queried for deep software project analysis. It works well with large codebases like the Linux kernel.
 
 ### Example Questions it Can Help With:
 
@@ -31,6 +31,10 @@ The project provides the graph RAG building and updating tools, along with an ex
 ### Current Schema
 ![Current Schema](docs/neo4j_current_schema.png)
 
+---
+### A benchmark: The Linux Kernel
+
+When building a code graph for the Linux kernel (WSL2 release) on a workstation (12 cores, 64GB RAM), it takes about ~4 hours using 10 parallel worker processes, with peak memory usage at ~32GB. Note this process does not include the LLM summary generation, so the total time (and cost) may vary based on your LLM provider. Local LLM API with Ollama is supported.
 
 ## Table of Contents
 - [Why This Project?](#why-this-project)
@@ -49,6 +53,8 @@ The project provides the graph RAG building and updating tools, along with an ex
 For C/C++ project, Clangd index YAML file is an intermediate data format from [Clangd-indexer](https://clangd.llvm.org/design/indexing.html) containing detailed syntactical information used by language servers for code navigation and completion. However, while powerful for IDEs, the raw index data doesn't expose the full graph structure of a codebase (especially the call graph) or integrate the semantic understanding that Large Language Models (LLMs) can leverage.
 
 This project fills that gap. It ingests Clangd index data into a Neo4j graph database, reconstructing the complete file, symbol, and call graph hierarchy. It then enriches this structure with AI-generated summaries and vector embeddings, transforming the raw compiler index into a semantically rich knowledge graph. In essence, `clangd-graph-rag` extends Clangd's powerful foundation into an AI-ready code graph, enabling LLMs to reason about a codebase's structure and behavior for advanced tasks like in-depth code analysis, refactoring, and automated reviewing.
+
+Note, this is an independent project and is not affiliated with the official Clang or clangd projects.
 
 ## Key Features & Design Principles
 
@@ -95,11 +101,11 @@ To successfully build the graph, this project leverages the power of the LLVM ec
 ### Other installation dependencies
 1. **clang**
  
-   The project requires a clang installed on your system (that has libclang included). Your system usually has it by default. If not, you can download it from the official [clang website](https://clang.llvm.org/)， version >= 21.0.0.
+   The project requires a clang installed on your system (that has libclang included). Your system usually has it by default. If not, you can download it from the official [clang website](https://clang.llvm.org/)， version >= 21.0.0. (The project originally targeted clang version >= 16.x, but versions below 21.0.0 are not actively maintained.)
 
 2. **Neo4j**
 
-   The project requires a Neo4j database to store the graph data. You can download it from the official [Neo4j website](https://neo4j.com/download/), version >= 5.0.0.
+   The project requires a Neo4j database to store the graph data. You can download it from the official [Neo4j website](https://neo4j.com/download/), version >= 5.0.0. (I used to work with version 4.x. Not sure if it still works.)
 
 3. **Python**
 
@@ -107,7 +113,7 @@ To successfully build the graph, this project leverages the power of the LLVM ec
    ```
    pip install -r requirements.txt
    ```
-   If you only want to build the graphRAG without the example AI agent (developed using Google ADK), `python 3.11` is enough.
+   If you only want to build the graphRAG without the example AI agent (which is developed using Google ADK), `python 3.11` is enough. You need remove the `google-adk` dependency from `requirements.txt`, and maintain your own requirements file.
 
 ## Primary Usage
 
@@ -122,10 +128,10 @@ For all the scripts that can run standalone, you can always use --help to see th
 Used for the initial, from-scratch ingestion of a project. Orchestrated by `clangd_graph_rag_builder.py`.
 
 ```bash
-# Basic build (graph structure only). You can generate LLM summary RAG data with a separate step later.
+# Basic build (graph structure only, no LLM summary RAG data, which you can generate separately later)
 python3 clangd_graph_rag_builder.py /path/to/clangd-index.yaml /path/to/project/
 
-# Build the graph with LLM summary RAG data generation (note: the default uses fake LLM unless you specify --llm-api)
+# Build the graph with LLM summary RAG data generation (note: the default uses fake LLM unless you specify --llm-api <your-llm-api>)
 python3 clangd_graph_rag_builder.py /path/to/clangd-index.yaml /path/to/project/ --generate-summary
 ```
 Please check the detailed design document for more details: [Clangd Graph RAG Builder](./docs/summary_clangd_graph_rag_builder.md)
@@ -153,16 +159,18 @@ Please check the detailed design document for more details: [Clangd Graph RAG Up
 
 ### Common Options
 
-Both the builder and updater accept a wide range of common arguments, which are centralized in `input_params.py`. These include:
+You can always use `--help` option to check all the available options for any script. Here is a list of commonly used options.
+
+Both the builder, updater and other scripts accept a wide range of common arguments, which are centralized in `input_params.py`. These include:
 
 *   **Compilation Arguments**:
     *   `--compile-commands`: Path to the `compile_commands.json` file. This file is essential for the new accurate parsing engine. By default, the tool searches for `compile_commands.json` in the project's root directory.
 *   **RAG Arguments**: Control summary and embedding generation (e.g., `--generate-summary`, `--llm-api`).
-*   **Worker Arguments**: Configure parallelism (e.g., `--num-parse-workers`, `--num-remote-workers`).
+*   **Worker Arguments**: Configure parallelism depends on your system resources
+    *   `--num-parse-workers`: Number of parallel parsing worker processes for YAML index file and source file parsing, in case you have a large codebase with lots of files (like Linux kernel). This may need to be tuned based on your system resources. Usually set to a number close to the number of available CPU cores.
+    *   `--num-remote-workers`: Number of remote worker threads for LLM API calls. This is for IO bound operation, can be set to a big number. May use coroutines in future, but threads works fine for now.
 *   **Batching Arguments**: Tune performance for database ingestion (e.g., `--ingest-batch-size`, `--cypher-tx-size`).
-*   **Ingestion Strategy Arguments**: Choose different algorithms for relationship creation (e.g., `--defines-generation`).
 
-Run any script with `--help` to see all available options.
 
 ## Interacting with the Graph: AI Agent
 
@@ -233,7 +241,7 @@ For a comprehensive overview of the project's architecture, design principles, a
 
 ### Contributing
 
-Contributions are welcome! This includes bug reports, feature requests, and pull requests. Feel free to try `clangd-graph-rag` on your own `clangd`-indexed projects and share your feedback.
+Contributions are welcome! This includes bug reports, feature requests, and pull requests. Feel free to try `clangd-graph-rag` on your own `clang` built projects and share your feedback.
 
 ### Future Work
 

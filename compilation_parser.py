@@ -803,20 +803,33 @@ class ClangParser(CompilationParser):
             return os.path.join(resource_dir, 'include')
         except (FileNotFoundError, subprocess.CalledProcessError): return None
 
+    def _get_cmd_file_realpath(self, cmd):
+        file = cmd.filename
+        if not os.path.isabs(file):
+            file = os.path.join(cmd.directory, file)
+        return os.path.realpath(file)
+
+
     def parse(self, files_to_parse: List[str], num_workers: int = 1):
         self.source_spans.clear(); self.include_relations.clear()
         
         source_files = [f for f in files_to_parse if f.lower().endswith(CompilationParser.ALL_SOURCE_EXTENSIONS)]
         if not source_files: logger.warning("ClangParser found no source files to parse."); return
 
+        cmd_files = {}
+        for cmd in self.db.getAllCompileCommands():
+            file_key = self._get_cmd_file_realpath(cmd)
+            cmd_files[file_key] = cmd
+
         compile_entries = []
         for file_path in source_files:
-            cmds = self.db.getCompileCommands(file_path)
-            if not cmds: logger.warning(f"Could not get compile commands for {file_path}"); continue
+            cmd = cmd_files.get(file_path)
+            if not cmd: logger.warning(f"Could not get compile commands for {file_path}"); continue
+    
             compile_entries.append({
                 'file': file_path,
-                'directory': cmds[0].directory,
-                'arguments': list(cmds[0].arguments)[1:],
+                'directory': cmd.directory,
+                'arguments': list(cmd.arguments)[1:],
             })
 
         if num_workers < 1:

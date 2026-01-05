@@ -47,12 +47,17 @@ class GraphUpdater:
                 return 1
             self.neo4j_mgr = neo4j_mgr
 
+            # Pre-update: Remove agent-facing schema to ensure a clean slate for the build logic
+            self.neo4j_mgr.remove_agent_facing_schema()
+
             if not self.neo4j_mgr.verify_project_path(self.project_path):
                 sys.exit(1)
 
             old_commit, new_commit = self._resolve_commit_range()
             if old_commit == new_commit:
                 logger.info("Database is already up-to-date. No update needed.")
+                # Post-update: Re-add the agent schema even if no update happened, in case it was missing
+                self.neo4j_mgr.add_agent_facing_schema()
                 return
 
             logger.info(f"Processing changes from {old_commit} to {new_commit}")
@@ -67,6 +72,8 @@ class GraphUpdater:
             if not dirty_files and not git_changes['deleted']:
                 logger.info("No relevant source file changes detected. Updating commit hash and exiting.")
                 self.neo4j_mgr.update_project_node(self.project_path, {'commit_hash': new_commit})
+                # Post-update: Re-add the agent schema before exiting
+                self.neo4j_mgr.add_agent_facing_schema()
                 return
 
             logger.info(f"Found {len(dirty_files)} files to re-ingest and {len(git_changes['deleted'])} files to delete.")
@@ -104,6 +111,9 @@ class GraphUpdater:
             # Phase 7: Run targeted RAG update if any symbols were re-ingested  
             if mini_symbol_parser:
                 self._regenerate_summary(mini_symbol_parser, git_changes, impacted_from_graph)
+
+            # Post-update: Add the agent-facing schema elements
+            self.neo4j_mgr.add_agent_facing_schema()
 
         logger.info("\n✅ Incremental update complete.")
 
@@ -160,32 +170,8 @@ class GraphUpdater:
             self.neo4j_mgr.purge_files(deleted_files_rel)
         
     def _cleanup_graph(self):
-        neo4j_mgr = self.neo4j_mgr
-        if not self.args.keep_orphans:
-            logger.info("\n--- Phase 6: Cleaning up Orphan Nodes ---")
-            deleted_nodes_count = neo4j_mgr.cleanup_orphan_nodes()
-            logger.info(f"Removed {deleted_nodes_count} orphan nodes.")
-        else:
-            logger.info("\n--- Skipping Phase 6: Keeping orphan nodes as requested ---")
-        
-        # NOTE: It is fine to prune the empty NAMESPACE nodes. 
-        # We just keep them here since they can be regarded as kinds of defines.
-
-        #deleted_ns = neo4j_mgr.cleanup_empty_namespaces_recursively()
-        #logger.info(f"Removed {deleted_ns} empty NAMESPACE nodes.")
-        
-        # NOTE: Some files although don't define/declare any symbols, are still needed to be included in the graph
-        # because they are source files anyway, such as a file has only "#PRAGMA ONCE"
-        # or they have function declarations while those functions have been defined in other files.
-        # For the latter case, we only keep the function definition relationships in the graph currently.
-        # In future, we may include more nodes in the graph such as macro definitions, etc. 
-        # Then those files will have define/declare relationships to other nodes.
-        
-        #deleted_files, deleted_folders = neo4j_mgr.cleanup_empty_paths_recursively()
-        #logger.info(f"Removed {deleted_files} empty FILE nodes and {deleted_folders} empty FOLDER nodes.")
-        
-        logger.info(f"Total nodes in graph: {neo4j_mgr.total_nodes_in_graph()}")
-        logger.info(f"Total relationships in graph: {neo4j_mgr.total_relationships_in_graph()}")
+        logger.info("\n--- Phase 6: Cleaning up graph ---")
+        self.neo4j_mgr.wrapup_graph(self.args.keep_orphans)
 
     def _regenerate_summary(self, mini_symbol_parser: SymbolParser, git_changes: Dict[str, List[str]], impacted_from_graph: Set[str]):
         if not self.args.generate_summary:

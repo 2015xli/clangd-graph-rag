@@ -126,6 +126,7 @@ class Neo4jManager:
         constraints = [
             "CREATE CONSTRAINT IF NOT EXISTS FOR (f:FILE) REQUIRE f.path IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (f:FOLDER) REQUIRE f.path IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:NAMESPACE) REQUIRE n.qualified_name IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (fn:FUNCTION) REQUIRE fn.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (ds:DATA_STRUCTURE) REQUIRE ds.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (c:CLASS_STRUCTURE) REQUIRE c.id IS UNIQUE",
@@ -133,7 +134,6 @@ class Neo4jManager:
             "CREATE CONSTRAINT IF NOT EXISTS FOR (f:FIELD) REQUIRE f.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (v:VARIABLE) REQUIRE v.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (n:NAMESPACE) REQUIRE n.id IS UNIQUE",
-           # "CREATE CONSTRAINT IF NOT EXISTS FOR (n:NAMESPACE) REQUIRE n.qualified_name IS UNIQUE",
         ]
         with self.driver.session() as session:
             for constraint in constraints:
@@ -209,9 +209,12 @@ class Neo4jManager:
         return all_counters
 
     def execute_autocommit_query(self, cypher: str, params: Dict = None) -> Any: # Returns summary.counters
+        counters = None
         with self.driver.session() as session:
             result = session.run(cypher, **(params or {}))
-            return result.consume().counters
+            counters = result.consume().counters
+        
+        return counters
 
     def execute_read_query(self, cypher: str, params: dict = None) -> list[dict]:
         """Executes a read query and returns a list of result records."""
@@ -253,6 +256,34 @@ class Neo4jManager:
         with self.driver.session() as session:
             result = session.run(query)
             return result.single()[0]
+
+    def wrapup_graph(self, keep_orphans: bool):
+        if not keep_orphans:
+            deleted_nodes_count = self.cleanup_orphan_nodes()
+            logger.info(f"Removed {deleted_nodes_count} orphan nodes.")
+
+            # NOTE: It is fine to prune the empty NAMESPACE nodes. 
+            # We just keep them here since they can be regarded as kinds of defines.
+
+            #deleted_ns = neo4j_mgr.cleanup_empty_namespaces_recursively()
+            #logger.info(f"Removed {deleted_ns} empty NAMESPACE nodes.")
+            
+            # NOTE: Some files although don't define/declare any symbols, are still needed to be included in the graph
+            # because they are source files anyway, such as a file has only "#PRAGMA ONCE"
+            # or they have function declarations while those functions have been defined in other files.
+            # For the latter case, we only keep the function definition relationships in the graph currently.
+            # In future, we may include more nodes in the graph such as macro definitions, etc. 
+            # Then those files will have define/declare relationships to other nodes.
+            
+            #deleted_files, deleted_folders = neo4j_mgr.cleanup_empty_paths_recursively()
+            #logger.info(f"Removed {deleted_files} empty FILE nodes and {deleted_folders} empty FOLDER nodes.")
+            
+        else:
+            logger.info("Skipping cleanup of orphan nodes as requested.")
+
+        logger.info(f"Total nodes in graph: {self.total_nodes_in_graph()}")
+        logger.info(f"Total relationships in graph: {self.total_relationships_in_graph()}")
+       
 
     def purge_files(self, file_paths: List[str]) -> Tuple[int, int]:
         """Deletes FILE nodes for the given paths. Not pruning empty folders."""
@@ -347,16 +378,23 @@ class Neo4jManager:
         # The reason is, we use full_SymbolParser for parental relationships construction in SourceSpanProvider,
         # so even if some children symbols in the subgraph are defined in other files (instead of the deleted and dirty ones),
         # we still can find them and reconstruct the relationships when we build the mini_SymbolParser.
-
-        query = """
-        UNWIND $paths AS path
-        MATCH (file:FILE {path: path})-[:DEFINES]->(s)
-        //CALL apoc.path.subgraphNodes(s, {
-        //    relationshipFilter: "HAS_METHOD|HAS_FIELD|HAS_NESTED>"
-        //}) YIELD node
-        //DETACH DELETE node
-        DETACH DELETE s
+        # Anyway, the query_delete_transitive_subgraph is not used for the moment.
+        query_delete_transitive_subgraph = """
+            UNWIND $paths AS path
+            MATCH (file:FILE {path: path})-[:DEFINES]->(s)
+            CALL apoc.path.subgraphNodes(s, {
+                relationshipFilter: "HAS_METHOD|HAS_FIELD|HAS_NESTED>"
+            }) YIELD node
+            DETACH DELETE node
         """
+
+        query_delete_directly_defined_symbols = """
+            UNWIND $paths AS path
+            MATCH (file:FILE {path: path})-[:DEFINES]->(s)
+            DETACH DELETE s
+        """
+        query = query_delete_directly_defined_symbols
+
         with self.driver.session() as session:
             result = session.run(query, paths=file_paths)
             deleted_symbols = result.consume().counters.nodes_deleted
@@ -424,25 +462,87 @@ class Neo4jManager:
             logger.info(f"Purged {count} :INCLUDES relationships from {len(file_paths)} files.")
             return count
 
-    def create_vector_indices(self) -> None:
+    def create_vector_indexes(self) -> None:
         """Creates vector indices for summary embeddings."""
         index_queries = [
-            "CREATE VECTOR INDEX function_summary_embeddings IF NOT EXISTS FOR (n:FUNCTION) ON (n.summaryEmbedding) OPTIONS {indexConfig: {`vector.dimensions`: 384, `vector.similarity_function`: 'cosine'}}",
-            "CREATE VECTOR INDEX method_summary_embeddings IF NOT EXISTS FOR (n:METHOD) ON (n.summaryEmbedding) OPTIONS {indexConfig: {`vector.dimensions`: 384, `vector.similarity_function`: 'cosine'}}",
-            "CREATE VECTOR INDEX class_summary_embeddings IF NOT EXISTS FOR (n:CLASS_STRUCTURE) ON (n.summaryEmbedding) OPTIONS {indexConfig: {`vector.dimensions`: 384, `vector.similarity_function`: 'cosine'}}",
-            "CREATE VECTOR INDEX namespace_summary_embeddings IF NOT EXISTS FOR (n:NAMESPACE) ON (n.summaryEmbedding) OPTIONS {indexConfig: {`vector.dimensions`: 384, `vector.similarity_function`: 'cosine'}}",
-            "CREATE VECTOR INDEX file_summary_embeddings IF NOT EXISTS FOR (n:FILE) ON (n.summaryEmbedding) OPTIONS {indexConfig: {`vector.dimensions`: 384, `vector.similarity_function`: 'cosine'}}",
-            "CREATE VECTOR INDEX folder_summary_embeddings IF NOT EXISTS FOR (n:FOLDER) ON (n.summaryEmbedding) OPTIONS {indexConfig: {`vector.dimensions`: 384, `vector.similarity_function`: 'cosine'}}",
+            "CREATE VECTOR INDEX summary_embeddings IF NOT EXISTS FOR (e:ENTITY) ON (e.summaryEmbedding) OPTIONS {indexConfig: {`vector.dimensions`: 384, `vector.similarity_function`: 'cosine'}}",
         ]
+
         with self.driver.session() as session:
             logger.info("Creating vector indices for summary embeddings...")
             for query in index_queries:
                 try:
                     session.run(query)
                 except Exception as e:
-                    logger.warning(f"Could not create vector index. This is expected on Neo4j Community Edition. Error: {e}")
+                    logger.warning(f"Could not create vector index. Error: {e}")
                     break
             logger.info("Vector index setup complete.")
+
+    def remove_agent_facing_schema(self):
+        """
+        Removes all agent-specific schema additions (ENTITY label, synthetic IDs, unified indexes)
+        and restores the original per-label constraints for the build process.
+        """
+        logger.info("Removing agent-facing schema additions...")
+        # 1. Drop unified vector index
+        self.reset_vector_indexes()
+
+        # 2. Drop all constraints (including the one on ENTITY)
+        self.reset_constraints()
+
+        # 3. Remove synthetic 'id' property from nodes that have it
+        # We target FILE and FOLDER specifically as they are the ones we added it to.
+        with self.driver.session() as session:
+            id_removal_query = """
+            CALL apoc.periodic.iterate(
+                "MATCH (n) WHERE n:FILE OR n:FOLDER RETURN n",
+                "REMOVE n.id",
+                {batchSize: 10000, parallel: true}
+            )
+            """
+            session.run(id_removal_query)
+            logger.info("Removed synthetic 'id' properties from FILE and FOLDER nodes.")
+
+        # 4. Remove the ENTITY label from all nodes
+        with self.driver.session() as session:
+            label_removal_query = """
+            CALL apoc.periodic.iterate(
+                "MATCH (e:ENTITY) RETURN e",
+                "REMOVE e:ENTITY",
+                {batchSize: 10000, parallel: true}
+            )
+            """
+            session.run(label_removal_query)
+            logger.info("Removed :ENTITY label from all relevant nodes.")
+
+        # 5. Re-create the original, per-label constraints needed for the build
+        logger.info("Restoring original per-label constraints for the build process...")
+        self.create_constraints()
+        logger.info("Agent-facing schema removed successfully.")
+
+
+    def add_agent_facing_schema(self):
+        """
+        Adds the agent-facing schema elements: synthetic IDs, ENTITY label,
+        unified constraints, and unified vector index.
+        """
+        logger.info("Adding agent-facing schema...")
+        # 1. Add synthetic IDs to nodes that don't have one
+        self.add_synthetic_ids_if_missing()
+
+        # 2. Add the ENTITY label to all nodes
+        self.add_entity_label_to_all_nodes()
+
+        # 3. Swap per-label ID constraints for a single ENTITY ID constraint
+        self.migrate_per_label_id_to_global_id()
+
+        # 4. Create the single, unified vector index on the ENTITY label, only if embeddings exist
+        if self.check_property_exists('summaryEmbedding', labels=['ENTITY']):
+            self.create_vector_indexes()
+        else:
+            logger.info("No 'summaryEmbedding' property found on ENTITY nodes. Skipping vector index creation.")
+        
+        logger.info("Agent-facing schema added successfully.")
 
     def drop_vector_indices(self) -> None:
         """Drops existing vector indices for summary embeddings."""
@@ -464,7 +564,7 @@ class Neo4jManager:
     def rebuild_vector_indices(self) -> None:
         """Drops and recreates all vector indices for summary embeddings."""
         self.drop_vector_indices()
-        self.create_vector_indices()
+        self.create_vector_indexes()
 
     def get_vector_indexes(self) -> dict:
         """Fetches the vector index for summary embeddings."""
@@ -508,6 +608,136 @@ class Neo4jManager:
             logger.error(f"Failed to fetch schema. Ensure APOC plugin is installed. Error: {e}")
             return {"error": str(e)}
 
+    def check_property_exists(self, property_key: str, labels: Optional[List[str]] = None) -> bool:
+        """
+        Checks if any node in the graph, optionally filtered by label(s), has the given property key.
+
+        Args:
+            property_key (str): The name of the property to check for.
+            labels (Optional[List[str]]): A list of labels to filter nodes by.
+                                     If provided, nodes must have ALL specified labels.
+
+        Returns:
+            bool: True if the property exists on at least one matching node, False otherwise.
+        """
+        if labels:
+            label_selector = ":" + "|".join(labels)
+            target_clause = f"n{label_selector}"
+            log_msg = f"Checking for property '{property_key}' on nodes with labels {target_clause}..."
+        else:
+            target_clause = "n"
+            log_msg = f"Checking for existence of property '{property_key}' in the graph..."
+
+        logger.info(log_msg)
+        
+        query = f"MATCH ({target_clause}) WHERE n.{property_key} IS NOT NULL RETURN n LIMIT 1"
+        
+        try:
+            result = self.execute_read_query(query)
+            if result:
+                logger.info(f"Property '{property_key}' found on matching nodes.")
+                return True
+            else:
+                logger.info(f"Property '{property_key}' not found on matching nodes.")
+                return False
+        except Exception as e:
+            logger.warning(f"Query for property '{property_key}' failed: {e}. Assuming it does not exist.")
+            return False
+
+    def get_labels_without_id_property(self) -> set[str]:
+        """
+        Returns node labels that do not declare an `id` property,
+        based on apoc.meta.schema() output by calling get_schema().
+        """
+        missing = set()
+
+        meta = self.get_schema().get("node_properties_meta", [])
+        if not meta:
+            return missing
+
+        value = meta[0].get("value", {})
+
+        for label, entry in value.items():
+            if entry.get("type") != "node":
+                continue
+
+            properties = entry.get("properties", {})
+            if "id" not in properties:
+                if "path" not in properties:
+                    raise ValueError(f"Node label '{label}' does not have either an 'id' property or a 'path' property.")
+
+                missing.add(label)
+
+        return missing
+
+    def add_synthetic_ids_if_missing(self) -> int:
+        """
+        Add synthetic ids to node labels that lack `id`,
+        """
+
+        labels_missing_id = self.get_labels_without_id_property()
+
+        updated = []
+        total = 0
+        # NOTE: nodes without `id` property are expected to have a `path` property (e.g. `FILE`, `FOLDER` nodes)
+        with self.driver.session() as session:
+            for label in labels_missing_id:
+                query = f"""
+                MATCH (n:{label})
+                WHERE n.id IS NULL
+                WITH n, "{label}://" + n.path AS full_path
+                SET n.id = apoc.util.md5([full_path])
+                RETURN count(n)
+                """
+                result = session.run(query)
+                record = result.single()
+                count = record.value() if record else 0
+                logger.info(f"Added synthetic ids to {count} nodes with label '{label}'.")
+                total += count
+                updated.append(label)
+
+        logger.info(f"Added synthetic ids to {total} nodes of labels {updated}.")
+        return total
+
+    def add_entity_label_to_all_nodes(self) -> int:
+        """
+        Add ENTITY label to all nodes.
+        """
+        with self.driver.session() as session:
+            query = """
+            CALL apoc.periodic.iterate(
+                "MATCH (n) WHERE NOT n:ENTITY RETURN n",
+                "SET n:ENTITY",
+                {batchSize: 10000, parallel: true}
+            )
+            YIELD total, committedOperations
+            RETURN total, committedOperations
+            """
+            result = session.run(query)
+            record = result.single()
+            if record:
+                logger.info(f"Tried to add ENTITY label to {record['total']} nodes, {record['committedOperations']} successful updates.")
+            else:
+                logger.info("No nodes added ENTITY label.")
+            return record['total']
+
+    def migrate_per_label_id_to_global_id(self):
+        """
+        Drop the per-label id unique constraint and add global id unique constraint.
+        """
+        self.reset_constraints()
+        constraints = [
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (f:FILE) REQUIRE f.path IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (f:FOLDER) REQUIRE f.path IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:NAMESPACE) REQUIRE n.qualified_name IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (e:ENTITY) REQUIRE e.id IS UNIQUE",
+        ]
+        with self.driver.session() as session:
+            for constraint in constraints:
+                session.run(constraint)
+        
+        logger.info("Shifted per-label id to global ENTITY id.")
+
     def delete_property(self, label: Optional[str], property_key: str, all_labels: bool = False) -> int:
         """
         Deletes a property from nodes with a given label, or from all nodes if all_labels is True.
@@ -539,42 +769,17 @@ class Neo4jManager:
             output_only_relations = args.only_relations
             output_with_node_counts = args.with_node_counts
 
-        # --- Node Properties Section ---
-        if not output_only_relations:
-            output_lines.append("Node Properties:")
-            
-            # Group properties by label from apoc.meta.schema() output
-            props_by_label = defaultdict(dict)
-            # The apoc.meta.schema() returns a list with one dict, where the actual schema is under 'value'
-            apoc_schema_data = schema_info.get("node_properties_meta", [])
-            if apoc_schema_data and isinstance(apoc_schema_data[0], dict) and "value" in apoc_schema_data[0]:
-                for label, details in apoc_schema_data[0]["value"].items():
-                    if details.get("type") == "node": # Ensure it's a node schema
-                        for prop_key, prop_details in details.get("properties", {}).items():
-                            props_by_label[label][prop_key] = prop_details
-
-            # Get node counts from graph_meta for display
-            node_counts = {}
-            for node_obj in schema_info['graph_meta'].get("nodes", []):
-                if node_obj.get('name'): # 'name' is the label in this context
-                    node_counts[node_obj['name']] = node_obj.get('count', 0)
-
-            for label in sorted(props_by_label.keys()):
-                count_str = f" (count: {node_counts.get(label, 0)})" if output_with_node_counts else ""
-                output_lines.append(f"  ({label}){count_str}")
-                for prop_key in sorted(props_by_label[label].keys()):
-                    prop_details = props_by_label[label][prop_key]
-                    prop_type = prop_details.get("type", "unknown")
-                    is_indexed = " (INDEXED)" if prop_details.get("indexed") else ""
-                    is_unique = " (UNIQUE)" if prop_details.get("unique") else ""
-                    output_lines.append(f"    {prop_key}: {prop_type}{is_indexed}{is_unique}")
-                    # Collect unique property keys for later explanation
-                    if prop_key not in all_present_property_keys:
-                        all_present_property_keys.add(prop_key)
-            output_lines.append("") # Blank line for separation
+        # --- Preamble Notes for Agent ---
+        schema_notes = [
+            "## Schema Notes:",
+            "- All nodes have an 'ENTITY' label (besides their specific semantic labels) and a globally unique 'id' property.",
+            "- For all other graph traversals, prefer using the specific semantic labels shown below.",
+            ""
+        ]
+        output_lines.extend(schema_notes)
 
         # --- Relationships Section ---
-        output_lines.append("Relationships:")
+        output_lines.append("## Relationships:")
         
         # Group relationships by (start_label, rel_type)
         grouped_relations = defaultdict(lambda: defaultdict(set)) # (start_label) -> (rel_type) -> set(end_labels)
@@ -594,8 +799,12 @@ class Neo4jManager:
 
         # Format and print grouped relationships
         for start_label in sorted(grouped_relations.keys()):
+            if start_label == 'ENTITY' or start_label.startswith('_'):
+                continue
             for rel_type in sorted(grouped_relations[start_label].keys()):
-                end_labels = sorted(list(grouped_relations[start_label][rel_type]))
+                end_labels = sorted([lbl for lbl in grouped_relations[start_label][rel_type] if lbl != 'ENTITY' and not lbl.startswith('_')])
+                if not end_labels:
+                    continue
                 end_labels_str = "|".join(end_labels)
                 
                 # Find count for the start_label if available
@@ -604,13 +813,49 @@ class Neo4jManager:
 
                 output_lines.append(f"  ({start_label}){count_str} -[:{rel_type}]-> ({end_labels_str})")
 
+        # --- Node Properties Section ---
+        if not output_only_relations:
+            output_lines.append("\n## Node Properties:")
+            
+            # Group properties by label from apoc.meta.schema() output
+            props_by_label = defaultdict(dict)
+            # The apoc.meta.schema() returns a list with one dict, where the actual schema is under 'value'
+            apoc_schema_data = schema_info.get("node_properties_meta", [])
+            if apoc_schema_data and isinstance(apoc_schema_data[0], dict) and "value" in apoc_schema_data[0]:
+                for label, details in apoc_schema_data[0]["value"].items():
+                    if details.get("type") == "node": # Ensure it's a node schema
+                        for prop_key, prop_details in details.get("properties", {}).items():
+                            props_by_label[label][prop_key] = prop_details
+
+            # Get node counts from graph_meta for display
+            node_counts = {}
+            for node_obj in schema_info['graph_meta'].get("nodes", []):
+                if node_obj.get('name'): # 'name' is the label in this context
+                    node_counts[node_obj['name']] = node_obj.get('count', 0)
+
+            for label in sorted(props_by_label.keys()):
+                if label == 'ENTITY' or label.startswith('_'):
+                    continue
+                count_str = f" (count: {node_counts.get(label, 0)})" if output_with_node_counts else ""
+                output_lines.append(f"  ({label}){count_str}")
+                for prop_key in sorted(props_by_label[label].keys()):
+                    prop_details = props_by_label[label][prop_key]
+                    prop_type = prop_details.get("type", "unknown")
+                    is_indexed = " (INDEXED)" if prop_details.get("indexed") else ""
+                    is_unique = " (UNIQUE)" if prop_details.get("unique") else ""
+                    output_lines.append(f"    {prop_key}: {prop_type}{is_indexed}{is_unique}")
+                    # Collect unique property keys for later explanation
+                    if prop_key not in all_present_property_keys:
+                        all_present_property_keys.add(prop_key)
+            output_lines.append("") # Blank line for separation
+
         # --- Property Explanations Section ---
         if not output_only_relations and all_present_property_keys:
-            output_lines.append("\nProperty Explanations:")
+            output_lines.append("\n## Property Explanations:")
             property_explanations = {
                 "id": "Unique identifier for the node.",
                 "name": "Name of the entity (e.g., function name, file name).",
-                "path": "Relative path to the project root if it is within the project folder. Otherwise, it is absolute path, including the PROJECT node",
+                "path": "Relative path to the project root if it is within the project folder. The PROJECT node has the absolute path of the project root.",
                 "name_location": "Entity's name location in the file, showing the start position: [line, column].",
                 "body_location": "Entity's body location in the file, showing the range: [start_line, start_column, end_line, end_column].",
                 "code_hash": "MD5 hashing value of entity's original source code body. Used to detect changed code.",
@@ -621,10 +866,9 @@ class Neo4jManager:
                 "return_type": "Return type of a function/method.",
                 "signature": "Full signature of a function/method.",
                 "has_definition": "Boolean indicating if a symbol has a definition/implementation, not just a declaration.",
-                "code_analysis": "LLM-generated analysis of the code's literal functionality.",
-                "summary": "LLM-generated context-aware summary of the node's purpose.",
-                "summaryEmbedding": "Vector embedding of the 'summary' for similarity search.",
-                "file_path": "Absolute path to the file containing the symbol."
+                "code_analysis": "Analysis of the entity's code literal functionality.",
+                "summary": "Context-aware summary of the node entity's purpose.",
+                "summaryEmbedding": "Vector embedding of the 'summary' for semantic similarity search.",
             }
             #for prop_key in sorted(list(all_present_property_keys)):
             for prop_key, explanation in property_explanations.items():
