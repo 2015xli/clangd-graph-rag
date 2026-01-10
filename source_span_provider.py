@@ -14,9 +14,9 @@ import hashlib
 from typing import Optional, Dict, List, Set
 from urllib.parse import urlparse, unquote
 
-from clangd_index_yaml_parser import SymbolParser, Symbol, Location, RelativeLocation
+from clangd_index_yaml_parser import SymbolParser, Symbol, Reference, Location, RelativeLocation
 from compilation_manager import CompilationManager
-from compilation_parser import SourceSpan, SpanTreeNode, CompilationParser
+from compilation_parser import SourceSpan, CompilationParser
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -131,7 +131,7 @@ class SourceSpanProvider:
         # Add the new synthetic symbols to the main symbol parser
         self.symbol_parser.symbols.update(synthetic_symbols)
         logger.info(f"Matched and enriched {matched_body_count} existing symbols; added {len(synthetic_symbols)} synthetic symbols.")
-        logger.info(f"Assigned parent_id to symbols: {assigned_parent_in_sym} by ref, {assigned_sym_parent_in_span} by span sym id, {assigned_syn_parent_in_span} by span syn id.")
+        logger.info(f"Assigned parent_id to symbols: {assigned_parent_in_sym} by ref, {assigned_sym_parent_in_span} by span sym id, {assigned_syn_parent_in_span} by span synth id.")
         del file_span_data_copy, synthetic_symbols
         gc.collect()
 
@@ -236,11 +236,50 @@ class SourceSpanProvider:
         del file_span_data, synthetic_id_to_index_id
         gc.collect()
 
+        # Pass 4: Enrich symbols with static call relations found by the parser
+        self._enrich_with_static_calls()
+
     def get_matched_count(self) -> int:
         return self.matched_count
 
     def get_assigned_count(self) -> int:
         return self.assigned_count
+
+    def _enrich_with_static_calls(self):
+        """
+        Injects static call relations (found by compilation_parser) as synthetic
+        references into the Symbol objects.
+        """
+        #("\n--- Starting Pass 4: Enriching with Static Call Relations ---"
+        static_calls = self.compilation_manager.get_static_call_relations()
+        if not static_calls:
+            logger.info("No static call relations found to enrich.")
+            return
+
+        # The main symbol dictionary is already keyed by ID (which is the USR).
+        # No need to build a new map.
+
+        injected_ref_count = 0
+        for caller_usr, callee_usr in static_calls:
+            # Look up the callee symbol directly in the main dictionary
+            callee_symbol = self.symbol_parser.symbols.get(callee_usr)
+
+            if callee_symbol:
+                # Create a synthetic reference. The location is not critical as the
+                # call graph builder primarily uses kind and container_id.
+                dummy_location = Location(file_uri='', start_line=0, start_column=0, end_line=0, end_column=0)
+
+                # Kind 28 corresponds to a spelled, non-macro function call in modern clangd.
+                new_ref = Reference(
+                    kind=28,
+                    location=dummy_location,
+                    container_id=caller_usr
+                )
+                callee_symbol.references.append(new_ref)
+                injected_ref_count += 1
+
+        logger.info(f"Successfully injected {injected_ref_count} static call references.")
+        #("--- Finished Pass 4 ---")
 
 
     # ============================================================

@@ -45,7 +45,7 @@ class CacheManager:
         oldest_hex = f"{int(oldest_mtime):08x}"
         return f"parsing_{self.project_name}_time_{latest_hex}_{oldest_hex}.pkl"
 
-    def find_and_load_git_cache(self, new_commit: str, old_commit: str = None) -> Optional[Tuple[List[Dict], Set[IncludeRelation]]]:
+    def find_and_load_git_cache(self, new_commit: str, old_commit: str = None) -> Optional[Tuple[List[Dict], Set[IncludeRelation], Set[Tuple[str, str]]]]:
         """Finds and loads a cache based on Git commit hashes."""
         filename = self._construct_git_filename(new_commit, old_commit)
         cache_path = os.path.join(self.cache_directory, filename)
@@ -61,7 +61,11 @@ class CacheManager:
             if (cached_data.get("new_commit") == new_commit and
                 cached_data.get("old_commit") == old_commit):
                 logger.info(f"Found and validated Git-based cache: {filename}")
-                return cached_data.get("source_spans", []), cached_data.get("include_relations", set())
+                return (
+                    cached_data.get("source_spans", []),
+                    cached_data.get("include_relations", set()),
+                    cached_data.get("static_call_relations", set()) # Add new data
+                )
             else:
                 logger.warning(f"Cache file {filename} has mismatched full commit hashes. Ignoring.")
                 return None
@@ -69,7 +73,7 @@ class CacheManager:
             logger.warning(f"Cache file {cache_path} is corrupted: {e}. Ignoring.")
             return None
 
-    def find_and_load_mtime_cache(self, file_list: List[str]) -> Optional[Tuple[List[Dict], Set[IncludeRelation]]]:
+    def find_and_load_mtime_cache(self, file_list: List[str]) -> Optional[Tuple[List[Dict], Set[IncludeRelation], Set[Tuple[str, str]]]]:
         """Finds and loads a cache based on file modification times and content hash."""
         if not file_list:
             return None
@@ -95,7 +99,11 @@ class CacheManager:
             current_file_hash = hashlib.sha256("".join(sorted(file_list)).encode()).hexdigest()
             if cached_data.get("file_list_hash") == current_file_hash:
                 logger.info(f"Found and validated mtime-based cache: {filename}")
-                return cached_data.get("source_spans", []), cached_data.get("include_relations", set())
+                return (
+                    cached_data.get("source_spans", []),
+                    cached_data.get("include_relations", set()),
+                    cached_data.get("static_call_relations", set()) # Add new data
+                )
             else:
                 logger.warning(f"Cache file {filename} has mismatched file list hash. Ignoring.")
                 return None
@@ -111,6 +119,7 @@ class CacheManager:
         cache_obj = {
             "source_spans": data[0],
             "include_relations": data[1],
+            "static_call_relations": data[2], # Add new data
             "new_commit": new_commit,
             "old_commit": old_commit
         }
@@ -129,6 +138,7 @@ class CacheManager:
         cache_obj = {
             "source_spans": data[0],
             "include_relations": data[1],
+            "static_call_relations": data[2], # Add new data
             "file_list_hash": file_list_hash
         }
         logger.info(f"Saving mtime-based cache to: {filename}")
@@ -170,15 +180,15 @@ class CompilationManager:
             self._parser = TreesitterParser(self.project_path)
         return self._parser
 
-    def _perform_parsing(self, files_to_parse: List[str], num_workers: int) -> Tuple[List[Dict], Set[IncludeRelation]]:
+    def _perform_parsing(self, files_to_parse: List[str], num_workers: int) -> Tuple[List[Dict], Set[IncludeRelation], Set[Tuple[str, str]]]:
         """Internal method to run the actual parsing logic."""
         if not files_to_parse:
-            return [], set()
+            return [], set(), set()
         
         parser = self._create_parser()
         parser.parse(files_to_parse, num_workers)
         gc.collect()
-        return parser.get_source_spans(), parser.get_include_relations()
+        return parser.get_source_spans(), parser.get_include_relations(), parser.get_static_call_relations()
 
     def parse_folder(self, folder_path: str, num_workers: int, new_commit: str = None):
         """
@@ -260,7 +270,7 @@ class CompilationManager:
             cached_data = self.cache_manager.find_and_load_git_cache(new_commit_hash, old_commit_hash)
             if cached_data:
                 self._parser = self._create_parser()
-                self._parser.source_spans, self._parser.include_relations = cached_data
+                self._parser.source_spans, self._parser.include_relations, self._parser.static_call_relations = cached_data
                 return
             
             logger.info(f"No valid cache for update {old_commit_hash[:8] if old_commit_hash else ''} -> {new_commit_hash[:8]}. Parsing {len(file_list)} files.")
@@ -272,7 +282,7 @@ class CompilationManager:
         cached_data = self.cache_manager.find_and_load_mtime_cache(file_list)
         if cached_data:
             self._parser = self._create_parser()
-            self._parser.source_spans, self._parser.include_relations = cached_data
+            self._parser.source_spans, self._parser.include_relations, self._parser.static_call_relations = cached_data
             return
 
         logger.info(f"No valid mtime-based cache found. Parsing {len(file_list)} files.")
@@ -288,6 +298,11 @@ class CompilationManager:
         if not hasattr(self, '_parser') or self._parser is None:
             raise RuntimeError("CompilationManager has not parsed any files yet.")
         return self._parser.get_include_relations()
+
+    def get_static_call_relations(self) -> Set[Tuple[str, str]]:
+        if not hasattr(self, '_parser') or self._parser is None:
+            raise RuntimeError("CompilationManager has not parsed any files yet.")
+        return self._parser.get_static_call_relations()
 
 if __name__ == "__main__":
     import argparse

@@ -58,6 +58,7 @@ These documents describe the helper modules that provide essential services like
 -   **[summary_git_manager.md](./summary_git_manager.md)**: The abstraction layer for Git operations.
 -   **[summary_llm_client.md](./summary_llm_client.md)**: The factory for providing model-agnostic LLM and embedding clients.
 -   **[summary_input_params.md](./summary_input_params.md)**: The centralized module for handling command-line arguments.
+-   **[summary_log_manager.md](./summary_log_manager.md)**: Describes the advanced, dual-level logging configuration.
 -   **[summary_memory_debugger.md](./summary_memory_debugger.md)**: A simple utility for debugging memory usage.
 
 ### Agentic Components

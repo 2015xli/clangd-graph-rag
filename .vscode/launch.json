@@ -40,6 +40,14 @@
             "program": "clangd_graph_rag_builder.py",
             "args": ["../../mini-jvm/graphrag/original/korp_clangd_21.x.yaml", "../../mini-jvm", "--compile-commands", "../../mini-jvm/graphrag/original/original_compile_commands.json", "--generate-summary", "--llm-api", "fake", "--ingest-batch-size", "10", "--log-batch-size", "10"]
         },
+
+        {
+            "name": "Python Debugger: MiniJVM Graph builder with static call relations",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "clangd_graph_rag_builder.py",
+            "args": ["~/NAS/home/bin/mini-jvm/x86.yaml", "~/NAS/home/bin/mini-jvm/", "--compile-commands=~/NAS/home/bin/mini-jvm/x86.json"]
+        },
         {
             "name": "Python Debugger: MiniJVM (header) Graph RAG builder",
             "type": "debugpy",

@@ -1,5 +1,9 @@
 import logging
 import sys
+import multiprocessing as mp
+
+def is_main_process():
+    return mp.current_process().name == "MainProcess"
 
 # --- 1. Custom Filter Classes ---
 
@@ -42,17 +46,19 @@ def init_logging(log_file='debug.log'):
     stdout_handler.setFormatter(
         logging.Formatter('%(asctime)s - [%(levelname)s] %(message)s')
     )
-
-    # File handler: DEBUG only
-    file_handler = logging.FileHandler(log_file, mode='w')
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.addFilter(DebugOnlyFilter())
-    file_handler.setFormatter(
-        logging.Formatter('%(asctime)s - %(name)s - [%(levelname)s] %(message)s')
-    )
-
     # Attach handlers
     root_logger.addHandler(stdout_handler)
-    root_logger.addHandler(file_handler)
+
+    # File handler: DEBUG only
+    if is_main_process():
+        file_handler = logging.FileHandler(log_file, mode='w', encoding='utf-8')
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.addFilter(DebugOnlyFilter())
+        file_handler.setFormatter(
+            logging.Formatter('%(asctime)s - %(name)s - [%(levelname)s] %(message)s')
+        )
+
+        # Attach handlers
+        root_logger.addHandler(file_handler)
 
     _initialized = True

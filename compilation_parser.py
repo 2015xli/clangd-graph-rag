@@ -24,18 +24,9 @@ from dataclasses import dataclass, field
 # Assuming RelativeLocation is defined in this file or imported
 from clangd_index_yaml_parser import RelativeLocation
 
-# Optional imports for concrete implementations
-try:
-    import clang.cindex
-except ImportError:
-    clang = None
-
-try:
-    import tree_sitter_c as tsc
-    from tree_sitter import Language, Parser as TreeSitterParser
-except ImportError:
-    tsc = None
-    TreeSitterParser = None
+import clang.cindex
+import tree_sitter_c as tsc
+from tree_sitter import Language, Parser as TreeSitterParser
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -65,15 +56,6 @@ class SourceSpan:
             parent_id=data['ParentId']
         )
 
-@dataclass
-class SpanTreeNode:
-    """Represents a node in the hierarchical span tree."""
-    span: SourceSpan
-    children: List['SpanTreeNode'] = field(default_factory=list)
-
-    def add_child(self, child: 'SpanTreeNode'):
-        self.children.append(child)
-
 # ============================================================
 # Include relations
 # ============================================================
@@ -97,7 +79,9 @@ class _ClangWorkerImpl:
         #   - {(file_uri, tu_hash) → {key → SourceSpan}}
         self.span_results: Dict[Tuple[str, str], Dict[str, SourceSpan]] = None
         #   - {(including_file, included_file)}
-        self.include_relations: Set[IncludeRelation] = None        
+        self.include_relations: Set[IncludeRelation] = None
+        #   - {(caller_id, callee_id)}
+        self.static_call_relations: Set[Tuple[str, str]] = None
 
         # file-level cache to avoid re-processing header nodes in identical TU contexts
         # Since we use since _ClangWorkerImpl as a singleton in a worker process, this cache is shared across all invocations
@@ -109,15 +93,17 @@ class _ClangWorkerImpl:
     # --------------------------------------------------------
     # Main entry
     # --------------------------------------------------------
-    def run(self, entry: Dict[str, Any]) -> Tuple[Dict[Tuple[str, str], Dict[str, SourceSpan]], Set[IncludeRelation]]:
+    def run(self, entry: Dict[str, Any]) -> Tuple[Dict[Tuple[str, str], Dict[str, SourceSpan]], Set[IncludeRelation], Set[Tuple[str, str]]]:
         """
         Parse the entry and return:
           - {(file_uri, tu_hash) → {key → SourceSpan}}
           - {(including_file, included_file)}
+          - {(caller_id, callee_id)} for static calls
         """
         self.entry = entry
-        self.span_results = defaultdict(dict)   # dict {(file_uri, tu_hash) → {key → SourceSpan}}
-        self.include_relations = set()          # set {(src_file, included_file)}
+        self.span_results = defaultdict(dict)
+        self.include_relations = set()
+        self.static_call_relations = set()
         self._tu_hash = None
         # Local per-TU header cache
         self._local_header_cache: Set[str] = set()
@@ -152,7 +138,7 @@ class _ClangWorkerImpl:
         # -----------------------------
         self._global_header_cache[self._tu_hash].update(self._local_header_cache)
 
-        return self.span_results, self.include_relations
+        return self.span_results, self.include_relations, self.static_call_relations
 
     # --------------------------------------------------------
     # TU Parsing and traversal
@@ -187,26 +173,40 @@ class _ClangWorkerImpl:
     # --------------------------------------------------------
     # AST walking
     # --------------------------------------------------------
-    def _walk_ast(self, node):
+    def _walk_ast(self, node, current_caller_cursor=None):
+        # Determine the current file and check if it's part of the project
         file_name = node.location.file.name if node.location.file else node.translation_unit.spelling
         file_name = os.path.abspath(file_name) if file_name else None
         if not file_name or not file_name.startswith(self.project_path):
             return
 
-        if False:
-            if file_name.endswith("ggml-cpu/ggml-cpu.c"):
-                if node.spelling == "ggml_graph_compute_secondary_thread":
-                    logger.info(f"Processing {file_name}, {node}")
+        # --- Update Caller Context ---
+        # If this node is a function/method definition, it becomes the new caller context for its children.
+        new_caller_cursor = current_caller_cursor
+        if node.kind.name in ClangParser.NODE_KIND_CALLERS:
+            new_caller_cursor = node
 
-        # Now process this node normally
+        # --- Process this node ---
+        # 1. If it's a definition, process its span
         if node.is_definition() and node.kind.name in ClangParser.NODE_KIND_FOR_BODY_SPANS:
-            if not self._should_process_node(node, file_name):
-                return
-            self._process_generic_node(node, file_name)
+            if self._should_process_node(node, file_name):
+                self._process_generic_node(node, file_name)
 
-        # Recurse
+        # 2. If it's a call expression inside a function, process the static call
+        elif node.kind == clang.cindex.CursorKind.CALL_EXPR and current_caller_cursor:
+            callee_cursor = node.referenced
+            # Check if the callee is a static function (internal linkage)
+            if callee_cursor and callee_cursor.linkage == clang.cindex.LinkageKind.INTERNAL:
+                caller_usr = current_caller_cursor.get_usr()
+                callee_usr = callee_cursor.get_usr()
+                if caller_usr and callee_usr:
+                    caller_id = self._hash_usr_to_id(caller_usr)
+                    callee_id = self._hash_usr_to_id(callee_usr)
+                    self.static_call_relations.add((caller_id, callee_id))
+
+        # --- Recurse to children ---
         for c in node.get_children():
-            self._walk_ast(c)
+            self._walk_ast(c, new_caller_cursor)
 
     # --------------------------------------------------------
     # Span processing
@@ -316,6 +316,15 @@ class _ClangWorkerImpl:
             return (line - 1, col - 1)
         except AttributeError:
             return (node.location.line - 1, node.location.column - 1)
+
+    @staticmethod
+    def _hash_usr_to_id(usr: str) -> str:
+        """
+        Replicates clangd's ID generation by taking the first 8 bytes of
+        the SHA1 hash of the USR.
+        """
+        sha1_hash = hashlib.sha1(usr.encode()).digest()
+        return sha1_hash[:8].hex().upper()
 
     def _convert_node_kind_to_index_kind(self, node):
         """Converts a Clang parser kind to a Clangd index kind."""
@@ -515,7 +524,7 @@ def _worker_initializer(parser_type: str, init_args: Dict[str, Any]):
     else:
         raise ValueError(f"Unknown parser type: {parser_type}")
 
-def _parallel_worker(data: Any) -> Tuple[Optional[Dict[Tuple[str,str], Dict[str, SourceSpan]]], Set]:
+def _parallel_worker(data: Any) -> Tuple[Optional[Dict[Tuple[str,str], Dict[str, SourceSpan]]], Set, Set]:
     """Generic top-level worker function that uses the process-local worker object.
 
     Accepts a list of entry dicts (batch).
@@ -535,23 +544,24 @@ def _parallel_worker(data: Any) -> Tuple[Optional[Dict[Tuple[str,str], Dict[str,
             if _count_processed_tus % 1000 == 0: gc.collect()
 
             try:
-                span_result, includes = _worker_impl_instance.run(entry)
+                span_result, includes, static_calls = _worker_impl_instance.run(entry)
             except Exception:
                 file_path = entry if isinstance(entry, str) else entry.get('file', 'unknown')
                 logger.exception(f"Worker failed on {file_path}")
-                return None, set()
-            return span_result, includes
+                return None, set(), set()
+            return span_result, includes, static_calls
 
         # Otherwise, we have a list of entries that need local merging    
         merged_spans: Dict[Tuple[str, str], Dict[str, SourceSpan]] = defaultdict(dict)
         merged_includes: Set[IncludeRelation] = set()
+        merged_static_calls: Set[Tuple[str, str]] = set()
 
         for entry in data:
             _count_processed_tus += 1
             if _count_processed_tus % 1000 == 0: gc.collect()
 
             try:
-                span_result, includes = _worker_impl_instance.run(entry)
+                span_result, includes, static_calls = _worker_impl_instance.run(entry)
             except Exception:
                 file_path = entry if isinstance(entry, str) else entry.get('file', 'unknown')
                 logger.exception(f"Worker failed on {file_path}")
@@ -559,6 +569,8 @@ def _parallel_worker(data: Any) -> Tuple[Optional[Dict[Tuple[str,str], Dict[str,
 
             if includes:
                 merged_includes.update(includes)
+            if static_calls:
+                merged_static_calls.update(static_calls)
 
             if not span_result:
                 continue
@@ -568,11 +580,11 @@ def _parallel_worker(data: Any) -> Tuple[Optional[Dict[Tuple[str,str], Dict[str,
             for (file_uri, tu_hash), key_to_span_dict in span_result.items():
                 merged_spans[(file_uri, tu_hash)].update(key_to_span_dict)
 
-        return merged_spans, merged_includes
+        return merged_spans, merged_includes, merged_static_calls
 
     except Exception as e:
         logger.exception(f"Unexpected error in worker: {e}")
-        return None, set()
+        return None, set(), set()
 
 # --- Abstract Base Class ---
 
@@ -594,6 +606,7 @@ class CompilationParser:
         self.project_path = project_path
         self.source_spans: Dict[str, Dict[str, SourceSpan]] = defaultdict(dict) # Changed to Dict[FileURI, Dict[Key, SourceSpan]]
         self.include_relations: Set[IncludeRelation] = set()
+        self.static_call_relations: Set[Tuple[str, str]] = set()
 
     def parse(self, files_to_parse: List[str], num_workers: int = 1):
         raise NotImplementedError
@@ -603,6 +616,9 @@ class CompilationParser:
 
     def get_include_relations(self) -> Set[IncludeRelation]:
         return self.include_relations
+
+    def get_static_call_relations(self) -> Set[Tuple[str, str]]:
+        return self.static_call_relations
 
     def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
         raise NotImplementedError
@@ -642,6 +658,7 @@ class CompilationParser:
         """
         all_spans: Dict[Tuple[str, str], Dict[str, SourceSpan]] = defaultdict(dict)
         all_includes: Set[IncludeRelation] = set()
+        all_static_calls: Set[Tuple[str, str]] = set()
         file_tu_hash_map: Dict[str, Set[str]] = defaultdict(set)
 
         initargs = (parser_type, worker_init_args or {})
@@ -692,9 +709,11 @@ class CompilationParser:
 
                         # Merge results from this future
                         try:
-                            span_result, includes = future.result()
+                            span_result, includes, static_calls = future.result()
                             if includes:
                                 all_includes.update(includes)
+                            if static_calls:
+                                all_static_calls.update(static_calls)
 
                             if span_result:
                                 # Merge using same dedupe rule: only add spans from (file_uri, tu_hash)
@@ -712,6 +731,7 @@ class CompilationParser:
 
         self.source_spans = all_spans
         self.include_relations = all_includes
+        self.static_call_relations = all_static_calls
         gc.collect()
 
 # --- Concrete Implementations ---
@@ -739,6 +759,8 @@ class ClangParser(CompilationParser):
     }
     
     NODE_KIND_METHODS = NODE_KIND_CXX_METHOD | NODE_KIND_CONSTRUCTOR | NODE_KIND_DESTRUCTOR | NODE_KIND_CONVERSION_FUNCTION
+
+    NODE_KIND_CALLERS = NODE_KIND_FUNCTIONS | NODE_KIND_METHODS
 
     NODE_KIND_UNION = {
         clang.cindex.CursorKind.UNION_DECL.name,
@@ -822,15 +844,26 @@ class ClangParser(CompilationParser):
             cmd_files[file_key] = cmd
 
         compile_entries = []
+        missed_files = []
         for file_path in source_files:
             cmd = cmd_files.get(file_path)
-            if not cmd: logger.warning(f"Could not get compile commands for {file_path}"); continue
+            if not cmd:
+                missed_files.append(file_path)
+                continue
     
             compile_entries.append({
                 'file': file_path,
                 'directory': cmd.directory,
                 'arguments': list(cmd.arguments)[1:],
             })
+
+        logger.info(f"Found {len(source_files)} source files, {len(compile_entries)} compile entries")
+        if missed_files:
+            logger.info(f"No compile commands found for {len(missed_files)} files. Check debug.log for details.")
+            logger.debug(
+                f"No compile commands found for {len(missed_files)} files:\n        "  
+                f"{'\n        '.join(missed_files)}"
+            )
 
         if num_workers < 1:
             logger.error(f"Invalid number of num_parse_workers specified: {num_workers}")

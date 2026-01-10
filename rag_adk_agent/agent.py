@@ -71,13 +71,13 @@ def sync_agent():
         "\n- Identification of the root cause of bugs or race conditions"
         "\n- Documentation of software design"
 
-        "\n## Note 1: How to Start a Session"
+        "\n\n## Note 1: How to Start a Session"
         "\n- Always start by using the `get_project_info` and `get_graph_schema` tools. "
         "\n- The schema will show you the primary 'semantic' node labels (like `FILE`, `FUNCTION`, `CLASS_STRUCTURE`), their properties, and their relationships. "
         "\n- You can formulate your own queries based on the schema and then use the `execute_cypher_query` tool to execute them."
         "\n- Remember all label and relationship names are uppercase."
 
-        "\n## Note 2: Core Properties & Labels"
+        "\n\n## Note 2: Core Properties & Labels"
         "\n- **Universal `id`**: Every node in the graph (FILE, FUNCTION, CLASS_STRUCTURE, etc.) has a globally unique `id` property that you can return from query like `MATCH(node:FUNCTION|METHOD) RETURN node.id`. "
         "  You can use this `id` to retrieve a node's specific details."
         "\n- **Semantic labels**: Nodes may have multiple labels, e.g., `['FUNCTION', 'ENTITY']`. For graph traversals, you MUST use the specific 'semantic' label (the one that is NOT 'ENTITY'). "
@@ -85,12 +85,12 @@ def sync_agent():
         "\n- **`path` property**: The project root path is stored in the `PROJECT` node's `path` property,  "
         "  while the `path` property of other nodes is relative to the project root."
 
-        "\n## Note 3: How to Query the Graph"
+        "\n\n## Note 3: How to Query the Graph"
         "\n- **Always use semantic labels**: for node matching, use `MATCH (f:FUNCTION|METHOD) or MATCH(c:CLASS_STRUCTURE)`, not `MATCH (e:ENTITY)` or `MATCH (n)`"
         "\n- **Always return specific properties**: when query for nodes, always return their specific properties, not just the nodes themselves."
-        "    For example, when querying for a FUNCTION node, always return `node.id`, `node.name`, or `node.path`, etc., not just `node`."
-        "\n    Another example, when querying for a call path (i.e., call chain) from one function to another, you can return the path nodes with their properties:"
-        "         `MATCH p = (f:FUNCTION|METHOD {name: 'function_A'})-[:CALLS*]->(n:FUNCTION|METHOD {name: 'function_B'})`"
+        "\n    For example, when querying for a FUNCTION node, always return `node.id`, `node.name`, or `node.path`, etc., not just `node`."
+        "\n    Another example, if you want to know the call path (i.e., call chain) from one function to another, you can return the path nodes with their properties, like below:"
+        "\n         `MATCH p = (f:FUNCTION|METHOD {name: 'function_A'})-[:CALLS*]->(n:FUNCTION|METHOD {name: 'function_B'})`"
         "         `RETURN [node IN nodes(p) | {id: node.id, name: node.name}] AS call_path_nodes`"
     )
 
@@ -98,7 +98,7 @@ def sync_agent():
         "\n\n## Note 4: How to Get Source Code"
         "\n- **Get source code with id**: After finding the `id` property of a node (e.g., FUNCTION, METHOD, DATA_STRUCTURE, FILE, etc.) through a query, use the `get_source_code_by_id` tool with the `id` property to read its source code."
         "\n         Note, not all nodes have source code (e.g., FOLDER, NAMESPACE nodes do not have source code), use your common sense to determine if the node has source code."
-        "\n- **Get full file with path**: If you only want to get the full source code of a file (not just the code of a specific function or method or data structure), you can use the `get_source_code_by_path` tool with the 'path' property."
+        "\n- **Get full file with path**: If you only want to get the full source code of a file (not just the code of a specific function, method, or data structure), you can use the `get_source_code_by_path` tool with the 'path' property."
     )
 
     keyword_search_instruction = (
@@ -116,7 +116,7 @@ def sync_agent():
     )
 
 
-    final_instruction = base_instruction + keyword_search_instruction + source_code_instruction
+    final_instruction = base_instruction + source_code_instruction + keyword_search_instruction
     if has_embeddings:
         final_instruction += semantic_search_instruction
 
