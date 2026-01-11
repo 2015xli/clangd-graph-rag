@@ -79,42 +79,49 @@ def sync_agent():
 
         "\n\n## Note 2: Core Properties & Labels"
         "\n- **Universal `id`**: Every node in the graph (FILE, FUNCTION, CLASS_STRUCTURE, etc.) has a globally unique `id` property that you can return from query like `MATCH(node:FUNCTION|METHOD) RETURN node.id`. "
-        "  You can use this `id` to retrieve a node's specific details."
+        "      You can use this `id` to retrieve a node's specific details."
         "\n- **Semantic labels**: Nodes may have multiple labels, e.g., `['FUNCTION', 'ENTITY']`. For graph traversals, you MUST use the specific 'semantic' label (the one that is NOT 'ENTITY'). "
-        "  If you are ever unsure, you can use the `get_semantic_label` tool with node.id to get the semantic label."
+        "      If you are ever unsure, you can use the `get_semantic_label` tool with node.id to get the semantic label."
         "\n- **`path` property**: The project root path is stored in the `PROJECT` node's `path` property,  "
-        "  while the `path` property of other nodes is relative to the project root."
+        "      while the `path` property of other nodes is relative to the project root."
 
         "\n\n## Note 3: How to Query the Graph"
         "\n- **Always use semantic labels**: for node matching, use `MATCH (f:FUNCTION|METHOD) or MATCH(c:CLASS_STRUCTURE)`, not `MATCH (e:ENTITY)` or `MATCH (n)`"
         "\n- **Always return specific properties**: when query for nodes, always return their specific properties, not just the nodes themselves."
         "\n    For example, when querying for a FUNCTION node, always return `node.id`, `node.name`, or `node.path`, etc., not just `node`."
-        "\n    Another example, if you want to know the call path (i.e., call chain) from one function to another, you can return the path nodes with their properties, like below:"
-        "\n         `MATCH p = (f:FUNCTION|METHOD {name: 'function_A'})-[:CALLS*]->(n:FUNCTION|METHOD {name: 'function_B'})`"
-        "         `RETURN [node IN nodes(p) | {id: node.id, name: node.name}] AS call_path_nodes`"
+        "\n    Another example, if you want to know the call path (i.e., call chain) from one function to another, you can return the path nodes with their properties, like below:\n"
+        "         `MATCH p = (f:FUNCTION|METHOD {name: 'function_A'})-[:CALLS*]->(n:FUNCTION|METHOD {name: 'function_B'})`"
+        "         `RETURN [node IN nodes(p) | {id: node.id, name: node.name}] AS call_path_nodes LIMIT 5`"
+        "\n- **Control result size with constraints**: When appropriate, always include a constraint on result size in your Cypher queries." 
+        "      Some often used keywords are like `LIMIT N` (to cap rows), `SKIP/OFFSET` (for paging), `DISTINCT` (to deduplicate)."
+        "      When matching paths use path selectors like `SHORTEST k` or `ANY k` so that result sets stay bounded and manageable. An example below,\n"
+        "          `MATCH p = SHORTEST 3 (f:FUNCTION|METHOD {name:'function_A'})-[:CALLS*]->(n:FUNCTION|METHOD {name:'function_B'}) RETURN [x IN nodes(p) | {id: x.id, name: x.name}]`\n"
     )
 
     source_code_instruction = (
         "\n\n## Note 4: How to Get Source Code"
         "\n- **Get source code with id**: After finding the `id` property of a node (e.g., FUNCTION, METHOD, DATA_STRUCTURE, FILE, etc.) through a query, use the `get_source_code_by_id` tool with the `id` property to read its source code."
-        "\n         Note, not all nodes have source code (e.g., FOLDER, NAMESPACE nodes do not have source code), use your common sense to determine if the node has source code."
+        "\n    Note, not all nodes have source code (e.g., FOLDER, NAMESPACE nodes do not have source code), use your common sense to determine if the node has source code."
         "\n- **Get full file with path**: If you only want to get the full source code of a file (not just the code of a specific function, method, or data structure), you can use the `get_source_code_by_path` tool with the 'path' property."
     )
 
     keyword_search_instruction = (
      "\n\n## Note 5: How to Perform Searches"
-        "\n### Keyword Match Search:"
-        "\nUse `STARTS WITH` or `CONTAINS` on properties like `name` or `path` or `summary` for keyword searches. "
-        "\n    e.g., `MATCH (f:FILE) WHERE f.path CONTAINS 'utils'`."
+        "\n- **Keyword match search with cypher query**: Use `STARTS WITH` or `CONTAINS` on properties like `name` or `path` or `summary` for keyword searches. "
+        "\n    e.g., `MATCH (f:FILE) WHERE f.path CONTAINS 'utils' RETURN f.id LIMIT 5`"
     )
     
     semantic_search_instruction = (
-        "\n### Semantic Similarity Search:"
-        "\nTo find nodes related to a concept, you should use the `search_nodes_for_semantic_similarity` tool."
-        "\nExample: `search_nodes_for_semantic_similarity(query='logic for user authentication', num_results=5)`"
-        "\nFor more advanced or custom queries, you can fall back to the lower-level tools: `generate_embeddings`, then formulate a query with vector index of 'summaryEmbedding', and then `execute_cypher_query`."
+        "\n- **Semantic similarity search with tools**: To find nodes related to a concept, you should use the `search_nodes_for_semantic_similarity` tool."
+        "\n    Example: `search_nodes_for_semantic_similarity(query='user authentication', num_results=5)`"
+        "\n    For more advanced or custom queries, you can fall back to the lower-level tools using embeddings: "
+        "\n    First use `generate_embeddings` to generate embeddings for the query, then formulate a cypher query with vector index of 'summary_embeddings', and then use `execute_cypher_query` to execute the query."
+        "\n    An example cypher query with the generated embedding:\n"
+        "         CALL db.index.vector.queryNodes('summary_embeddings', 20, embedding) " 
+        "         YIELD node, score WHERE n:FUNCTION|METHOD "
+        "         RETURN n.id, n.name, score "
+        "         ORDER BY score DESC LIMIT 5;"
     )
-
 
     final_instruction = base_instruction + source_code_instruction + keyword_search_instruction
     if has_embeddings:

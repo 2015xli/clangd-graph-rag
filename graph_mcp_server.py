@@ -145,6 +145,7 @@ def search_nodes_for_semantic_similarity(query: str, num_results: int = 5) -> Di
             CALL db.index.vector.queryNodes('summary_embeddings', $num_results, $embedding)
             YIELD node, score
             RETURN node.id AS id, node.name AS name, labels(node)[0] AS label, node.summary AS summary, score
+            ORDER BY score DESC
         """
         params = {
             "num_results": num_results,
