@@ -131,14 +131,18 @@ Used for the initial, from-scratch ingestion of a project. Orchestrated by `clan
 # Basic build (graph structure only, no LLM summary RAG data, which you can generate separately later)
 python3 clangd_graph_rag_builder.py /path/to/clangd-index.yaml /path/to/project/
 
-# Build the graph with LLM summary RAG data generation (note: the default uses fake LLM unless you specify --llm-api <your-llm-api>)
+# Build the graph with LLM summary RAG data generation (you don't need separate command for summary generation) 
 python3 clangd_graph_rag_builder.py /path/to/clangd-index.yaml /path/to/project/ --generate-summary
 ```
+* Without `--generate-summary`, the tool will only perform the graph enrichment phase. This is to give you an option to check the enrichment results before generating summaries, which may cost time and money.
+* With `--generate-summary` enabled, the tool will generate summary. By default it will use `--llm-api fake` to test the summary generation without actually calling an LLM API. You can use `--llm-api [openai|deepseek|ollama|fake]` to specify the LLM API to use. Option `ollama` will use local ollama setup. Please check the `llm_client.py` for the details.
+* The generated summaries are cached in `<project_path>/.cache/summary_cache.json`, so that you don't need to regenerate them if the source code remains unchanged. You can move or rename this file to force regeneration. 
+
 Please check the detailed design document for more details: [Clangd Graph RAG Builder](./docs/summary_clangd_graph_rag_builder.md)
 
 ### Summary RAG Data Generation
 
-After the graph is built, you can generate LLM summary RAG data with the following command:
+After the graph is built (without --generate-summary enabled), you can generate LLM summary RAG data with the following command:
 ```bash
 python3 code_graph_rag_generator.py /path/to/clangd-index.yaml /path/to/project/
 ```
