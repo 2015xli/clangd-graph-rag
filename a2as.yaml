@@ -1,0 +1,407 @@
+manifest:
+  version: "0.1.3"
+  schema: https://a2as.org/cert/schema
+  subject:
+    name: 2015xli/clangd-graph-rag
+    source: https://github.com/2015xli/clangd-graph-rag
+    branch: master
+    commit: "2f7ca2fe"
+    scope: [neo4j_manager.py, rag_adk_agent/agent.py, rag_adk_agent/run_agent.py]
+  issued:
+    by: A2AS.org
+    at: '2026-02-11T16:37:35Z'
+    url: https://a2as.org/certified/agents/2015xli/clangd-graph-rag
+  signatures:
+    digest: sha256:BJmjN9z4rs_wnBu2IhQA-RlOjBBBopZm6L_wJ0xiB_M
+    key: ed25519:Ez1kHaQuT4L6xJtPt1-92jpHugNRyBPDfvwD18qssAM
+    sig: ed25519:8Nk0NItt8iKgnnd96uktF79KCMP2MRuEAfEUmE1W_nN6fhd3NDnE_tyI6xV2lJgxcWmeZV1gugFMjEPzXVYoDg
+
+agents:
+  root_agent:
+    type: instance
+    models: [deepseek-chat]
+    tools: [toolset]
+    mcp: [toolset]
+    params:
+      name: Coding_Agent
+      instruction: final_instruction
+      output_key: last_response
+      before_model_callback: agent_guardrail
+      function: sync_agent
+
+models:
+  deepseek-chat:
+    type: literal
+    agents: [root_agent]
+    params:
+      alias: [deepseek/deepseek-chat]
+
+tools:
+  toolset:
+    type: mcp
+    agents: [root_agent]
+    params:
+      class: MCPToolset
+      mcp_server: toolset
+
+mcp:
+  toolset:
+    type: network
+    url: http://127.0.0.1:8800/mcp
+    agents: [agent.sync_agent, root_agent]
+    params:
+      class: MCPToolset
+      connection_type: StreamableHTTPConnectionParams
+      connection_variable: connection_params
+
+imports:
+  agent: agent
+  Any: typing.Any
+  argparse: argparse
+  asyncio: asyncio
+  CallbackContext: google.adk.agents.callback_context.CallbackContext
+  defaultdict: collections.defaultdict
+  Dict: typing.Dict
+  GraphDatabase: neo4j.GraphDatabase
+  InMemorySessionService: google.adk.sessions.InMemorySessionService
+  json: json
+  List: typing.List
+  LiteLlm: google.adk.models.lite_llm.LiteLlm
+  LlmAgent: google.adk.agents.llm_agent.LlmAgent
+  LlmRequest: google.adk.models.llm_request.LlmRequest
+  LlmResponse: google.adk.models.llm_response.LlmResponse
+  logging: logging
+  MCPToolset: google.adk.tools.mcp_tool.MCPToolset
+  Neo4jManager: neo4j_manager.Neo4jManager
+  Optional: typing.Optional
+  os: os
+  Path: pathlib.Path
+  pprint: pprint.pprint
+  root_agent: agent.root_agent
+  Runner: google.adk.runners.Runner
+  StreamableHTTPConnectionParams: google.adk.tools.mcp_tool.StreamableHTTPConnectionParams
+  sys: sys
+  threading: threading
+  tqdm: tqdm.tqdm
+  Tuple: typing.Tuple
+  types: google.genai.types
+
+functions:
+  __enter__:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+  __exit__:
+    type: sync
+    module: neo4j_manager
+    args: [self, exc_type, exc, tb]
+  __init__:
+    type: sync
+    module: neo4j_manager
+    args: [self, uri, user, password]
+    params:
+      returns: None
+  _ensure_driver:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+  _recursive_type_check:
+    type: sync
+    module: neo4j_manager
+    args: [data, indent, path, output_lines]
+  add_agent_facing_schema:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+  add_entity_label_to_all_nodes:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+    params:
+      returns: int
+  add_synthetic_ids_if_missing:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+    params:
+      returns: int
+  agent_guardrail:
+    type: sync
+    module: rag_adk_agent.agent
+    args: [callback_context, llm_request]
+    params:
+      returns: Optional[LlmResponse]
+  align_string:
+    type: sync
+    module: neo4j_manager
+    args: [string, width, direction, fillchar]
+    params:
+      returns: str
+  async_main:
+    type: async
+    module: rag_adk_agent.run_agent
+    args: [user_id, session_id, query]
+  async_runner_call:
+    type: async
+    module: rag_adk_agent.run_agent
+    args: [query, runner, user_id, session_id]
+  async_runner_init:
+    type: async
+    module: rag_adk_agent.run_agent
+    args: [user_id, session_id]
+  bootstrap_schema:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+    params:
+      returns: None
+  check_connection:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+    params:
+      returns: bool
+  check_property_exists:
+    type: sync
+    module: neo4j_manager
+    args: [self, property_key, labels]
+    params:
+      returns: bool
+  cleanup_empty_namespaces_recursively:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+    params:
+      returns: int
+  cleanup_empty_paths_recursively:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+    params:
+      returns: Tuple
+  cleanup_orphan_nodes:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+  close:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+  create_constraints:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+    params:
+      returns: None
+  create_vector_indexes:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+    params:
+      returns: None
+  delete_property:
+    type: sync
+    module: neo4j_manager
+    args: [self, label, property_key, all_labels]
+    params:
+      returns: int
+  driver:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+  drop_vector_indices:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+    params:
+      returns: None
+  execute_autocommit_query:
+    type: sync
+    module: neo4j_manager
+    args: [self, cypher, params]
+    params:
+      returns: Any
+  execute_query_and_return_records:
+    type: sync
+    module: neo4j_manager
+    args: [self, cypher, params]
+    params:
+      returns: List[Dict]
+  execute_read_query:
+    type: sync
+    module: neo4j_manager
+    args: [self, cypher, params]
+    params:
+      returns: list[dict]
+  format_schema_for_display:
+    type: sync
+    module: neo4j_manager
+    args: [self, schema_info, args]
+    params:
+      returns: str
+  get_graph_commit_hash:
+    type: sync
+    module: neo4j_manager
+    args: [self, project_path]
+    params:
+      returns: Optional[str]
+  get_labels_without_id_property:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+    params:
+      returns: set[str]
+  get_schema:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+    params:
+      returns: dict
+  get_vector_indexes:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+    params:
+      returns: dict
+  ingest_include_relations:
+    type: sync
+    module: neo4j_manager
+    args: [self, relations, batch_size]
+  main:
+    type: sync
+    module: rag_adk_agent.run_agent
+  migrate_per_label_id_to_global_id:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+  process_batch:
+    type: sync
+    module: neo4j_manager
+    args: [self, batch]
+    params:
+      returns: List[Any]
+  purge_files:
+    type: sync
+    module: neo4j_manager
+    args: [self, file_paths]
+    params:
+      returns: Tuple
+  purge_include_relations_from_files:
+    type: sync
+    module: neo4j_manager
+    args: [self, file_paths]
+    params:
+      returns: int
+  purge_symbols_declared_in_files:
+    type: sync
+    module: neo4j_manager
+    args: [self, file_paths]
+    params:
+      returns: int
+  purge_symbols_defined_in_files:
+    type: sync
+    module: neo4j_manager
+    args: [self, file_paths]
+    params:
+      returns: int
+  rebuild_vector_indices:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+    params:
+      returns: None
+  remove_agent_facing_schema:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+  reset_constraints:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+  reset_database:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+    params:
+      returns: None
+  reset_vector_indexes:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+  setup_database:
+    type: sync
+    module: neo4j_manager
+    args: [self, project_path, init_property]
+    params:
+      returns: None
+  sync_agent:
+    type: sync
+    module: rag_adk_agent.agent
+  total_nodes_in_graph:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+    params:
+      returns: int
+  total_relationships_in_graph:
+    type: sync
+    module: neo4j_manager
+    args: [self]
+    params:
+      returns: int
+  update_project_node:
+    type: sync
+    module: neo4j_manager
+    args: [self, project_path, properties]
+    params:
+      returns: None
+  verify_project_path:
+    type: sync
+    module: neo4j_manager
+    args: [self, project_path]
+    params:
+      returns: bool
+  wrapup_graph:
+    type: sync
+    module: neo4j_manager
+    args: [self, keep_orphans]
+
+variables:
+  DEEPSEEK_API_KEY:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [rag_adk_agent.agent]
+  NEO4J_PASSWORD:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [neo4j_manager]
+  NEO4J_URI:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [neo4j_manager]
+  NEO4J_USER:
+    type: env
+    params:
+      caller: [os.getenv]
+      path: [neo4j_manager]
+
+files:
+  project_path:
+    type: variable
+    actions: [read]
+    params:
+      caller: [os.path.basename]
+
+networks:
+  "127.0.0.1":
+    type: api
+    actions: [GET]
+    urls: [/mcp]
+    protocols: [http]
+    ports: ["8800"]
+    params:
+      caller: [sync_agent]
+      links: [MCPToolset]
