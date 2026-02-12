@@ -49,6 +49,16 @@ class Location:
             end_column=data['End']['Column']
         )
 
+    @classmethod
+    def from_relative_location(cls, rel_loc: 'RelativeLocation', file_uri: str) -> 'Location':
+        return cls(
+            file_uri=file_uri,
+            start_line=rel_loc.start_line,
+            start_column=rel_loc.start_column,
+            end_line=rel_loc.end_line,
+            end_column=rel_loc.end_column
+        )
+
 @dataclass(frozen=True, slots=True)
 class RelativeLocation:
     start_line: int
@@ -94,6 +104,10 @@ class Symbol:
     type: str = ""
     body_location: Optional[RelativeLocation] = None
     parent_id: Optional[str] = None
+    # New fields for TypeAlias
+    aliased_canonical_spelling: Optional[str] = None
+    aliased_type_id: Optional[str] = None
+    aliased_type_kind: Optional[str] = None
     
     def is_function(self) -> bool:
         return self.kind in ('Function', 'InstanceMethod', 'StaticMethod', 'Constructor', 'Destructor', 'ConversionFunction')

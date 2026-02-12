@@ -16,7 +16,7 @@ from urllib.parse import urlparse, unquote
 
 from clangd_index_yaml_parser import SymbolParser, Symbol, Reference, Location, RelativeLocation
 from compilation_manager import CompilationManager
-from compilation_parser import SourceSpan, CompilationParser
+from compilation_parser import SourceSpan, CompilationParser, TypeAliasSpan
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -32,19 +32,43 @@ class SourceSpanProvider:
         """
         self.symbol_parser = symbol_parser
         self.compilation_manager = compilation_manager
+        self.type_alias_spans: Dict[str, TypeAliasSpan] = compilation_manager.get_type_alias_spans()
+        self.synthetic_id_to_index_id: Dict[str, str] = {} # Maps synthetic span IDs to canonical Symbol IDs
+        self.matched_symbol_count = 0
+        self.matched_typealias_count = 0
+        self.assigned_parent_count = 0
+        self.assigned_parent_in_sym = 0
+        self.assigned_sym_parent_in_span = 0
+        self.assigned_syn_parent_in_span = 0
+        self.assigned_parent_no_span = 0
+        self.assigned_parent_by_span = 0
+        self.assigned_parent_matched_alias = 0
+        self.assigned_parent_unmatched_alias = 0
 
     def enrich_symbols_with_span(self):
         """
-        Efficient two-pass enrichment:
-        Pass 1: Enrich existing symbols with body spans and synthesize missing
-                symbols for anonymous structures.
-        Pass 2: Assign `parent_id` to all symbols based on the lexical
-                structure discovered by the parser.
+        Orchestrates the enrichment of in-memory Symbol objects with span data.
         """
         if not self.symbol_parser:
             logger.warning("No SymbolParser provided; cannot enrich symbols.")
             return
 
+        self._filter_symbols_by_project_path()
+        self._assign_parent_ids_from_symbol_ref_container()
+        self._match_and_enrich_with_source_spans()
+        self._assign_parent_ids_lexically()
+        self._enrich_with_type_alias_data() # New pass for TypeAlias
+        self._enrich_with_static_calls()
+
+        logger.info(f"Enrichment complete. Matched {self.matched_symbol_count} symbols with body spans.")
+        logger.info(f"Total parent_id assigned to {self.assigned_parent_count} symbols.")
+
+
+    def _filter_symbols_by_project_path(self):
+        """
+        Filters out symbols whose definitions or declarations are outside the project path.
+        Namespace symbols are an exception and are always kept.
+        """
         logger.info("Filtering symbols to only include those in the project path.")
         project_path = self.compilation_manager.project_path
         
@@ -61,93 +85,97 @@ class SourceSpanProvider:
         logger.info(f"Filtered {len(self.symbol_parser.symbols)} symbols to {len(self.symbol_parser.symbols) - len(keys_to_remove)} symbols.")        
         for key in keys_to_remove:
             del self.symbol_parser.symbols[key]
-        
-        # Pass 0: Get span data
-        # file_span_data: Dict[file_uri → Dict[key → SourceSpan]}
-        file_span_data = self.compilation_manager.get_source_spans()
-        logger.info(f"Processing SpanTrees from {len(file_span_data)} files for enrichment.")
 
-        # Pass 1: Enrich existing symbols and synthesize new ones
-        synthetic_id_to_index_id = {}
-        matched_body_count = 0
-        assigned_parent_in_sym = 0
-
-        # Copy the file span data to avoid modifying the original data
-        file_span_data_copy = copy.deepcopy(file_span_data)
+    def _assign_parent_ids_from_symbol_ref_container(self):
+        """
+        Assign parent ids to symbols from their references.
+        """
 
         for sym_id, sym in self.symbol_parser.symbols.items():
             loc = sym.definition or sym.declaration
             if not loc:
                 continue
 
-            # Step 1: Assign parent id from symbol's references    
-            # Most symbols can find parent id in their references.
+            # Ref kind:   Declaration = 1 << 0, // 1
+            #             Definition  = 1 << 1, // 2
+            #             Reference   = 1 << 2, // 4
+            # ref.container_id != '0000000000000000' means it has a container symbol.
+            # ref.kind & 3 and not ref.kind & 4, means it is either a definition or declaration, but not a reference.
+            # So it means if a symbol has a definition (or declaration) reference inside another symbol's scope, 
+            # then the container symbol is its parent.
             for ref in sym.references:
-                # ref.kind: declaration (1)| definition (2)| reference (4) | spelled (8) | call (16)
-                # We check if the reference is not a reference to the symbol, but either a definition or a declaration
-                # Hopefully we only want symbols with definition. But pure virtual function has only declaration.
-                # So we use both definition and declaration, but ensure it is not a reference and has a container_id
                 if ref.location == loc and ref.kind & 3 and not ref.kind & 4 and ref.container_id != '0000000000000000':
                     sym.parent_id = ref.container_id 
-                    assigned_parent_in_sym += 1
+                    self.assigned_parent_in_sym += 1
                     break    
             
-            # Step 2: Find body spans for symbols from span data            
+
+    def _match_and_enrich_with_source_spans(self):
+        """
+        Matches existing symbols with SourceSpan data and synthesizes new symbols
+        for unmatched SourceSpans (e.g., anonymous structures).
+        """
+        # Pass 0: Get span data
+        file_span_data = self.compilation_manager.get_source_spans()
+        logger.info(f"Processing SourceSpans from {len(file_span_data)} files for enrichment.")
+
+        # Copy the file span data to avoid modifying the original data
+        file_span_data_copy = copy.deepcopy(file_span_data)
+
+        # Pass 1: Match clangd-indexed symbols with source spans
+        for sym_id, sym in self.symbol_parser.symbols.items():
+            loc = sym.definition or sym.declaration
+            if not loc:
+                continue
+            
+            # Find body spans for symbols from span data            
             key = CompilationParser.make_symbol_key(sym.name, loc.file_uri, loc.start_line, loc.start_column)
             source_span = file_span_data_copy[loc.file_uri].get(key)
             if not source_span:
                 continue
 
-            # Enrich the existing symbol with its body location
+            # Found a matched clangd-idexed symbol, enrich it with its body location
             sym.body_location = source_span.body_location
-            # So far we can only match symbols that have body span, since we don't return nodes from clang.cindex that have no body span.
-            # Our purpose with body span is:
-            # 1. Find entity's body code for graphRAG, 2. Find parent relationships for symbols.
-            # Purpose 1 is served well. 
-            # Purpose 2 is fine too, since for symbols without body span, they either have parent id from their references, or we can find parent id from their lexical scope in pass 3.
-            # The following map is critical for pass 2 and 3, since we need real matched symbol id as parent id to build graph relationships.
-            # That is why we need separate passes for pass 2 and 3, only after pass 1 that has built the map.
-            synthetic_id_to_index_id[source_span.id] = sym_id
-            matched_body_count += 1
+            self.synthetic_id_to_index_id[source_span.id] = sym_id
+            self.matched_symbol_count += 1
             # Remove the span from the file spans in order to use the remaining spans for synthetic symbols
             del file_span_data_copy[loc.file_uri][key]
 
-        # Pass 2: Any remaining spans in the all file spans are not clangd-indexed (such as anonymous structures or unused symbols)
-        # Note we add parent id for the synthetic symbols if they have one in their source span
+        # Pass 2: Any remaining spans are not clangd-indexed (such as anonymous structures or unused symbols)
         synthetic_symbols = {}
-        assigned_sym_parent_in_span = 0
-        assigned_syn_parent_in_span = 0
         for file_uri, key_spans in file_span_data_copy.items():
             for key, source_span in key_spans.items():
                 synth_parent_id = source_span.parent_id
-                parent_id = synthetic_id_to_index_id.get(synth_parent_id, synth_parent_id)
+                parent_id = self.synthetic_id_to_index_id.get(synth_parent_id, synth_parent_id)
                 if parent_id != synth_parent_id:
-                    assigned_sym_parent_in_span += 1
+                    # Found parent symbol that is a Clangd indexed symbol
+                    self.assigned_sym_parent_in_span += 1
                 elif parent_id:
-                    assigned_syn_parent_in_span += 1
+                    # Cannot find a clangd-indexed symbol as parent, use the parser-found scope as parent
+                    self.assigned_syn_parent_in_span += 1
 
                 synthetic_symbols[source_span.id] = self._create_synthetic_symbol(source_span, file_uri, parent_id)
+                self.synthetic_id_to_index_id[source_span.id] = source_span.id # Map synthetic ID to itself
 
         # Add the new synthetic symbols to the main symbol parser
         self.symbol_parser.symbols.update(synthetic_symbols)
-        logger.info(f"Matched and enriched {matched_body_count} existing symbols; added {len(synthetic_symbols)} synthetic symbols.")
-        logger.info(f"Assigned parent_id to symbols: {assigned_parent_in_sym} by ref, {assigned_sym_parent_in_span} by span sym id, {assigned_syn_parent_in_span} by span synth id.")
+        logger.info(f"Matched and enriched {self.matched_symbol_count} existing symbols; added {len(synthetic_symbols)} synthetic symbols.")
+        logger.info(f"Assigned parent_id to symbols: {self.assigned_parent_in_sym} by ref, {self.assigned_sym_parent_in_span} by span sym id, {self.assigned_syn_parent_in_span} by span synth id.")
         del file_span_data_copy, synthetic_symbols
         gc.collect()
 
-        # Pass 3: Assign parent IDs to remaining symbols that don't have parent id from clangd-index and clang.cindex
-        # Top level symbols have no parent id. 
-        # TODO: May give parent id with file path to top level symbols, so that we don't need to manually extract (FILE) -[:DEFINES]-> (<symbol>) relationships.
-        assigned_parent_no_span = 0
-        assigned_parent_by_span = 0
+    def _assign_parent_ids_lexically(self):
+        """
+        Assigns parent_id to symbols that don't have one, based on lexical scope.
+        """
+        logger.info("Assigning parent IDs based on lexical scope for remaining symbols.")
+        # Pass 0: Get span data (again, as it might have been deleted in previous step)
+        file_span_data = self.compilation_manager.get_source_spans()
+
         for sym_id, sym in self.symbol_parser.symbols.items():
             # Skip symbols that already assigned parent id in pass 1
             if sym.parent_id:
                 continue
-
-            if False:
-                if sym.name == 'ggml_graph_compute_secondary_thread':
-                    logger.info(f"Found symbol: {sym}")
 
             # Use the symbol's location to find its parent symbol by lexical scope container id lookup
             # We prioritize definition over declaration, but fall back to declaration if needed
@@ -158,13 +186,11 @@ class SourceSpanProvider:
             
             # Namespace symbols are allowed to not be in the project path
             sym_abs_path = unquote(urlparse(loc.file_uri).path)
-            if not sym_abs_path.startswith(project_path):
+            if not sym_abs_path.startswith(self.compilation_manager.project_path):
                 continue
 
             # For symbols that don't have parent id, try to find the innermost container span's id
-            # ==== Step 1: Find parent id for single name symbols that have no body
             parent_synth_id = None
-            parent_id = None
 
             # Fields: assign parent via enclosing container to names that have no body (just a name).
             variable_kind = {"Field", "Variable", "EnumConstant", "StaticProperty"}
@@ -177,73 +203,153 @@ class SourceSpanProvider:
                 span_tree = file_span_data.get(loc.file_uri, {}) 
                 container = self._find_innermost_container(span_tree, field_span)
                 if container:
-                    #container_key = CompilationParser.make_symbol_key(container.name, loc.file_uri, container.name_location.start_line, container.name_location.start_column)
-                    #parent_span = span_tree.get(container_key)
-                    # A container should always have a synthetic id, so no checking
-                    #parent_synth_id = parent_span.id
-
                     parent_synth_id = container.id
-                    assigned_parent_no_span += 1
+                    self.assigned_parent_no_span += 1
 
                 else:
-                    if sym.kind in {"Variable"}:
-                        # TODO: make sure they are top level Variables
-                        continue
+                    # Variables defined at top level have no parent scope
+                    if not sym.kind in {"Variable"}:
+                        logger.debug(f"Could not find container for no-body {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                
+                #now we have the parent scope id in parent_synth_id
 
-                    logger.debug(f"Could not find container for no-body {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
             else:
-                # Other symbols: find parent id from span lookup
-                if sym.kind in {"TypeAlias"} or (sym.kind in {"Function"} and not sym.definition):
-                    # We don't support TypeAlias symbols at the moment. Function without definition is only a declaration.
+                # For other symbols (except Variable and no-body function): find parent id from span lookup
+                # We skip two cases:
+                # 1. TypeAlias: We handle it separately. They are not managed in SpanTrees.
+                # 2. Function without definition, which is only a declaration that we don't care.
+                if sym.kind == "TypeAlias" or (sym.kind == "Function" and not sym.definition):
                     continue
-
-                if False:
-                    if sym.name == "XXH32_hashFromCanonical":
-                        logger.info(f"Symbol with body: {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
 
                 key = CompilationParser.make_symbol_key(sym.name, loc.file_uri, loc.start_line, loc.start_column)
                 span_tree = file_span_data.get(loc.file_uri, {})
                 if not span_tree:
-                    if not sys.argv[0].endswith("clangd_graph_rag_updater.py"):
-                        # The symbol is extended from the seed symbols, which we may not compile its source file at all.
+                    if sys.argv[0].endswith("clangd_graph_rag_builder.py"):
+                        # When the graph is incrementally updated (not built from scratch), it is normal that some files don't have span trees.
+                        # The reason is, the symbol (and its file) is extended from the seed symbols, whose source file may not be parsed.
+                        # We only log the debug message for the builder, when all the source files should be parsed, and have span trees.
                         logger.debug(f"Could not find span tree for file {loc.file_uri}, symbol {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
                     continue
 
                 span = span_tree.get(key)
-                if not span:  # No matching container found. Can be non-container symbols like TypeAlias.
-                    logger.debug(f"Could not find body span for with-body {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                if not span:  # No matching container found. 
+                    logger.debug(f"Could not find body span for sym with-body {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
                     continue
 
                 parent_synth_id = span.parent_id
                 if not parent_synth_id: # Matching body span has no parent container. Is top level.
                     continue
-                assigned_parent_by_span += 1
+
+                # Finally we found a matched span for this symbol that also has a parent scope with id parent_synth_id.
+                self.assigned_parent_by_span += 1
 
             # Resolve the parent's ID (use the real ID if it exists, otherwise the synthetic one)
-            parent_id = synthetic_id_to_index_id.get(parent_synth_id, parent_synth_id)
+            parent_id = self.synthetic_id_to_index_id.get(parent_synth_id, parent_synth_id)
             if parent_id == sym.id:
-                logger.warning(f"Found same parent id {parent_id} for {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                logger.warning(f"Found same parent id {parent_id} for {sym.kind} -- {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
                 continue
 
             sym.parent_id = parent_id
 
-        logger.info(f"Found remaining symbols' parent with lexical scope: {assigned_parent_no_span} without body, {assigned_parent_by_span} with body.")
-        assigned_count = assigned_parent_in_sym + assigned_sym_parent_in_span + assigned_syn_parent_in_span + assigned_parent_no_span + assigned_parent_by_span
-        logger.info(f"Total parent_id assigned to {assigned_count} symbols.")
-        self.matched_count = matched_body_count
-        self.assigned_count = assigned_count
+        logger.info(f"Found remaining symbols' parent with lexical scope: {self.assigned_parent_no_span} without body, {self.assigned_parent_by_span} with body.")
+        assigned_count = self.assigned_parent_in_sym + self.assigned_sym_parent_in_span + self.assigned_syn_parent_in_span + self.assigned_parent_no_span + self.assigned_parent_by_span
+        logger.info(f"Before type alias enrichment, total parent_id assigned to {assigned_count} symbols.")
+        self.assigned_parent_count = assigned_count
         # Cleanup
-        del file_span_data, synthetic_id_to_index_id
+        del file_span_data
         gc.collect()
 
-        # Pass 4: Enrich symbols with static call relations found by the parser
-        self._enrich_with_static_calls()
+    def _enrich_with_type_alias_data(self):
+        """
+        Matches existing TypeAlias symbols with TypeAliasSpan data and synthesizes new symbols
+        for unmatched TypeAliasSpans.
+        """
+        logger.info("Enriching symbols with TypeAlias data.")
+        if not self.type_alias_spans:
+            logger.info("No TypeAlias spans found to enrich.")
+            return
+
+        # Create a copy of the type_alias_spans to allow modification (deletion of matched spans)
+        unmatched_type_alias_spans = self.type_alias_spans.copy()
+
+        synthetic_type_alias_symbols = {}
+        
+        # First Pass: Match existing TypeAlias symbols from clangd index
+        for sym_id, sym in self.symbol_parser.symbols.items():
+            if sym.kind != 'TypeAlias': continue
+
+            # Use sym.id (USR-derived) to look up a matching TypeAliasSpan
+            matched_tas = unmatched_type_alias_spans.get(sym_id)
+            if not matched_tas:
+                logger.warning(f"Could not find matching TypeAliasSpan for TypeAlias symbol {sym.name} at {sym.definition.file_uri}:{sym.definition.start_line}:{sym.definition.start_column}")
+                continue
+            
+            # Enrich existing Symbol
+            sym.aliased_canonical_spelling = matched_tas.aliased_canonical_spelling
+            sym.aliased_type_id = self.synthetic_id_to_index_id.get(matched_tas.aliased_type_id, matched_tas.aliased_type_id)
+            sym.aliased_type_kind = matched_tas.aliased_type_kind
+            sym.body_location = matched_tas.body_location
+
+            if sym.parent_id is None and matched_tas.parent_id:
+                self.assigned_parent_matched_alias += 1
+                sym.parent_id = self.synthetic_id_to_index_id.get(matched_tas.parent_id, matched_tas.parent_id)
+            if sym.scope is None:
+                sym.scope = matched_tas.scope
+
+            self.synthetic_id_to_index_id[matched_tas.id] = sym_id # Map synthetic ID to clangd ID
+            del unmatched_type_alias_spans[sym_id] # Mark as processed
+            self.matched_typealias_count += 1
+
+        # Second Pass: Create Synthetic Symbols for Unmatched TypeAliasSpans
+        for unmatched_tas in unmatched_type_alias_spans.values():
+            new_sym = self._create_synthetic_type_alias_symbol(unmatched_tas)
+            synthetic_type_alias_symbols[new_sym.id] = new_sym
+            # add unmatched symbol id to the mapping table for future use.
+            # Actually unmatched_tas.id == new_sym.id, since we derive the tas id from USR in parser.
+            self.synthetic_id_to_index_id[unmatched_tas.id] = new_sym.id 
+
+        self.symbol_parser.symbols.update(synthetic_type_alias_symbols)
+        logger.info(f"Processed {len(self.type_alias_spans)} TypeAlias.")
+        logger.info(f"Matched {self.matched_typealias_count} symbols ({self.assigned_parent_matched_alias} newly assigned parent)."
+                    f"Added {len(synthetic_type_alias_symbols)} synthetic symbols ({self.assigned_parent_unmatched_alias} with parent)."
+                   )
+
+        self.assigned_parent_count += self.assigned_parent_matched_alias + self.assigned_parent_unmatched_alias
+
+    def _create_synthetic_type_alias_symbol(self, tas: TypeAliasSpan) -> Symbol:
+        """Constructs a Symbol object for a synthetic TypeAlias."""
+        loc = Location.from_relative_location(tas.name_location, file_uri=tas.file_uri)
+
+        # Resolve parent_id and aliased_type_id using the global mapping
+        resolved_parent_id = self.synthetic_id_to_index_id.get(tas.parent_id, tas.parent_id)
+        if resolved_parent_id:
+            self.assigned_parent_unmatched_alias += 1
+
+        resolved_aliased_type_id = self.synthetic_id_to_index_id.get(tas.aliased_type_id, tas.aliased_type_id)
+
+        new_sym = Symbol(
+            id=tas.id,
+            name=tas.name,
+            kind='TypeAlias',
+            declaration=loc,
+            definition=loc,
+            references=[],
+            scope=tas.scope,
+            language=tas.lang,
+            body_location=tas.body_location,
+            parent_id=resolved_parent_id,
+            aliased_canonical_spelling=tas.aliased_canonical_spelling,
+            aliased_type_id=resolved_aliased_type_id,
+            aliased_type_kind=tas.aliased_type_kind
+        )
+        return new_sym
 
     def get_matched_count(self) -> int:
-        return self.matched_count
+        return self.matched_symbol_count + self.matched_typealias_count
+
 
     def get_assigned_count(self) -> int:
-        return self.assigned_count
+        return self.assigned_parent_count
 
     def _enrich_with_static_calls(self):
         """

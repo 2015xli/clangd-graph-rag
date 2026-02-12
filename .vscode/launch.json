@@ -5,6 +5,13 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python Debugger: LLama Graph RAG builder original_0 (single parser)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "clangd_graph_rag_builder.py",
+            "args": ["~/Public/llama.cpp/llama_cpp_original_0.yaml", "~/Public/llama.cpp/", "--num-parse-workers=1"]
+        },
+        {
             "name": "Python Debugger: LLama Graph RAG builder original_4",
             "type": "debugpy",
             "request": "launch",

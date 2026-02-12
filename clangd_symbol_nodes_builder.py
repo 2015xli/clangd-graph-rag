@@ -116,6 +116,16 @@ class SymbolProcessor:
         elif sym.kind == "Variable":
             symbol_data["node_label"] = "VARIABLE"
             symbol_data.update({"type": sym.type})
+        elif sym.kind == "TypeAlias":
+            symbol_data["node_label"] = "TYPE_ALIAS"
+            symbol_data["aliased_canonical_spelling"] = sym.aliased_canonical_spelling
+            symbol_data["aliased_type_id"] = sym.aliased_type_id
+            symbol_data["aliased_type_kind"] = sym.aliased_type_kind
+            symbol_data["parent_id"] = sym.parent_id
+            symbol_data["scope"] = sym.scope
+            symbol_data["qualified_name"] = sym.scope + sym.name
+            if sym.body_location:
+                symbol_data["body_location"] = [sym.body_location.start_line, sym.body_location.start_column, sym.body_location.end_line, sym.body_location.end_column]
         else:
             return None
 
@@ -147,6 +157,8 @@ class SymbolProcessor:
         self._ingest_nodes_by_label(processed_symbols.get('NAMESPACE', []), "NAMESPACE", neo4j_mgr)
         self._ingest_nodes_by_label(processed_symbols.get('DATA_STRUCTURE', []), "DATA_STRUCTURE", neo4j_mgr)
         self._ingest_nodes_by_label(processed_symbols.get('CLASS_STRUCTURE', []), "CLASS_STRUCTURE", neo4j_mgr)
+        self._ingest_type_expression_nodes(processed_symbols.get('TYPE_ALIAS', []), neo4j_mgr) # Pass TYPE_ALIAS data to extract TYPE_EXPRESSION
+        self._ingest_nodes_by_label(processed_symbols.get('TYPE_ALIAS', []), "TYPE_ALIAS", neo4j_mgr)
         self._dedup_nodes(neo4j_mgr)
         self._ingest_nodes_by_label(processed_symbols.get('FUNCTION', []), "FUNCTION", neo4j_mgr)
         self._ingest_nodes_by_label(processed_symbols.get('METHOD', []), "METHOD", neo4j_mgr)
@@ -165,6 +177,7 @@ class SymbolProcessor:
         
         self._ingest_inheritance_relationships(symbol_parser.inheritance_relations, neo4j_mgr)
         self._ingest_override_relationships(symbol_parser.override_relations, neo4j_mgr)
+        self._ingest_alias_of_relationships(processed_symbols.get('TYPE_ALIAS', []), neo4j_mgr)
 
         del processed_symbols
         gc.collect()
@@ -197,16 +210,34 @@ class SymbolProcessor:
                         if parent_label in ('CLASS_STRUCTURE', 'DATA_STRUCTURE', 'FUNCTION', 'METHOD') and child_label in ('CLASS_STRUCTURE', 'DATA_STRUCTURE', 'FUNCTION'):
                             grouped_nested_relations[(parent_label, child_label)].append({"parent_id": parent_id, "child_id": symbol_data["id"]})
         
+        self._ingest_grouped_parental_relationships(grouped_scope_relations, "SCOPE_CONTAINS", neo4j_mgr)
+        self._ingest_grouped_parental_relationships(grouped_nested_relations, "HAS_NESTED", neo4j_mgr)
+        
+        # ingest relationships for (SCOPE)-[:DEFINES_TYPE_ALIAS]->(:TYPE_ALIAS)
+        grouped_defines_type_alias_relations = defaultdict(list)
+        type_alias_symbols = processed_symbols.get('TYPE_ALIAS', [])
+        for symbol_data in type_alias_symbols:
+            parent_id = symbol_data["parent_id"]
+            if parent_label := id_to_label_map.get(parent_id):
+                grouped_defines_type_alias_relations[(parent_label, "TYPE_ALIAS")].append({"parent_id": parent_id, "child_id": symbol_data["id"]})
+        self._ingest_grouped_parental_relationships(grouped_defines_type_alias_relations, "DEFINES_TYPE_ALIAS", neo4j_mgr)
         del id_to_label_map
-        self._ingest_scope_contains_relationships(grouped_scope_relations, neo4j_mgr)
-        self._ingest_nesting_relationships(grouped_nested_relations, neo4j_mgr)
 
     def _ingest_nodes_by_label(self, data_list: List[Dict], label: str, neo4j_mgr: Neo4jManager):
         """A generic function to ingest nodes of a specific label."""
         if not data_list: return
         
         logger.info(f"Creating {len(data_list)} {label} nodes in batches of {self.ingest_batch_size}...")
-        keys_to_remove = "['parent_id']" if label == "METHOD" else "['parent_id', 'namespace_id']"
+        if label == "TYPE_EXPRESSION":
+            keys_to_remove = []  
+        else:
+            keys_to_remove = ['parent_id', 'node_label']
+            if label == "TYPE_ALIAS":
+                keys_to_remove += ['aliased_type_id'] #'aliased_type_kind' and 'aliased_canonical_spelling' are kept
+            else:
+                keys_to_remove += ['namespace_id']        
+
+        keys_to_remove = str(keys_to_remove)
         query = f"""
         UNWIND $data AS d
         MERGE (n:{label} {{id: d.id}})
@@ -221,6 +252,43 @@ class SymbolProcessor:
                 total_nodes_created += counters.nodes_created
                 total_properties_set += counters.properties_set
         logger.info(f"  Total {label} nodes created: {total_nodes_created}, properties set: {total_properties_set}")
+
+    def _ingest_grouped_parental_relationships(self, grouped_relations: Dict[Tuple[str, str], List[Dict]], relationship_type: str, neo4j_mgr: Neo4jManager):
+        if not grouped_relations: return
+        total_rels = sum(len(v) for v in grouped_relations.values())
+        logger.info(f"Creating {total_rels} {relationship_type} relationships...")
+        total_rels_created = 0
+        for (parent_label, child_label), relations in grouped_relations.items():
+            logger.info(f"  Ingesting {len(relations)} {relationship_type} for ({parent_label})->({child_label})")
+            query = f"UNWIND $data AS d MATCH (p:{parent_label} {{id: d.parent_id}}) MATCH (c:{child_label} {{id: d.child_id}}) MERGE (p)-[:{relationship_type}]->(c)"
+            for i in tqdm(range(0, len(relations), self.ingest_batch_size), desc=align_string(f"Ingesting {relationship_type} ({child_label})")):
+                counters = neo4j_mgr.execute_autocommit_query(query, {"data": relations[i:i+self.ingest_batch_size]})
+                total_rels_created += counters.relationships_created
+        logger.info(f"  Total {relationship_type} relationships created: {total_rels_created}")
+
+    def _ingest_type_expression_nodes(self, type_alias_symbols: List[Dict], neo4j_mgr: Neo4jManager):
+        """
+        Ingests TYPE_EXPRESSION nodes.
+        This method collects unique aliased_canonical_spelling values from TypeAlias symbols
+        where aliased_type_kind is "TypeExpression" and creates TYPE_EXPRESSION nodes.
+        """
+        if not type_alias_symbols: return
+        
+        type_expressions_to_ingest = []
+        seen_expressions = set()
+        for data in type_alias_symbols:
+            if data.get('aliased_type_kind') == "TypeExpression" and data.get('aliased_canonical_spelling') not in seen_expressions:
+                type_expressions_to_ingest.append({
+                    "id": data['aliased_type_id'], # This is the synthetic ID generated for the type expression
+                    "name": data['aliased_canonical_spelling'],
+                    "kind": "TypeExpression"
+                })
+                seen_expressions.add(data['aliased_canonical_spelling'])
+
+        if not type_expressions_to_ingest: return
+
+        self._ingest_nodes_by_label(type_expressions_to_ingest, "TYPE_EXPRESSION", neo4j_mgr)
+
 
     def _dedup_nodes(self, neo4j_mgr: Neo4jManager):
         """
@@ -273,7 +341,7 @@ class SymbolProcessor:
     def _ingest_defines_relationships(self, processed_symbols: Dict[str, List[Dict]], neo4j_mgr: Neo4jManager, defines_generation_strategy: str='unwind-sequential'):
         # Group symbols that are defined in a file
         grouped_defines = defaultdict(list)
-        for label in ['FUNCTION', 'VARIABLE', 'DATA_STRUCTURE', 'CLASS_STRUCTURE']:
+        for label in ['FUNCTION', 'VARIABLE', 'DATA_STRUCTURE', 'CLASS_STRUCTURE', 'TYPE_ALIAS']:
             for symbol_data in processed_symbols.get(label, []):
                 if 'file_path' in symbol_data:
                     grouped_defines[label].append(symbol_data)
@@ -392,31 +460,37 @@ class SymbolProcessor:
             total_rels_created += counters.relationships_created
         logger.info(f"  Total OVERRIDDEN_BY relationships created: {total_rels_created}")
 
-    def _ingest_scope_contains_relationships(self, scope_relations: Dict[Tuple[str, str], List[Dict]], neo4j_mgr: Neo4jManager):
-        if not scope_relations: return
-        total_rels = sum(len(v) for v in scope_relations.values())
-        logger.info(f"Creating {total_rels} SCOPE_CONTAINS relationships...")
-        total_rels_created = 0
-        for (parent_label, child_label), relations in scope_relations.items():
-            logger.info(f"  Ingesting {len(relations)} SCOPE_CONTAINS for ({parent_label})->({child_label})")
-            query = f"UNWIND $data AS d MATCH (p:{parent_label} {{id: d.parent_id}}) MATCH (c:{child_label} {{id: d.child_id}}) MERGE (p)-[:SCOPE_CONTAINS]->(c)"
-            for i in tqdm(range(0, len(relations), self.ingest_batch_size), desc=align_string(f"SCOPE_CONTAINS ({child_label})")):
-                counters = neo4j_mgr.execute_autocommit_query(query, {"data": relations[i:i+self.ingest_batch_size]})
-                total_rels_created += counters.relationships_created
-        logger.info(f"  Total SCOPE_CONTAINS relationships created: {total_rels_created}")
+    def _ingest_alias_of_relationships(self, type_alias_data_list: List[Dict], neo4j_mgr: Neo4jManager):
+        """
+        Ingests ALIAS_OF relationships from TYPE_ALIAS nodes to their aliased types.
+        """
+        if not type_alias_data_list: return
+        
+        relations_to_ingest = []
+        for data in type_alias_data_list:
+            if data.get('aliased_type_id'):
+                relations_to_ingest.append({
+                    "alias_id": data['id'],
+                    "aliased_type_id": data['aliased_type_id'],
+                    "aliased_type_kind": data['aliased_type_kind']
+                })
 
-    def _ingest_nesting_relationships(self, grouped_relations: Dict[Tuple[str, str], List[Dict]], neo4j_mgr: Neo4jManager):
-        if not grouped_relations: return
-        total_rels = sum(len(v) for v in grouped_relations.values())
-        logger.info(f"Creating {total_rels} HAS_NESTED relationships...")
+        if not relations_to_ingest: return
+
+        logger.info(f"Creating {len(relations_to_ingest)} ALIAS_OF relationships in batches of {self.ingest_batch_size}...")
+        query = """
+        UNWIND $data AS d
+        MATCH (alias:TYPE_ALIAS {id: d.alias_id})
+        MATCH (aliasee) WHERE aliasee.id = d.aliased_type_id AND (aliasee:CLASS_STRUCTURE OR aliasee:DATA_STRUCTURE OR aliasee:TYPE_EXPRESSION OR aliasee:TYPE_ALIAS)
+        MERGE (alias)-[:ALIAS_OF]->(aliasee)
+        """
+        
         total_rels_created = 0
-        for (parent_label, child_label), relations in grouped_relations.items():
-            logger.info(f"  Ingesting {len(relations)} HAS_NESTED for ({parent_label})->({child_label})")
-            query = f"UNWIND $data AS d MATCH (p:{parent_label} {{id: d.parent_id}}) MATCH (c:{child_label} {{id: d.child_id}}) MERGE (p)-[:HAS_NESTED]->(c)"
-            for i in tqdm(range(0, len(relations), self.ingest_batch_size), desc=align_string(f"HAS_NESTED ({child_label})")):
-                counters = neo4j_mgr.execute_autocommit_query(query, {"data": relations[i:i+self.ingest_batch_size]})
-                total_rels_created += counters.relationships_created
-        logger.info(f"  Total HAS_NESTED relationships created: {total_rels_created}")
+        for i in tqdm(range(0, len(relations_to_ingest), self.ingest_batch_size), desc=align_string(f"Ingesting ALIAS_OF relationships")):
+            batch = relations_to_ingest[i:i+self.ingest_batch_size]
+            counters = neo4j_mgr.execute_autocommit_query(query, {"data": batch})
+            total_rels_created += counters.relationships_created
+        logger.info(f"  Total ALIAS_OF relationships created: {total_rels_created}")
 
     def _ingest_file_namespace_declarations(self, namespace_data_list: List[Dict], neo4j_mgr: Neo4jManager):
         relations_data = [ns for ns in namespace_data_list if ns.get('path')]
