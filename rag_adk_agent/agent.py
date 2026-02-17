@@ -47,6 +47,7 @@ def sync_agent():
 
     # --- Dynamically build the instruction prompt ---
     with Neo4jManager() as neo4j_mgr:
+        has_summary = neo4j_mgr.check_property_exists('summary', ['FUNCTION','ENTITY'])
         has_embeddings = neo4j_mgr.check_property_exists('summaryEmbedding', ['FUNCTION','ENTITY'])
 
     base_instruction = (
@@ -142,7 +143,8 @@ def sync_agent():
     final_instruction = base_instruction + source_code_instruction + keyword_search_instruction
     if has_embeddings:
         final_instruction += semantic_search_instruction
-    final_instruction += graph_summary_instruction
+    if has_summary:
+        final_instruction += graph_summary_instruction
 
     # --- End of dynamic instruction prompt build ---
 
