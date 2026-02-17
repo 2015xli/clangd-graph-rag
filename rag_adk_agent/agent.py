@@ -109,6 +109,10 @@ def sync_agent():
      "\n\n## Note 5: How to Perform Searches"
         "\n- **Keyword match search with cypher query**: Use `STARTS WITH` or `CONTAINS` on properties like `name` or `path` or `summary` for keyword searches. "
         "\n    e.g., `MATCH (f:FILE) WHERE f.path CONTAINS 'utils' RETURN f.id LIMIT 5`"
+        "\n- **Type search**: If you know the keyword is a name of a user defined types (e.g., struct, class, enum, typedef, using, etc.), you can specifically search for type nodes." 
+        "\n    e.g., `MATCH (type:TYPE_ALIAS|DATA_STRUCTURE|CLASS_STRUCTURE) WHERE type.name = 'MyType' RETURN type.id, type.kind`"
+        "\n    Then you can use the id to retrieve source code of the type with `get_source_code_by_id` tool."
+        "\n    If the returned result is a type alias definition involving other unknown types, you may have to recursively search for the unknown types."
     )
     
     semantic_search_instruction = (
@@ -123,9 +127,22 @@ def sync_agent():
         "         ORDER BY score DESC LIMIT 5;"
     )
 
+    graph_summary_instruction = (
+     "\n\n## Note 6: How to Quickly Understand Part Of or Whole Codebase and its Structure"
+        "\n- **Get summary property when available**: To understand the codebase, the fastest way is to get the `summary` property of the nodes. It's the result of offline analysis when the graph is built."
+        "\n    The graph is organized in a hierarchical structure where `PROJECT` -[:CONTAINS]-> `FOLDER`/`FILE`, `FILE` -[:DEFINES]-> `DATA_STRUCTURE/`CLASS_STRUCTURE`, which in turn -[:HAS_METHOD]->`FUNCTION`/`METHOD`. "
+        "\n    For example, if you want to understand what all the files under a folder do, assuming the folder path is `relative/path/to/folder_name`, "
+        "\n    then you can use `MATCH (n:FOLDER) WHERE n.name = 'folder_name' AND n.path = 'relative/path/to' RETURN n.summary` to get the folder's analysis summary"
+        "\n    To understand more details about a project's high-level structure, you can match the PROJECT node's first-level children FOLDER/FILE nodes and get their summaries."
+        "\n    Unless necessary, you don't need to go down to the hierarchy levels to understand the codebase."
+        "\n    Note all the path property values are relative path to the project root, except the project's path property is absolute path of the project root."
+        "\n    The summary property is not always available to all nodes. Only the nodes whose subtree has essential source code will have summary property."
+    )
+
     final_instruction = base_instruction + source_code_instruction + keyword_search_instruction
     if has_embeddings:
         final_instruction += semantic_search_instruction
+    final_instruction += graph_summary_instruction
 
     # --- End of dynamic instruction prompt build ---
 

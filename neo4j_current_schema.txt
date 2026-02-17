@@ -1,0 +1,105 @@
+Node Properties:
+  (PROJECT)
+    name: STRING
+    path: STRING
+    summary: STRING
+    summaryEmbedding: LIST
+  (FOLDER)
+    name: STRING
+    path: STRING (INDEXED) (UNIQUE)
+    summary: STRING
+    summaryEmbedding: LIST
+  (FILE)
+    name: STRING
+    path: STRING (INDEXED) (UNIQUE)
+    summary: STRING
+    summaryEmbedding: LIST
+  (CLASS_STRUCTURE|DATA_STRUCTURE)
+    name: STRING
+    id: STRING (INDEXED) (UNIQUE)
+    kind: STRING
+    language: STRING
+    path: STRING
+    body_location: LIST
+    summary: STRING
+    summaryEmbedding: LIST
+  (FIELD)
+    id: STRING (INDEXED) (UNIQUE)
+    name: STRING
+    is_static: BOOLEAN
+    kind: STRING
+    language: STRING
+    scope: STRING
+    type: STRING
+    path: STRING
+  (FUNCTION|METHOD)
+    id: STRING (INDEXED) (UNIQUE)
+    name: STRING
+    language: STRING
+    kind: STRING
+    type: STRING
+    return_type: STRING
+    scope: STRING
+    signature: STRING
+    path: STRING
+    body_location: LIST
+    summary: STRING
+    summaryEmbedding: LIST
+  (NAMESPACE)
+    id: STRING (INDEXED) (UNIQUE)
+    name: STRING
+    scope: STRING
+    qualified_name: STRING
+    name_location: LIST
+    path: STRING
+    summary: STRING
+    summaryEmbedding: LIST
+  (VARIABLE)
+    id: STRING (INDEXED) (UNIQUE)
+    name: STRING
+    kind: STRING
+    scope: STRING
+    type: STRING
+    language: STRING
+    path: STRING
+    name_location: LIST
+  (TYPE_ALIAS)
+    id: STRING (INDEXED) (UNIQUE)
+    name: STRING
+    scope: STRING
+    qualified_name: STRING
+    path: STRING
+    body_location: LIST
+
+
+Relationships:
+  (PROJECT) -[:CONTAINS]-> (FOLDER|FILE)
+  (FOLDER) -[:CONTAINS]-> (FILE|FOLDER)
+  (FILE) -[:INCLUDES]-> (FILE)
+  (FILE) -[:DECLARES]-> (NAMESPACE|CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE)
+  (FILE) -[:DEFINES]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE|TYPE_ALIAS)
+  (NAMESPACE) -[:SCOPE_CONTAINS]-> (NAMESPACE|CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE)
+  (CLASS_STRUCTURE|DATA_STRUCTURE) -[:HAS_METHOD]-> (METHOD)
+  (CLASS_STRUCTURE|DATA_STRUCTURE) -[:HAS_FIELD]-> (FIELD)
+  (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|METHOD) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION)
+  (FUNCTION|METHOD) -[:CALLS]-> (FUNCTION|METHOD)
+  (CLASS_STRUCTURE) -[:INHERITS]-> (CLASS_STRUCTURE)
+  (METHOD) -[:OVERRIDDEN_BY]-> (METHOD)
+  (CLASS_STRUCTURE|DATA_STRUCTURE) -[:DEFINES_TYPE_ALIAS]-> (TYPE_ALIAS)
+  (TYPE_ALIAS) -[:ALIAS_OF]-> (CLASS_STRUCTURE|DATA_STRUCTURE|TYPE_ALIAS)
+
+
+Property Explanations:
+  id: Unique identifier for the node.
+  name: Name of the entity (e.g., function name, file name).
+  path: Relative path to the project root. The PROJECT node has an absolute path of the project root path.
+  name_location: Entity's name location in the file, showing the start position: [line, column].
+  body_location: Entity's body location in the file, showing the range: [start_line, start_column, end_line, end_column].
+  kind: Type of symbol (e.g., Function, Struct, Variable).
+  scope: lexical scope (e.g., MyScope::MyClass::).
+  language: Programming language of the source code, C or C++.
+  type: Data type of the symbol (e.g., int, void*).
+  return_type: Return type of a function/method.
+  signature: Full signature of a function/method.
+  summary: LLM-generated context-aware summary of the node's purpose.
+  summaryEmbedding: Vector embedding of the 'summary' for similarity search.
