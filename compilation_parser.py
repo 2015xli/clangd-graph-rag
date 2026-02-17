@@ -272,7 +272,8 @@ class _ClangWorkerImpl:
         semantic_parent = node.semantic_parent
         if semantic_parent and semantic_parent.kind.name in ClangParser.NODE_KIND_CALLERS:
             #logger.debug(f"Skipping TypeAlias at {file_name}:{node.location.line}:{node.location.column} in function {semantic_parent.spelling}.")
-            return # Ignore function-local aliases
+            # Ignore function-local aliases. It does not provide much value.
+            return
 
         # Extract Aliaser Info
         name = node.spelling
@@ -280,29 +281,29 @@ class _ClangWorkerImpl:
         body_start_line, body_start_col = node.extent.start.line - 1, node.extent.start.column - 1
         body_end_line, body_end_col = node.extent.end.line - 1, node.extent.end.column - 1
         file_uri = f"file://{file_name}"
-
-        # Generate ID for the aliaser (USR-derived)
         aliaser_id = self._hash_usr_to_id(node.get_usr())
+        scope = self._get_fully_qualified_scope(semantic_parent)
+        parent_id = self._get_parent_id(node) # Use existing helper for parent_id
 
-        # Resolve Aliasee Info
+        # Next, resolve Aliasee Info
         underlying_type = node.underlying_typedef_type
-        aliased_canonical_spelling = underlying_type.get_canonical().spelling
-
+        aliased_canonical_spelling = underlying_type.get_canonical().spelling  #can be empty ''
         aliased_type_id = None
         aliased_type_kind = None
         is_aliasee_definition = False
 
         aliasee_decl_cursor = underlying_type.get_declaration()
 
-        if aliasee_decl_cursor.kind.name != "NO_DECL_FOUND":
+        if aliasee_decl_cursor.kind.name not in  {"NO_DECL_FOUND", "TEMPLATE_TEMPLATE_PARAMETER"}:
             is_aliasee_definition = aliasee_decl_cursor.is_definition()
+            aliased_type_kind = self._convert_node_kind_to_index_kind(aliasee_decl_cursor)
 
-            if aliasee_decl_cursor.kind.name in ClangParser.NODE_KIND_TYPE_ALIAS:
-                # Aliasee is another TypeAlias, use its USR-derived ID
-                aliased_type_id = self._hash_usr_to_id(aliasee_decl_cursor.get_usr())
-                aliased_type_kind = "TypeAlias"
-            elif aliasee_decl_cursor.kind.name in ClangParser.NODE_KIND_FOR_COMPOSITE_TYPES:
-                # Aliasee is a named user-defined type (struct, class, enum, union)
+            # We should use USR-derived id for all declarations, but since we use synthetic key for SourceSpans, 
+            # we will keep it for now for data_structure/class_structure types, in order to be mapped in graph enrichment.
+            # (We use synthetic id in order to support anonymous structures. 
+            # TODO: we should consider to use USR-derived id as much as possible.
+            if aliasee_decl_cursor.kind.name in ClangParser.NODE_KIND_FOR_COMPOSITE_TYPES:
+                # Aliasee is a named user-defined composite type (struct, class, enum, union)
                 # Use synthetic ID for consistency with SourceSpan handling
                 aliased_type_id = CompilationParser.make_synthetic_id(
                     CompilationParser.make_symbol_key(
@@ -312,20 +313,24 @@ class _ClangWorkerImpl:
                         aliasee_decl_cursor.location.column - 1
                     )
                 )
-                # NOTE: for alias of TYPE_ALIAS_TEMPLATE_DECL, the aliasee can be a class/struct like MyClass<T>.
-                # In this case, since it is a template-based type, we cannot simply get its type from node of MyClass.
-                aliased_type_kind = self._convert_node_kind_to_index_kind(aliasee_decl_cursor)
-        else:
-            # Aliasee is a primitive type expression (e.g., int*, int) or a dependent type (e.g., typename MyClass<T>::nested_alias)
-            # NOTE: for case of dependent type, the aliased_canonical_spelling is empty "". The following logic does not work.
-            aliased_type_id = CompilationParser.make_synthetic_id(
-                f"type://{aliased_canonical_spelling}"
-            )
-            aliased_type_kind = "TypeExpression"
+            else:
+                aliased_type_id = self._hash_usr_to_id(aliasee_decl_cursor.get_usr())
 
-        # Determine scope and parent_id
-        scope = self._get_fully_qualified_scope(semantic_parent)
-        parent_id = self._get_parent_id(node) # Use existing helper for parent_id
+            # If the target aliasee definition is out of the project, set aliased_type_id to None, so that we don't create a relationship to it
+            file_path = os.path.abspath(aliasee_decl_cursor.location.file.name)
+            if not file_path.startswith(self.project_path): 
+                aliased_type_id = None
+
+        else: 
+        # 1) NO_DECL_FOUND cases:
+        #    Aliasee is a primitive type expression (e.g., int*, int) or a dependent type (e.g., typename MyClass<T>::nested_alias)
+        #    For case of dependent type, the aliased_canonical_spelling is empty "" since it is not yet instantiated. 
+        # 2) TEMPLATE_TEMPLATE_PARAMETER:
+        #    Aliasee is a template template parameter 
+        #    template<template<class> class Op>
+        #    struct X { using type = Op<int>; };
+        # In any case of NO_DECL_FOUND, we don't try to extract aliasee's info.
+            pass
 
         # Store TypeAliasSpan
         new_type_alias_span = TypeAliasSpan(

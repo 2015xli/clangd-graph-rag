@@ -157,7 +157,6 @@ class SymbolProcessor:
         self._ingest_nodes_by_label(processed_symbols.get('NAMESPACE', []), "NAMESPACE", neo4j_mgr)
         self._ingest_nodes_by_label(processed_symbols.get('DATA_STRUCTURE', []), "DATA_STRUCTURE", neo4j_mgr)
         self._ingest_nodes_by_label(processed_symbols.get('CLASS_STRUCTURE', []), "CLASS_STRUCTURE", neo4j_mgr)
-        self._ingest_type_expression_nodes(processed_symbols.get('TYPE_ALIAS', []), neo4j_mgr) # Pass TYPE_ALIAS data to extract TYPE_EXPRESSION
         self._ingest_nodes_by_label(processed_symbols.get('TYPE_ALIAS', []), "TYPE_ALIAS", neo4j_mgr)
         self._dedup_nodes(neo4j_mgr)
         self._ingest_nodes_by_label(processed_symbols.get('FUNCTION', []), "FUNCTION", neo4j_mgr)
@@ -228,14 +227,11 @@ class SymbolProcessor:
         if not data_list: return
         
         logger.info(f"Creating {len(data_list)} {label} nodes in batches of {self.ingest_batch_size}...")
-        if label == "TYPE_EXPRESSION":
-            keys_to_remove = []  
+        keys_to_remove = ['parent_id', 'node_label']
+        if label == "TYPE_ALIAS":
+            keys_to_remove += ['aliased_type_id'] #'aliased_type_kind' and 'aliased_canonical_spelling' are kept for quick reference
         else:
-            keys_to_remove = ['parent_id', 'node_label']
-            if label == "TYPE_ALIAS":
-                keys_to_remove += ['aliased_type_id'] #'aliased_type_kind' and 'aliased_canonical_spelling' are kept
-            else:
-                keys_to_remove += ['namespace_id']        
+            keys_to_remove += ['namespace_id']        
 
         keys_to_remove = str(keys_to_remove)
         query = f"""
@@ -265,30 +261,6 @@ class SymbolProcessor:
                 counters = neo4j_mgr.execute_autocommit_query(query, {"data": relations[i:i+self.ingest_batch_size]})
                 total_rels_created += counters.relationships_created
         logger.info(f"  Total {relationship_type} relationships created: {total_rels_created}")
-
-    def _ingest_type_expression_nodes(self, type_alias_symbols: List[Dict], neo4j_mgr: Neo4jManager):
-        """
-        Ingests TYPE_EXPRESSION nodes.
-        This method collects unique aliased_canonical_spelling values from TypeAlias symbols
-        where aliased_type_kind is "TypeExpression" and creates TYPE_EXPRESSION nodes.
-        """
-        if not type_alias_symbols: return
-        
-        type_expressions_to_ingest = []
-        seen_expressions = set()
-        for data in type_alias_symbols:
-            if data.get('aliased_type_kind') == "TypeExpression" and data.get('aliased_canonical_spelling') not in seen_expressions:
-                type_expressions_to_ingest.append({
-                    "id": data['aliased_type_id'], # This is the synthetic ID generated for the type expression
-                    "name": data['aliased_canonical_spelling'],
-                    "kind": "TypeExpression"
-                })
-                seen_expressions.add(data['aliased_canonical_spelling'])
-
-        if not type_expressions_to_ingest: return
-
-        self._ingest_nodes_by_label(type_expressions_to_ingest, "TYPE_EXPRESSION", neo4j_mgr)
-
 
     def _dedup_nodes(self, neo4j_mgr: Neo4jManager):
         """
@@ -468,6 +440,7 @@ class SymbolProcessor:
         
         relations_to_ingest = []
         for data in type_alias_data_list:
+            # Automatically fillter out those aliased target nodes (aliased_type_id is None)
             if data.get('aliased_type_id'):
                 relations_to_ingest.append({
                     "alias_id": data['id'],
@@ -481,7 +454,7 @@ class SymbolProcessor:
         query = """
         UNWIND $data AS d
         MATCH (alias:TYPE_ALIAS {id: d.alias_id})
-        MATCH (aliasee) WHERE aliasee.id = d.aliased_type_id AND (aliasee:CLASS_STRUCTURE OR aliasee:DATA_STRUCTURE OR aliasee:TYPE_EXPRESSION OR aliasee:TYPE_ALIAS)
+        MATCH (aliasee) WHERE aliasee.id = d.aliased_type_id AND (aliasee:CLASS_STRUCTURE|DATA_STRUCTURE|TYPE_ALIAS)
         MERGE (alias)-[:ALIAS_OF]->(aliasee)
         """
         

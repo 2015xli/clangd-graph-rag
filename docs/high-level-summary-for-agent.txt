@@ -1,0 +1,236 @@
+  This project, clangd-graph-rag, is a sophisticated pipeline designed to transform C/C++ codebases into an
+  AI-queryable knowledge graph within a Neo4j database.
+
+  Core Functionality:
+
+
+   1. Ingestion: It parses compile_commands.json and a clangd-index.yaml file to build a foundational code graph. This
+      graph represents the file/folder hierarchy, symbol definitions (functions, classes, etc.), and their relationships.
+   2. Enrichment: The system goes beyond the clangd index by directly parsing source code using clang's libraries. This
+      allows it to build crucial relationships that the index alone doesn't provide, such as a complete call graph (even
+      for older index formats) and a comprehensive header inclusion graph ([:INCLUDES]).
+   3. RAG Generation: It leverages Large Language Models (LLMs) to generate natural language summaries for code elements
+      (functions, classes, files). These summaries, along with vector embeddings, are attached to the graph nodes, turning
+      the structural graph into a semantic one.
+   4. Incremental Updates: It intelligently updates the graph by analyzing git history. Critically, it uses the
+      [:INCLUDES] graph to identify not just changed files but all files impacted by header modifications, ensuring the
+      graph remains consistent.
+   5. AI Agent Interaction: The project provides a complete framework for querying the graph with natural language. This
+      includes a graph_mcp_server.py that exposes safe, read-only tools (like execute_cypher_query and get_source_code)
+      and an example rag_adk_agent that uses these tools to reason about the codebase and answer user questions.
+
+  Key Design Principles:
+
+
+   * Accuracy: It relies on compiler-level tools (clang) for parsing, ensuring a high-fidelity representation of the
+     code.
+   * Performance: It is built for speed and efficiency, using parallel processing for CPU-bound tasks (parsing) and
+     asynchronous operations for I/O-bound tasks (LLM calls), along with extensive caching.
+   * Modularity: The system is broken down into distinct, reusable components (parsers, processors, orchestrators), which
+     allows the same core logic to be used for both full builds and incremental updates.
+   * Robustness: It is designed to handle real-world complexities like different clangd versions, memory management for
+     large projects, and ensuring data integrity during updates.
+
+ ╭──────────────────────────────────────────╮
+ │             clangd_graph_rag_builder.py  │
+ ╰──────────────────────────────────────────╯
+✦ Source file clangd_graph_rag_builder.py. It's the core script for building the code graph from a clangd index,
+  orchestrating a multi-phase pipeline. This pipeline involves parsing symbols and source code, enriching symbols with
+  span data, setting up the Neo4j database, ingesting paths, symbols, include relations, and call graphs, followed by
+  memory optimization, graph cleanup, RAG data generation, and agent schema addition. It relies on various modules for
+  argument parsing, symbol/path/call graph processing, Neo4j interaction, memory debugging, Git operations, compilation
+  management, include relation handling, source span provision, RAG generation, and logging. 
+ ╭─────────────────────────────────────╮
+ │             compilation_manager.py  │
+ ╰─────────────────────────────────────╯
+✦ Source file compilation_manager.py. This module orchestrates C/C++ source code parsing, managing parser selection
+  (Clang or Tree-sitter) and robust caching via CacheManager (Git-based or mtime-based). The CompilationManager class
+  handles initialization, parser creation, and the core parse_files method, which intelligently uses caching or performs
+  parsing. It also provides accessors for parsed data like source spans and include relations. The main block
+  demonstrates its usage for parsing files and optionally performing header impact analysis. This module is crucial for
+  efficient and accurate source code data extraction for the code graph. 
+ ╭────────────────────────────────────╮
+ │             compilation_parser.py  │
+ ╰────────────────────────────────────╯
+✦ Source file compilation_parser.py. This module is critical for extracting C/C++ source code details like function
+  spans, include relations, and type aliases. It offers ClangParser for semantic analysis via clang.cindex and
+  TreesitterParser for syntactic analysis. Both leverage parallel processing with _ClangWorkerImpl or
+  _TreesitterWorkerImpl to efficiently parse compilation units or files, respectively. The CompilationParser abstract
+  base class defines common interfaces and utilities, including deterministic ID generation and a generic parallel
+  parsing mechanism. This module's output enriches the clangd index, forming a more comprehensive code graph. Next, I'll
+  read git_manager.py.
+ ╭───────────────────────────────────────────╮
+ │             include_relation_provider.py  │
+ ╰───────────────────────────────────────────╯
+✦ Source file include_relation_provider.py. This module manages [:INCLUDES] relationships in Neo4j, both for initial
+  ingestion and for identifying impacted files during incremental updates. The IncludeRelationProvider class handles
+  converting absolute paths to relative, filtering external files, and batching relations for Neo4j. It uses Cypher
+  queries for transitive impact analysis and offers an in-memory alternative for debugging. Dependencies include
+  neo4j_manager, compilation_manager, and compilation_parser. This module is crucial for accurate dependency modeling and
+  efficient incremental updates. 
+ ╭──────────────────────────────────────────╮
+ │             clangd_index_yaml_parser.py  │
+ ╰──────────────────────────────────────────╯
+✦ Source file clangd_index_yaml_parser.py. This module parses clangd YAML index files into structured Python objects
+  (Symbol, Reference, Location). The SymbolParser class handles caching, single-threaded, and parallel parsing of these
+  files, then links references to symbols and populates a function dictionary. It dynamically detects clangd index
+  versions via has_container_field and has_call_kind. This module is essential for providing the initial structured data
+  for graph construction, with performance optimized through caching and parallel processing. 
+ ╭───────────────────────────────────────────╮
+ │             clangd_call_graph_builder.py  │
+ ╰───────────────────────────────────────────╯
+✦ I've analyzed clangd_call_graph_builder.py, noting its dual extraction methods for call graphs based on clangd index
+  versions (with/without Container field) and its main function's phased workflow for parsing, enriching, extracting, and
+  ingesting call relationships into Neo4j. It relies on input_params, compilation_parser, compilation_manager,
+  clangd_index_yaml_parser, neo4j_manager, and source_span_provider. 
+ ╭──────────────────────────────────────╮
+ │             source_span_provider.py  │
+ ╰──────────────────────────────────────╯
+✦ Source file source_span_provider.py. This module's SourceSpanProvider class is vital for enriching clangd Symbol
+  objects with source code span and parent-child relationship data from CompilationManager. It matches existing symbols,
+  synthesizes new ones for unindexed entities, and assigns parent IDs based on lexical scope. It also integrates
+  TypeAlias data and static call relations. This process creates a more complete and accurate codebase representation by
+  merging clangd index data with direct source analysis. 
+ ╭─────────────────────────────────────────────╮
+ │             clangd_symbol_nodes_builder.py  │
+ ╰─────────────────────────────────────────────╯
+✦ Source file clangd_symbol_nodes_builder.py. This module, via its SymbolProcessor class, is central to ingesting
+  parsed clangd symbols and their relationships into Neo4j. It processes Symbol objects, assigns Neo4j labels, and
+  orchestrates the creation of nodes for files, folders, and various symbol types. It then establishes structural
+  relationships like SCOPE_CONTAINS, HAS_NESTED, DECLARES, DEFINES, HAS_FIELD, HAS_METHOD, INHERITS, OVERRIDDEN_BY,
+  ALIAS_OF, and DEFINES_TYPE_ALIAS, handling batching and parallel ingestion. The main function orchestrates the overall
+  process, relying on input_params, clangd_index_yaml_parser, compilation_manager, neo4j_manager, path_processor, and
+  source_span_provider. This module is crucial for transforming raw symbol data into a structured Neo4j knowledge graph.
+ ╭──────────────────────────────────────────╮
+ │             code_graph_rag_generator.py  │
+ ╰──────────────────────────────────────────╯
+✦ Source file code_graph_rag_generator.py. This script, extending RagOrchestrator, drives the full RAG generation for
+  the Neo4j code graph. Its summarize_code_graph() method orchestrates a multi-pass process: individual function analysis,
+   context-aware function summarization, class/struct summarization, namespace summarization, and finally, file, folder,
+  and project summarization. It uses Neo4jManager to query nodes, summary_cache_manager for caching, and llm_client (via
+  RagOrchestrator) for LLM interaction. The main function handles argument parsing, Neo4j connection, and initiates the
+  summarization. This script is vital for creating a semantically rich, AI-queryable code graph. 
+ ╭──────────────────────────────────╮
+ │             rag_orchestrator.py  │
+ ╰──────────────────────────────────╯
+✦ Source file rag_orchestrator.py. This module's RagOrchestrator class is the central component for managing the RAG
+  generation process. It orchestrates multi-pass summarization, parallel processing, caching, and Neo4j updates for
+  summaries and embeddings. It initializes with Neo4jManager, embedding_client, SummaryCacheManager, and
+  NodeSummaryProcessor. Key methods include _parallel_process for concurrent task execution, generate_embeddings, and
+  various _summarize_* methods that handle specific node types (functions, classes, namespaces, files, folders, project)
+  by querying Neo4j for context, delegating summarization to NodeSummaryProcessor, and updating the database. This module
+  is crucial for efficient and scalable RAG generation. 
+ ╭────────────────────────────────────────╮
+ │             node_summary_processor.py  │
+ ╰────────────────────────────────────────╯
+✦ Source file node_summary_processor.py. This module's NodeSummaryProcessor class is a stateless worker for generating
+  RAG summaries across various code graph nodes. It manages staleness checks, caching, and iterative summarization for
+  functions, classes, namespaces, files, folders, and the entire project. Key methods include get_function_code_analysis,
+  get_function_contextual_summary, get_class_summary, and hierarchical summarization for namespaces, files, folders, and
+  the project. It relies on SummaryCacheManager, LlmClient, RagGenerationPromptManager, and tiktoken for its operations,
+  ensuring efficient and context-aware summary generation for large codebases. 
+ ╭───────────────────────────────────────╮
+ │             summary_cache_manager.py  │
+ ╰───────────────────────────────────────╯
+✦ Source file summary_cache_manager.py. This module's SummaryCacheManager class handles RAG summary persistence,
+  including loading, saving, and updating a JSON-based cache with backup rotation and sanity checks. It supports backing
+  up from Neo4j and restoring to it, and can be used as a standalone CLI tool. Key features include intermediate saves,
+  pruning dormant entries, and a critical sanity check during promotion to prevent data loss. It relies on neo4j_manager,
+  log_manager, json, and argparse. This module is vital for RAG performance, reliability, and efficient incremental
+  updates.
+ ╭────────────────────────────────────────╮
+ │             rag_generation_prompts.py  │
+ ╰────────────────────────────────────────╯
+✦ Source file rag_generation_prompts.py. This module's RagGenerationPromptManager centralizes LLM prompt generation for
+  the RAG summarization process. It provides specific, context-aware prompts for various stages, including initial code
+  analysis, contextual function summarization, class summarization, and hierarchical summarization for files, folders,
+  namespaces, and the entire project. It also includes templates for iterative summarization when context limits are hit.
+  This separation of prompt logic enhances maintainability and allows for flexible LLM interaction. 
+ ╭────────────────────────────╮
+ │             llm_client.py  │
+ ╰────────────────────────────╯
+✦ Source file llm_client.py. This module provides a flexible factory for interacting with various LLM and embedding
+  APIs. It defines LlmClient and EmbeddingClient base classes, with implementations for OpenAI, DeepSeek, Ollama, and a
+  FakeLlmClient for LLMs, and SentenceTransformerClient for embeddings. The factory functions get_llm_client and
+  get_embedding_client allow dynamic client selection. This module is essential for the project's RAG and AI agent
+  functionalities, enabling summary and embedding generation. 
+ ╭──────────────────────────────────────────╮
+ │             clangd_graph_rag_updater.py  │
+ ╰──────────────────────────────────────────╯
+✦ Source file clangd_graph_rag_updater.py. This script orchestrates incremental Neo4j graph updates based on Git
+  changes. Its GraphUpdater class manages the process, resolving commit ranges, identifying Git changes, analyzing header
+  impacts via graph queries, and determining a "dirty scope." It then builds a mini_symbol_parser for this scope, purges
+  stale data, rebuilds the mini-scope, cleans the graph, updates the project node, and performs targeted RAG updates.
+  Dependencies include input_params, git_manager, neo4j_manager, clangd_index_yaml_parser, rag_updater,
+  include_relation_provider, compilation_parser, graph_update_scope_builder, and log_manager. This script is vital for
+  efficient graph maintenance. 
+ ╭────────────────────────────────────────────╮
+ │             graph_update_scope_builder.py  │
+ ╰────────────────────────────────────────────╯
+✦ Source file graph_update_scope_builder.py. This module is central to incremental updates, creating a "sufficient
+  subset" of affected symbols from the full clangd index and orchestrating a "mini-ingestion" pipeline. The
+  GraphUpdateScopeBuilder class manages this process, parsing dirty source files, enriching the full symbol parser with
+  new spans, identifying seed symbols, and then building a mini_symbol_parser containing only direct dependencies. It
+  then uses this mini_symbol_parser to rebuild the affected scope in Neo4j, leveraging PathProcessor, SymbolProcessor,
+  IncludeRelationProvider, and ClangdCallGraphExtractor. This targeted approach significantly optimizes incremental
+  updates. 
+ ╭─────────────────────────────╮
+ │             rag_updater.py  │
+ ╰─────────────────────────────╯
+✦ Source file rag_updater.py. This module, extending RagOrchestrator, performs targeted, incremental RAG updates. Its
+  summarize_targeted_update method orchestrates a multi-pass process: analyzing changed functions, summarizing them
+  contextually, and then updating class, namespace, file, folder, and project summaries based on content and structural
+  changes. It leverages helper methods to expand the scope of affected entities and ensures efficient updates by only
+  re-summarizing necessary graph components. This module is crucial for maintaining up-to-date RAG data with minimal
+  computational overhead. 
+ ╭───────────────────────────────╮
+ │             neo4j_manager.py  │
+ ╰───────────────────────────────╯
+✦ Source file neo4j_manager.py. This module provides a comprehensive Neo4jManager class for all Neo4j interactions,
+  including connection, setup, data ingestion, querying, and schema management. It features robust transaction handling,
+  graph cleanup, and specific functionalities for RAG and AI agent schema transformations. The module also offers a CLI
+  for database management tasks like schema dumping and property deletion. This Neo4jManager is the project's core
+  interface with the graph database. 
+ ╭─────────────────────────────╮
+ │             git_manager.py  │
+ ╰─────────────────────────────╯
+✦ Source file git_manager.py. This module, using GitPython, provides GitManager to categorize file changes between Git
+  commits. It handles added, modified, deleted, renamed_exact, and copied_exact files, converting renames/copies into
+  delete/add operations for the graph updater. Helper functions get_git_repo and resolve_commit_ref_to_hash support
+  repository and commit resolution. This module is critical for the incremental update pipeline, ensuring accurate change
+  detection. 
+ ╭──────────────────────────────────╮
+ │             graph_mcp_server.py  │
+ ╰──────────────────────────────────╯
+✦ Source file graph_mcp_server.py. This module creates an MCP server using FastMCP to expose Neo4j code graph tools to
+  AI agents. It initializes Neo4jManager and an embedding_client, retrieving the project root and checking for semantic
+  search capabilities. Tools include get_graph_schema, get_embedding_vector_indexes, generate_embeddings,
+  search_nodes_for_semantic_similarity, get_project_info, get_source_code_by_id, get_source_code_by_path,
+  get_semantic_label, and a read-only execute_cypher_query with strict safety checks. The server runs via mcp.run(),
+  providing a secure, structured interface for AI agents to interact with the code graph. 
+ ╭──────────────────────────────╮
+ │             input_params.py  │
+ ╰──────────────────────────────╯
+✦ Source file input_params.py. This module centralizes command-line argument definitions for the project, covering core
+  inputs, worker configurations, batching, RAG generation, ingestion strategies, Git updates, and general logistics. It
+  ensures consistent CLI interfaces across all scripts. 
+ ╭────────────────────────────────╮
+ │             path_processor.py  │
+ ╰────────────────────────────────╯
+✦ Source file path_processor.py. This module, through PathManager and PathProcessor, is responsible for ingesting a
+  project's file and folder structure into Neo4j. It discovers paths from clangd symbols and CompilationManager's include
+  relations, converts them to relative paths, and then creates FOLDER and FILE nodes with CONTAINS relationships in the
+  database. This establishes the foundational hierarchy for the code graph. 
+ ╭─────────────────────────────╮
+ │             log_manager.py  │
+ ╰─────────────────────────────╯
+✦ Source file log_manager.py. This module centralizes logging initialization, providing distinct console and file
+  outputs. It uses DebugOnlyFilter and InfoAndUpFilter for granular control over message levels. Crucially, it employs
+  is_main_process() to prevent child processes from creating redundant file handlers, ensuring clean, consistent logging
+  across multi-process applications. 
+ ╭─────────────────────────────────╮
+ │             memory_debugger.py  │
+ ╰─────────────────────────────────╯
+✦ Source file memory_debugger.py. This module offers a Debugger class utilizing tracemalloc for memory profiling. It
+  can start/stop tracing, take memory snapshots, filter irrelevant traces, and report top memory consumers, aiding in
+  identifying memory leaks and optimizing resource usage in large-scale projects. 
