@@ -58,6 +58,7 @@ class SourceSpanProvider:
         self._match_and_enrich_with_source_spans()
         self._assign_parent_ids_lexically()
         self._enrich_with_type_alias_data() # New pass for TypeAlias
+        self._discover_macros() # New pass for Macros
         self._enrich_with_static_calls()
 
         logger.info(f"Enrichment complete. Matched {self.matched_symbol_count} symbols with body spans.")
@@ -129,13 +130,16 @@ class SourceSpanProvider:
                 continue
             
             # Find body spans for symbols from span data            
-            key = CompilationParser.make_symbol_key(sym.name, loc.file_uri, loc.start_line, loc.start_column)
+            key = CompilationParser.make_symbol_key(sym.name, sym.kind, loc.file_uri, loc.start_line, loc.start_column)
             source_span = file_span_data_copy[loc.file_uri].get(key)
             if not source_span:
                 continue
 
             # Found a matched clangd-idexed symbol, enrich it with its body location
             sym.body_location = source_span.body_location
+            sym.original_name = source_span.original_name
+            sym.expanded_from_id = source_span.expanded_from_id
+            
             self.synthetic_id_to_index_id[source_span.id] = sym_id
             self.matched_symbol_count += 1
             # Remove the span from the file spans in order to use the remaining spans for synthetic symbols
@@ -221,7 +225,7 @@ class SourceSpanProvider:
                 if sym.kind == "TypeAlias" or (sym.kind == "Function" and not sym.definition):
                     continue
 
-                key = CompilationParser.make_symbol_key(sym.name, loc.file_uri, loc.start_line, loc.start_column)
+                key = CompilationParser.make_symbol_key(sym.name, sym.kind, loc.file_uri, loc.start_line, loc.start_column)
                 span_tree = file_span_data.get(loc.file_uri, {})
                 if not span_tree:
                     if sys.argv[0].endswith("clangd_graph_rag_builder.py"):
@@ -289,6 +293,8 @@ class SourceSpanProvider:
             sym.aliased_type_id = self.synthetic_id_to_index_id.get(matched_tas.aliased_type_id, matched_tas.aliased_type_id)
             sym.aliased_type_kind = matched_tas.aliased_type_kind
             sym.body_location = matched_tas.body_location
+            sym.original_name = matched_tas.original_name
+            sym.expanded_from_id = matched_tas.expanded_from_id
 
             if sym.parent_id is None and matched_tas.parent_id:
                 self.assigned_parent_matched_alias += 1
@@ -340,7 +346,9 @@ class SourceSpanProvider:
             parent_id=resolved_parent_id,
             aliased_canonical_spelling=tas.aliased_canonical_spelling,
             aliased_type_id=resolved_aliased_type_id,
-            aliased_type_kind=tas.aliased_type_kind
+            aliased_type_kind=tas.aliased_type_kind,
+            original_name=tas.original_name,
+            expanded_from_id=tas.expanded_from_id
         )
         return new_sym
 
@@ -350,6 +358,41 @@ class SourceSpanProvider:
 
     def get_assigned_count(self) -> int:
         return self.assigned_parent_count
+
+    def _discover_macros(self):
+        """
+        Discovers macros from the compilation manager and injects them as new Symbol objects.
+        """
+        macro_spans = self.compilation_manager.get_macro_spans()
+        if not macro_spans:
+            logger.info("No macro spans found to discover.")
+            return
+
+        new_macro_symbols = {}
+        for span_id, span in macro_spans.items():
+            # If the macro already exists (unlikely given synthetic IDs based on location), skip it.
+            if span_id in self.symbol_parser.symbols:
+                continue
+
+            loc = Location.from_relative_location(span.name_location, file_uri=span.file_uri)
+            
+            new_sym = Symbol(
+                id=span.id,
+                name=span.name,
+                kind='Macro',
+                declaration=loc,
+                definition=Location.from_relative_location(span.body_location, file_uri=span.file_uri),
+                references=[],
+                scope="", # Macros are global in the preprocessor sense
+                language=span.lang,
+                body_location=span.body_location,
+                is_macro_function_like=span.is_function_like,
+                macro_definition=span.macro_definition
+            )
+            new_macro_symbols[span.id] = new_sym
+
+        self.symbol_parser.symbols.update(new_macro_symbols)
+        logger.info(f"Discovered and injected {len(new_macro_symbols)} new macro symbols.")
 
     def _enrich_with_static_calls(self):
         """
@@ -444,6 +487,8 @@ class SourceSpanProvider:
             scope="", # Scope is now handled by the parent_id relationship
             language=span.lang,
             body_location=span.body_location,
-            parent_id=parent_id
+            parent_id=parent_id,
+            original_name=span.original_name,
+            expanded_from_id=span.expanded_from_id
         )
 

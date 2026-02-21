@@ -37,6 +37,15 @@ The manager provides helpers for managing the graph's schema and vector indexes.
 *   **`create_vector_indexes()`**: Executes the Cypher commands to create the vector indexes required for semantic search on the `summaryEmbedding` property. It is designed to fail gracefully if the installed version of Neo4j does not support vector indexes (e.g., Community Edition).
 *   **`delete_property()`**: A powerful helper function that can remove a specific property (e.g., `summaryEmbedding`) from all nodes of a certain label, or from all nodes in the entire graph.
 
+### Agent-Facing Schema
+
+The manager provides specialized methods to transform the raw code graph into an agent-friendly format:
+*   **`add_agent_facing_schema()`**: Orchestrates the addition of several features:
+    *   **Synthetic IDs**: Adds unique `id` properties to nodes like `FILE` and `FOLDER` that lack them.
+    *   **`:ENTITY` Label**: Adds a generic `:ENTITY` label to every relevant node in the graph. This allows the agent to perform broad searches across all symbol types using a single label.
+    *   **Unified Vector Index**: Creates a single vector index on the `(:ENTITY).summaryEmbedding` property, enabling semantic search across the entire project.
+*   **`remove_agent_facing_schema()`**: Reverses these changes, restoring the graph to its original, per-label state. This is typically used by the incremental updater to ensure a clean slate before processing changes.
+
 ## 4. Standalone CLI Tool
 
 When run as a script, `neo4j_manager.py` provides a command-line interface for database administration.

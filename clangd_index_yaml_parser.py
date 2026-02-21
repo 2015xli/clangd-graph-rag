@@ -104,6 +104,10 @@ class Symbol:
     type: str = ""
     body_location: Optional[RelativeLocation] = None
     parent_id: Optional[str] = None
+    is_macro_function_like: bool = False
+    macro_definition: Optional[str] = None
+    original_name: Optional[str] = None
+    expanded_from_id: Optional[str] = None
     # New fields for TypeAlias
     aliased_canonical_spelling: Optional[str] = None
     aliased_type_id: Optional[str] = None

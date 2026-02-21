@@ -110,10 +110,10 @@ def sync_agent():
      "\n\n## Note 5: How to Perform Searches"
         "\n- **Keyword match search with cypher query**: Use `STARTS WITH` or `CONTAINS` on properties like `name` or `path` or `summary` for keyword searches. "
         "\n    e.g., `MATCH (f:FILE) WHERE f.path CONTAINS 'utils' RETURN f.id LIMIT 5`"
-        "\n- **Type search**: If you know the keyword is a name of a user defined types (e.g., struct, class, enum, typedef, using, etc.), you can specifically search for type nodes." 
-        "\n    e.g., `MATCH (type:TYPE_ALIAS|DATA_STRUCTURE|CLASS_STRUCTURE) WHERE type.name = 'MyType' RETURN type.id, type.kind`"
-        "\n    Then you can use the id to retrieve source code of the type with `get_source_code_by_id` tool."
-        "\n    If the returned result is a type alias definition involving other unknown types, you may have to recursively search for the unknown types."
+        "\n- **Name search**: If you know the keyword is a name of a user defined types or macro symbols (e.g., struct, class, enum, typedef, using, macro, etc.), you can specifically search for type nodes." 
+        "\n    e.g., `MATCH (t:TYPE_ALIAS|MACRO|DATA_STRUCTURE|CLASS_STRUCTURE) WHERE t.name = 'MyType' RETURN t.id, t.kind`"
+        "\n    Then you can use the id to retrieve source code of the type's definition with `get_source_code_by_id` tool."
+        "\n    If the returned result is a definition involving other unknown symbols (a macro definition uses other macros, a type alias definition uses other aliases), you may have to recursively search for them."
     )
     
     semantic_search_instruction = (

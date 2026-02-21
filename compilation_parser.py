@@ -20,6 +20,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed, wait, FIRST_CO
 from multiprocessing import get_context
 import gc
 from dataclasses import dataclass, field
+from urllib.parse import urlparse, unquote
 
 # Assuming RelativeLocation is defined in this file or imported
 from clangd_index_yaml_parser import RelativeLocation
@@ -43,6 +44,11 @@ class SourceSpan:
     body_location: RelativeLocation
     id: str
     parent_id: Optional[str]
+    # Added to support macro causality link: if a symbol name is generated via a macro expansion,
+    # this field stores the original name before expansion
+    original_name: Optional[str] = None
+    # this field stores the ID of the macro that generates it
+    expanded_from_id: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: dict) -> 'SourceSpan':
@@ -53,8 +59,21 @@ class SourceSpan:
             name_location=RelativeLocation.from_dict(data['NameLocation']),
             body_location=RelativeLocation.from_dict(data['BodyLocation']),
             id=data['Id'],
-            parent_id=data['ParentId']
+            parent_id=data['ParentId'],
+            original_name=data.get('OriginalName'),
+            expanded_from_id=data.get('ExpandedFromId')
         )
+
+@dataclass(frozen=True, slots=True)
+class MacroSpan:
+    id: str # Synthetic: hash(name + file_uri + name_location)
+    name: str
+    lang: str
+    file_uri: str
+    name_location: RelativeLocation
+    body_location: RelativeLocation
+    is_function_like: bool
+    macro_definition: str
 
 @dataclass(frozen=True, slots=True)
 class TypeAliasSpan:
@@ -70,6 +89,8 @@ class TypeAliasSpan:
     is_aliasee_definition: bool
     scope: str
     parent_id: Optional[str]
+    original_name: Optional[str] = None
+    expanded_from_id: Optional[str] = None
 
 # ============================================================
 # Include relations
@@ -87,6 +108,9 @@ class _ClangWorkerImpl:
 
     def __init__(self, project_path: str, clang_include_path: str):
         self.project_path = os.path.abspath(project_path)
+        if not self.project_path.endswith(os.sep):
+            self.project_path += os.sep
+            
         self.clang_include_path = clang_include_path
         self.index = clang.cindex.Index.create()
         self.entry = None
@@ -99,6 +123,10 @@ class _ClangWorkerImpl:
         self.static_call_relations: Set[Tuple[str, str]] = None
         #   - {file_uri → {key → TypeAliasSpan}}
         self.type_alias_spans: Dict[str, TypeAliasSpan] = {}
+        #   - {id → MacroSpan}
+        self.macro_spans: Dict[str, MacroSpan] = {}
+        #   - {file_uri → [MACRO_INSTANTIATION cursors]}
+        self.instantiations: Dict[str, List[Any]] = defaultdict(list)
 
         # file-level cache to avoid re-processing header nodes in identical TU contexts
         # Since we use since _ClangWorkerImpl as a singleton in a worker process, this cache is shared across all invocations
@@ -119,6 +147,8 @@ class _ClangWorkerImpl:
         self.include_relations = set()
         self.static_call_relations = set()
         self.type_alias_spans: Dict[str, TypeAliasSpan] = {}
+        self.macro_spans: Dict[str, MacroSpan] = {}
+        self.instantiations = defaultdict(list)
         self._tu_hash = None
         # Local per-TU header cache
         self._local_header_cache: Set[str] = set()
@@ -157,7 +187,8 @@ class _ClangWorkerImpl:
             "span_results": self.span_results,
             "include_relations": self.include_relations,
             "static_call_relations": self.static_call_relations,
-            "type_alias_spans": self.type_alias_spans
+            "type_alias_spans": self.type_alias_spans,
+            "macro_spans": self.macro_spans
         }
 
     # --------------------------------------------------------
@@ -195,9 +226,16 @@ class _ClangWorkerImpl:
     # --------------------------------------------------------
     def _walk_ast(self, node, current_caller_cursor=None):
         # Determine the current file and check if it's part of the project
-        file_name = node.location.file.name if node.location.file else node.translation_unit.spelling
-        file_name = os.path.abspath(file_name) if file_name else None
-        if not file_name or not file_name.startswith(self.project_path):
+        loc_file = node.location.file
+        if loc_file:
+            file_name = os.path.abspath(loc_file.name)
+        elif node.kind == clang.cindex.CursorKind.TRANSLATION_UNIT:
+            file_name = os.path.abspath(node.spelling)
+        else:
+            # Skip nodes without a valid file (e.g., predefined macros, built-ins)
+            return
+
+        if not file_name.startswith(self.project_path):
             return
 
         # --- Update Caller Context ---
@@ -207,8 +245,17 @@ class _ClangWorkerImpl:
             new_caller_cursor = node
 
         # --- Process this node ---
-        # 1. If it's a definition, process its span
-        if node.is_definition() and node.kind.name in ClangParser.NODE_KIND_FOR_BODY_SPANS:
+        # 1. If it's a macro definition, process its span
+        if node.kind == clang.cindex.CursorKind.MACRO_DEFINITION:
+            if self._should_process_node(node, file_name):
+                self._process_macro_definition(node, file_name)
+
+        # 2. If it's a macro instantiation, record it for causality tracking
+        elif node.kind == clang.cindex.CursorKind.MACRO_INSTANTIATION:
+            self.instantiations[f"file://{file_name}"].append(node)
+
+        # 3. If it's a definition, process its span
+        elif node.is_definition() and node.kind.name in ClangParser.NODE_KIND_FOR_BODY_SPANS:
             if self._should_process_node(node, file_name):
                 self._process_generic_node(node, file_name)
 
@@ -236,6 +283,43 @@ class _ClangWorkerImpl:
     # --------------------------------------------------------
     # Span processing
     # --------------------------------------------------------
+    def _process_macro_definition(self, node, file_name):
+        # file_name passed here was verified in _walk_ast
+        name = node.spelling
+        file_uri = f"file://{file_name}"
+        
+        # Use location directly for macro name
+        loc = node.location
+        name_line, name_col = loc.line - 1, loc.column - 1
+        
+        body_start_line, body_start_col = node.extent.start.line - 1, node.extent.start.column - 1
+        body_end_line, body_end_col = node.extent.end.line - 1, node.extent.end.column - 1
+        
+        node_key = CompilationParser.make_symbol_key(name, "Macro", file_uri, name_line, name_col)
+        synthetic_id = CompilationParser.make_synthetic_id(node_key)
+        
+        # Check if function-like
+        try:
+            is_function_like = clang.cindex.conf.lib.clang_Cursor_isMacroFunctionLike(node)
+        except Exception:
+            is_function_like = False # Fallback
+            
+        macro_definition = self._get_source_text_for_extent(node.extent, file_name)
+
+        span = MacroSpan(
+            id=synthetic_id,
+            name=sys.intern(name),
+            lang=self.lang,
+            file_uri=sys.intern(file_uri),
+            name_location=RelativeLocation(name_line, name_col, name_line, name_col + len(name)),
+            body_location=RelativeLocation(body_start_line, body_start_col, body_end_line, body_end_col),
+            is_function_like=bool(is_function_like),
+            macro_definition=macro_definition
+        )
+        
+        # Macros are stored by synthetic_id to handle potential identical definitions
+        self.macro_spans[synthetic_id] = span
+
     def _process_generic_node(self, node, file_name):
 
         name_start_line, name_start_col = self._get_symbol_name_location(node)
@@ -243,7 +327,8 @@ class _ClangWorkerImpl:
         body_end_line, body_end_col = node.extent.end.line - 1, node.extent.end.column - 1
         file_uri = f"file://{file_name}"
 
-        node_key = CompilationParser.make_symbol_key(node.spelling, file_uri, name_start_line, name_start_col)
+        kind = self._convert_node_kind_to_index_kind(node)
+        node_key = CompilationParser.make_symbol_key(node.spelling, kind, file_uri, name_start_line, name_start_col)
         if node_key in self.span_results[(file_uri, self._tu_hash)]: 
             # Same node can be defined in same header file of multiple TUs that have different TU hash, but we only want to keep one copy - for our purpose.
             # In the same TU, it is also possible to meet same node more than once, e.g., typedef struct { ... } A;
@@ -255,6 +340,7 @@ class _ClangWorkerImpl:
         parent_id = self._get_parent_id(node)
 
         kind = self._convert_node_kind_to_index_kind(node)
+        original_name, expanded_from_id = self._get_macro_causality(node, file_uri)
 
         span = SourceSpan(
             name=sys.intern(node.spelling),
@@ -263,7 +349,9 @@ class _ClangWorkerImpl:
             name_location=RelativeLocation(name_start_line, name_start_col, name_start_line, name_start_col + len(node.spelling)),
             body_location=RelativeLocation(body_start_line, body_start_col, body_end_line, body_end_col),
             id=synthetic_id,
-            parent_id=parent_id
+            parent_id=parent_id,
+            original_name=original_name,
+            expanded_from_id=expanded_from_id
         )
         self.span_results[(sys.intern(file_uri), self._tu_hash)][node_key] = span
 
@@ -295,6 +383,8 @@ class _ClangWorkerImpl:
         aliasee_decl_cursor = underlying_type.get_declaration()
 
         if aliasee_decl_cursor.kind.name not in  {"NO_DECL_FOUND", "TEMPLATE_TEMPLATE_PARAMETER"}:
+            # is_aliasee_definition is used for alias declaration reconciliation. An aliasee having definition will override the same aliasee without definition.
+            # The latter can be only a forward declaration of an alias, rather than a real alias definition.
             is_aliasee_definition = aliasee_decl_cursor.is_definition()
             aliased_type_kind = self._convert_node_kind_to_index_kind(aliasee_decl_cursor)
 
@@ -305,12 +395,14 @@ class _ClangWorkerImpl:
             if aliasee_decl_cursor.kind.name in ClangParser.NODE_KIND_FOR_COMPOSITE_TYPES:
                 # Aliasee is a named user-defined composite type (struct, class, enum, union)
                 # Use synthetic ID for consistency with SourceSpan handling
+                aliasee_name_line, aliasee_name_col = self._get_symbol_name_location(aliasee_decl_cursor)
                 aliased_type_id = CompilationParser.make_synthetic_id(
                     CompilationParser.make_symbol_key(
                         aliasee_decl_cursor.spelling,
+                        aliased_type_kind,
                         f"file://{os.path.abspath(aliasee_decl_cursor.location.file.name)}",
-                        aliasee_decl_cursor.location.line - 1,
-                        aliasee_decl_cursor.location.column - 1
+                        aliasee_name_line,
+                        aliasee_name_col
                     )
                 )
             else:
@@ -333,6 +425,7 @@ class _ClangWorkerImpl:
             pass
 
         # Store TypeAliasSpan
+        original_name, expanded_from_id = self._get_macro_causality(node, file_uri)
         new_type_alias_span = TypeAliasSpan(
             id=aliaser_id,
             file_uri=file_uri,
@@ -345,7 +438,9 @@ class _ClangWorkerImpl:
             aliased_type_kind=aliased_type_kind,
             is_aliasee_definition=is_aliasee_definition,
             scope=scope,
-            parent_id=parent_id
+            parent_id=parent_id,
+            original_name=original_name,
+            expanded_from_id=expanded_from_id
         )
         
         # Reconciliation logic: keep the span whose aliasee is a definition
@@ -403,7 +498,8 @@ class _ClangWorkerImpl:
 
         file_uri = f"file://{os.path.abspath(file_name)}"
         line, col = self._get_symbol_name_location(parent)
-        parent_key = CompilationParser.make_symbol_key(parent.spelling, file_uri, line, col)
+        parent_kind = self._convert_node_kind_to_index_kind(parent)
+        parent_key = CompilationParser.make_symbol_key(parent.spelling, parent_kind, file_uri, line, col)
         # Return existing ID to its semantic children as parent id. Otherwise, return None.
         if (file_uri, self._tu_hash) not in self.span_results:
             return None
@@ -431,6 +527,94 @@ class _ClangWorkerImpl:
             return (line - 1, col - 1)
         except AttributeError:
             return (node.location.line - 1, node.location.column - 1)
+
+    def _get_macro_causality(self, node, file_uri: str) -> Tuple[Optional[str], Optional[str]]:
+        """
+        Determines if a symbol node was generated by a macro.
+        Returns (original_name, expanded_from_id).
+        """
+        instantiations = self.instantiations.get(file_uri, [])
+        if not instantiations:
+            return None, None
+
+        node_extent = node.extent
+
+        def extent_contains(outer, inner):
+            # Check if inner extent is fully contained within outer extent
+            if inner.start.line < outer.start.line:
+                return False
+            if inner.end.line > outer.end.line:
+                return False
+            if inner.start.line == outer.start.line and inner.start.column < outer.start.column:
+                return False
+            if inner.end.line == outer.end.line and inner.end.column > outer.end.column:
+                return False
+            return True
+
+        # Find the outermost macro instantiation that encloses the node.
+        # This aligns with the "top-level" expansion rule.
+        enclosing_inst = None
+        for inst in instantiations:
+            if extent_contains(inst.extent, node_extent):
+                if enclosing_inst is None or extent_contains(inst.extent, enclosing_inst.extent):
+                    enclosing_inst = inst
+
+        if not enclosing_inst:
+            return None, None
+
+        macro_def_cursor = enclosing_inst.referenced
+        if not macro_def_cursor:
+            return None, None
+
+        def_loc = macro_def_cursor.location
+        if not def_loc.file:
+            return None, None
+
+        def_file = os.path.abspath(def_loc.file.name)
+        if not def_file.startswith(self.project_path):
+            return None, None
+
+        # Only mark symbols that are DEFINITIONS.
+        # This avoids marking every reference inside a macro as expanded from it.
+        if not node.is_definition():
+            return None, None
+
+        node_key = CompilationParser.make_symbol_key(
+            macro_def_cursor.spelling,
+            "Macro",
+            f"file://{def_file}",
+            def_loc.line - 1,
+            def_loc.column - 1
+        )
+        expanded_from_id = CompilationParser.make_synthetic_id(node_key)
+
+        file_path = unquote(urlparse(file_uri).path)
+        original_name = self._get_source_text_for_extent(enclosing_inst.extent, file_path)
+
+        return original_name, expanded_from_id
+
+    def _get_source_text_for_extent(self, extent, file_path: str) -> str:
+        """Reads the source text for a given Clang extent."""
+        try:
+            with open(file_path, 'r', errors='ignore') as f:
+                lines = f.readlines()
+            
+            start_line = extent.start.line - 1
+            start_col = extent.start.column - 1
+            end_line = extent.end.line - 1
+            end_col = extent.end.column - 1
+            
+            if start_line == end_line:
+                return lines[start_line][start_col:end_col]
+            else:
+                result = [lines[start_line][start_col:]]
+                for i in range(start_line + 1, end_line):
+                    result.append(lines[i])
+                result.append(lines[end_line][:end_col])
+                return "".join(result)
+        except Exception as e:
+            logger.error(f"Error reading source text for extent in {file_path}: {e}")
+            return ""
 
     @staticmethod
     def _hash_usr_to_id(usr: str) -> str:
@@ -702,7 +886,8 @@ def _parallel_worker(data: Any) -> Dict[str, Any]:
                 "span_results": defaultdict(dict),
                 "include_relations": set(),
                 "static_call_relations": set(),
-                "type_alias_spans": defaultdict(dict)
+                "type_alias_spans": defaultdict(dict),
+                "macro_spans": {}
             }
         return result_dict
 
@@ -711,6 +896,7 @@ def _parallel_worker(data: Any) -> Dict[str, Any]:
     merged_include_relations: Set[IncludeRelation] = set()
     merged_static_call_relations: Set[Tuple[str, str]] = set()
     merged_type_alias_spans: Dict[str, TypeAliasSpan] = {}
+    merged_macro_spans: Dict[str, MacroSpan] = {}
 
     for entry in data:
         _count_processed_tus += 1
@@ -734,12 +920,16 @@ def _parallel_worker(data: Any) -> Dict[str, Any]:
                         merged_type_alias_spans[alias_id] = new_span
                 else:
                     merged_type_alias_spans[alias_id] = new_span
+        
+        if result_dict.get("macro_spans"):
+            merged_macro_spans.update(result_dict["macro_spans"])
 
     return {
         "span_results": merged_span_results,
         "include_relations": merged_include_relations,
         "static_call_relations": merged_static_call_relations,
-        "type_alias_spans": merged_type_alias_spans
+        "type_alias_spans": merged_type_alias_spans,
+        "macro_spans": merged_macro_spans
     }
 
 # --- Abstract Base Class ---
@@ -764,6 +954,7 @@ class CompilationParser:
         self.include_relations: Set[IncludeRelation] = set()
         self.static_call_relations: Set[Tuple[str, str]] = set()
         self.type_alias_spans: Dict[str, TypeAliasSpan] = {}
+        self.macro_spans: Dict[str, MacroSpan] = {}
 
     def parse(self, files_to_parse: List[str], num_workers: int = 1):
         raise NotImplementedError
@@ -780,36 +971,37 @@ class CompilationParser:
     def get_type_alias_spans(self) -> Dict[str, TypeAliasSpan]:
         return self.type_alias_spans
 
+    def get_macro_spans(self) -> Dict[str, MacroSpan]:
+        return self.macro_spans
+
     def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
         raise NotImplementedError
 
     @classmethod
-    def make_symbol_key(cls, name: str, file_uri: str, line: int, col: int) -> str:
+    def make_symbol_key(cls, name: str, kind: str, file_uri: str, line: int, col: int) -> str:
         """
         Deterministic symbol key.
-        Format: symbol name::file URI:line:col
+        Format: kind::symbol name::file URI:line:col
         """
-        key = f"{name}::{file_uri}:{line}:{col}"
+        key = f"{kind}::{name}::{file_uri}:{line}:{col}"
         return key
 
     @classmethod
     def make_synthetic_id(cls, key: str) -> str:
         """
         Deterministic synthetic ID. 
-        Key: normally symbol name::file URI:line:col
+        Key: normally kind::symbol name::file URI:line:col
         """
         return hashlib.md5(key.encode()).hexdigest()
 
     @classmethod
     def get_language(cls, file_name: str) -> str:
-        if file_name.endswith(cls.ALL_CPP_SOURCE_EXTENSIONS):
-            lang = "Cpp"
-        elif file_name.endswith(".c"):
-            lang = "C"
-        else:
-            logger.error(f"Unknown language for file: {file_name}")
-            lang = "Unknown"
-        return lang
+        ext = os.path.splitext(file_name)[1].lower()
+        if ext in cls.CPP_SOURCE_EXTENSIONS or ext in cls.CPP_HEADER_EXTENSIONS or ext in cls.CPP20_MODULE_EXTENSIONS:
+            return "Cpp"
+        if ext in cls.C_SOURCE_EXTENSIONS or ext in cls.C_HEADER_EXTENSIONS:
+            return "C"
+        return "Unknown"
 
     def _parallel_parse(self, items_to_process: List, parser_type: str, num_workers: int, desc: str, worker_init_args: Dict[str, Any] = None, batch_size: int = 1):
         """Generic parallel processing with task batching so workers do local merging.
@@ -820,6 +1012,7 @@ class CompilationParser:
         all_includes: Set[IncludeRelation] = set()
         all_static_calls: Set[Tuple[str, str]] = set()
         all_type_alias_spans: Dict[str, TypeAliasSpan] = {}
+        all_macro_spans: Dict[str, MacroSpan] = {}
         file_tu_hash_map: Dict[str, Set[str]] = defaultdict(set)
 
         initargs = (parser_type, worker_init_args or {})
@@ -884,6 +1077,9 @@ class CompilationParser:
                                     else:
                                         all_type_alias_spans[alias_id] = new_span
 
+                            if result_dict.get("macro_spans"):
+                                all_macro_spans.update(result_dict["macro_spans"])
+
                             if result_dict["span_results"]:
                                 # Merge using same dedupe rule: only add spans from (file_uri, tu_hash)
                                 # when tu_hash hasn't been seen for the file.
@@ -902,6 +1098,7 @@ class CompilationParser:
         self.include_relations = all_includes
         self.static_call_relations = all_static_calls
         self.type_alias_spans = all_type_alias_spans
+        self.macro_spans = all_macro_spans
         gc.collect()
 
 # --- Concrete Implementations ---

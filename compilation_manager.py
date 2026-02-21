@@ -13,7 +13,7 @@ import hashlib
 from typing import Optional, List, Tuple, Dict, Set, Any
 import git
 
-from compilation_parser import CompilationParser, ClangParser, TreesitterParser, SourceSpan, IncludeRelation, TypeAliasSpan
+from compilation_parser import CompilationParser, ClangParser, TreesitterParser, SourceSpan, IncludeRelation, TypeAliasSpan, MacroSpan
 from git_manager import get_git_repo, resolve_commit_ref_to_hash
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,8 @@ class CacheManager:
                     "source_spans": cached_data.get("source_spans", {}),
                     "include_relations": cached_data.get("include_relations", set()),
                     "static_call_relations": cached_data.get("static_call_relations", set()),
-                    "type_alias_spans": cached_data.get("type_alias_spans", {})
+                    "type_alias_spans": cached_data.get("type_alias_spans", {}),
+                    "macro_spans": cached_data.get("macro_spans", {})
                 }
             else:
                 logger.warning(f"Cache file {filename} has mismatched full commit hashes. Ignoring.")
@@ -99,7 +100,8 @@ class CacheManager:
                     "source_spans": cached_data.get("source_spans", {}),
                     "include_relations": cached_data.get("include_relations", set()),
                     "static_call_relations": cached_data.get("static_call_relations", set()),
-                    "type_alias_spans": cached_data.get("type_alias_spans", {})
+                    "type_alias_spans": cached_data.get("type_alias_spans", {}),
+                    "macro_spans": cached_data.get("macro_spans", {})
                 }
             else:
                 logger.warning(f"Cache file {filename} has mismatched file list hash. Ignoring.")
@@ -118,6 +120,7 @@ class CacheManager:
             "include_relations": data["include_relations"],
             "static_call_relations": data["static_call_relations"],
             "type_alias_spans": data["type_alias_spans"],
+            "macro_spans": data["macro_spans"],
             "new_commit": new_commit,
             "old_commit": old_commit
         }
@@ -138,6 +141,7 @@ class CacheManager:
             "include_relations": data["include_relations"],
             "static_call_relations": data["static_call_relations"],
             "type_alias_spans": data["type_alias_spans"],
+            "macro_spans": data["macro_spans"],
             "file_list_hash": file_list_hash
         }
         logger.info(f"Saving mtime-based cache to: {filename}")
@@ -196,7 +200,8 @@ class CompilationManager:
             "source_spans": parser.get_source_spans(),
             "include_relations": parser.get_include_relations(),
             "static_call_relations": parser.get_static_call_relations(),
-            "type_alias_spans": parser.get_type_alias_spans()
+            "type_alias_spans": parser.get_type_alias_spans(),
+            "macro_spans": parser.get_macro_spans()
         }
 
     def parse_folder(self, folder_path: str, num_workers: int, new_commit: str = None):
@@ -283,6 +288,7 @@ class CompilationManager:
                 self._parser.include_relations = cached_data["include_relations"]
                 self._parser.static_call_relations = cached_data["static_call_relations"]
                 self._parser.type_alias_spans = cached_data["type_alias_spans"]
+                self._parser.macro_spans = cached_data["macro_spans"]
                 return
             
             logger.info(f"No valid cache for update {old_commit_hash[:8] if old_commit_hash else ''} -> {new_commit_hash[:8]}. Parsing {len(file_list)} files.")
@@ -298,6 +304,7 @@ class CompilationManager:
             self._parser.include_relations = cached_data["include_relations"]
             self._parser.static_call_relations = cached_data["static_call_relations"]
             self._parser.type_alias_spans = cached_data["type_alias_spans"]
+            self._parser.macro_spans = cached_data["macro_spans"]
             return
 
         logger.info(f"No valid mtime-based cache found. Parsing {len(file_list)} files.")
@@ -323,6 +330,11 @@ class CompilationManager:
         if not hasattr(self, '_parser') or self._parser is None:
             raise RuntimeError("CompilationManager has not parsed any files yet.")
         return self._parser.get_type_alias_spans()
+
+    def get_macro_spans(self) -> Dict[str, MacroSpan]:
+        if not hasattr(self, '_parser') or self._parser is None:
+            raise RuntimeError("CompilationManager has not parsed any files yet.")
+        return self._parser.get_macro_spans()
 
 if __name__ == "__main__":
     import argparse

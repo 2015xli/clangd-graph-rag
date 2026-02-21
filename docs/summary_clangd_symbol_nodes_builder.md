@@ -10,9 +10,9 @@ Its purpose is to transform the final, in-memory collection of `Symbol` objects 
 
 The `SymbolProcessor`'s main entry point orchestrates a three-phase process designed for clarity, performance, and correctness:
 
-1.  **Phase 1: Data Preparation**: All raw `Symbol` objects are processed, enriched with linking information, and grouped into a structure optimized for ingestion.
-2.  **Phase 2: Node Ingestion**: All symbol nodes (`:FUNCTION`, `:CLASS_STRUCTURE`, etc.) are created in the database. A special de-duplication step is run here.
-3.  **Phase 3: Relationship Ingestion**: All relationships between the newly created nodes (`:HAS_METHOD`, `:HAS_NESTED`, `:DEFINES`, etc.) are created in a specific, optimized order.
+1.  **Phase 1: Data Preparation**: All raw `Symbol` objects are processed, enriched with linking information, and grouped into a structure optimized for ingestion. This includes capturing **macro causality** (`original_name`, `expanded_from_id`) and **type alias targets**.
+2.  **Phase 2: Node Ingestion**: All symbol nodes (`:FUNCTION`, `:CLASS_STRUCTURE`, `:MACRO`, `:TYPE_ALIAS`, etc.) are created in the database. A special de-duplication step is run here.
+3.  **Phase 3: Relationship Ingestion**: All relationships between the newly created nodes (`:HAS_METHOD`, `:EXPANDED_FROM`, `:ALIAS_OF`, `:DEFINES`, etc.) are created in a specific, optimized order.
 
 ---
 
@@ -23,9 +23,11 @@ The `SymbolProcessor`'s main entry point orchestrates a three-phase process desi
 *   **Solution**: A multi-step preparation pipeline is used:
     1.  **`_build_scope_maps`**: This first pre-processes all symbols to create a critical lookup table that maps fully qualified namespace names (e.g., `std::chrono::`) to their unique symbol IDs. This is essential because a symbol's `scope` property is a string, not an ID, and this map allows for the later creation of `(:NAMESPACE)-[:SCOPE_CONTAINS]->(Symbol)` relationships.
     2.  **`process_symbol`**: This method acts as a powerful translator, converting a `Symbol` object into a dictionary. During this translation, it:
-        *   **Filters** out symbols defined outside the project path (except for `Namespace` symbols, which are always processed).
-        *   **Assigns a `node_label`**: This is where the business logic for the C/C++ schema is enforced. It maps the `clangd` `kind` to a specific Neo4j label (e.g., `InstanceMethod` becomes `:METHOD`, `Class` becomes `:CLASS_STRUCTURE`). It also handles the important distinction where a `Struct` becomes a `:CLASS_STRUCTURE` if its language is C++, but a `:DATA_STRUCTURE` if its language is C.
-        *   **Attaches Temporary IDs**: It attaches temporary linking properties like **`parent_id`** (for lexical nesting, from `SourceSpanProvider`) and **`namespace_id`** (from the scope map). These are used only for relationship creation in Phase 3 and are not stored on the final node.
+        *   **Filters** out symbols defined outside the project path (except for `Namespace` symbols).
+        *   **Assigns a `node_label`**: This maps the `clangd` `kind` to a specific Neo4j label. Notably, it handles the new **`:MACRO`** and **`:TYPE_ALIAS`** labels.
+        *   **Captures Causality**: It attaches the **`original_name`** property (the macro invocation text) and the **`expanded_from_id`** to the data dictionary for generated symbols.
+        *   **Type Alias Resolution**: For aliases, it includes **`aliased_type_id`**, **`aliased_type_kind`**, and **`aliased_canonical_spelling`**.
+        *   **Attaches Temporary IDs**: It attaches linking properties like **`parent_id`** and **`namespace_id`**. These are used only for relationship creation in Phase 3 and are not stored on the final node.
     3.  **`_process_and_group_symbols`**: The final preparation step groups all the processed symbol dictionaries by their assigned `node_label`. This creates a clean, organized data structure (e.g., a list of all `FUNCTION` data, a list of all `CLASS_STRUCTURE` data) ready for efficient batch ingestion.
 
 *   **Benefit**: This "prepare-then-ingest" approach is highly efficient. It ensures all data is validated, grouped, and enriched with temporary linking IDs in-memory before a single node is created, minimizing complex queries during the database writing phase.
@@ -41,6 +43,8 @@ The `SymbolProcessor`'s main entry point orchestrates a three-phase process desi
 *   **Solution**: A single, generic method, **`_ingest_nodes_by_label`**, is used for all node creation.
     *   It accepts a list of data dictionaries and a `label` string.
     *   It uses a generic Cypher query (`MERGE (n:{label} {{id: d.id}})...`) to create nodes in batches.
+    *   For **`:MACRO`** nodes, it writes the `macro_definition` and `is_function_like` properties.
+    *   For **`:TYPE_ALIAS`** nodes, it writes the aliased type metadata.
     *   It intelligently uses `apoc.map.removeKeys` to prevent temporary linking properties like `parent_id` and `namespace_id` from being written to the node itself.
 
 *   **Benefit**: This unified design dramatically reduces code duplication and makes the system easier to maintain. Adding a new symbol type in the future only requires updating the label mapping, not writing a new ingestion method.
@@ -49,16 +53,18 @@ The `SymbolProcessor`'s main entry point orchestrates a three-phase process desi
 
 *   **Problem**: A header file might be included by both C and C++ source files. This can cause the `ClangParser` to see the same `struct` in two different language contexts, leading to the creation of two nodes with the same `id` but different labels (`:DATA_STRUCTURE` and `:CLASS_STRUCTURE`).
 *   **Solution**: After all nodes are ingested, the `_dedup_nodes` method runs a specific query: `MATCH (ds:DATA_STRUCTURE), (cs:CLASS_STRUCTURE {id: ds.id}) DETACH DELETE ds`. This finds and removes the C-style `:DATA_STRUCTURE` node if a C++-style `:CLASS_STRUCTURE` with the same ID exists.
-*   **Benefit**: This ensures the C++ representation is preferred when ambiguity exists, maintaining a clean and accurate graph without duplicates.
+*   **Benefit**: This ensures the C++ representation is preferred when ambiguity exists, maintaining a clean and accurate graph without duplicates. This is particularly important for macro-generated structs that might appear at the same location as their typedefs.
 
 ### 4.3. Multi-Stage Relationship Ingestion
 
 *   **Problem**: The graph's value comes from its rich relationships. How can these be created efficiently and correctly after the nodes exist, using the temporary IDs attached during data preparation?
 
 *   **Solution**: After all nodes are created, a series of specialized methods are called to create each type of relationship in batches.
-    1.  **Parental Relationships (`:SCOPE_CONTAINS`, `:HAS_NESTED`)**: The `_ingest_parental_relationships` method uses the `namespace_id` and `parent_id` on the processed symbol data. It pre-groups the relationships in Python by the `(parent_label, child_label)` combination. This allows it to generate highly specific and fast Cypher queries (e.g., `MATCH (p:CLASS_STRUCTURE)... MATCH (c:METHOD)...`) that make full use of database indexes.
-    2.  **File Relationships (`:DEFINES`, `:DECLARES`)**: These methods link files to the symbols they contain. The `:DEFINES` relationship logic is particularly complex and offers multiple performance-tuned strategies to handle the massive volume of these relationships without causing database deadlocks.
-    3.  **Member & Inheritance Relationships**: Other methods (`_ingest_has_member_relationships`, `_ingest_inheritance_relationships`, etc.) follow a similar pattern of using the temporary IDs and batched `UNWIND` queries to create `:HAS_FIELD`, `:HAS_METHOD`, `:INHERITS`, and `:OVERRIDDEN_BY` edges.
+    1.  **Parental Relationships (`:SCOPE_CONTAINS`, `:HAS_NESTED`, `:DEFINES_TYPE_ALIAS`)**: The `_ingest_parental_relationships` method uses the `namespace_id` and `parent_id` on the processed symbol data. It pre-groups the relationships in Python by the `(parent_label, child_label)` combination. 
+    2.  **Causality Relationship (`:EXPANDED_FROM`)**: The `_ingest_expanded_from_relationships` method creates links from generated symbols back to their source `:MACRO` nodes using the `expanded_from_id`.
+    3.  **Alias Relationship (`:ALIAS_OF`)**: The `_ingest_alias_of_relationships` method creates links from `:TYPE_ALIAS` nodes to their targets (classes, structs, or other aliases).
+    4.  **File Relationships (`:DEFINES`, `:DECLARES`)**: These methods link files to the symbols they contain. The `:DEFINES` relationship logic includes **`:MACRO`** and **`:TYPE_ALIAS`** in its scope.
+    5.  **Member & Inheritance Relationships**: Other methods follow a similar pattern to create `:HAS_FIELD`, `:HAS_METHOD`, `:INHERITS`, and `:OVERRIDDEN_BY` edges.
 
 *   **Benefit**: This multi-stage approach breaks down a highly complex task into a series of clear, manageable, and individually optimized steps, resulting in a correctly and efficiently constructed graph.
 

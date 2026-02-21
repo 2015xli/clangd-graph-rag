@@ -4,7 +4,7 @@
 
 This module provides the `CompilationManager` class, which acts as the high-level orchestrator for the entire source code parsing process. It was created by refactoring the old `function_span_extractor.py` to have a broader and clearer set of responsibilities.
 
-Its purpose is to serve as the single, unified interface for any other part of the system that needs to access source code information like function spans or include relationships. It decouples the main application logic from the low-level details of parsing and caching, providing a simple and robust API for both full-project and incremental parsing.
+Its purpose is to serve as the single, unified interface for any other part of the system that needs to access source code information like function spans, **type aliases**, **macro definitions**, or include relationships. It decouples the main application logic from the low-level details of parsing and caching, providing a simple and robust API for both full-project and incremental parsing.
 
 ## 2. Core Responsibilities
 
@@ -50,7 +50,7 @@ The manager's public API has been refactored for clarity and power. All parsing 
     1.  **If in a Git repo**, it uses the fast `git ls-tree` command to get an accurate list of all files at a specific commit (`HEAD` by default). It then calls `parse_files` with this list and the commit hash, activating the Git-based caching path. This is highly scalable and avoids slow filesystem walks on large projects.
     2.  **If not in a Git repo**, it performs a traditional walk of the filesystem to gather all source files and calls `parse_files` without any commit info, activating the mtime-based caching path.
 
-*   **`get_source_spans()` / `get_include_relations()`**: These methods remain the same and are used to retrieve the extracted data after a `parse_*` method has been called.
+*   **`get_source_spans()` / `get_include_relations()` / `get_type_alias_spans()` / `get_macro_spans()`**: These methods are used to retrieve the extracted data after a `parse_*` method has been called.
 
 ## 5. Git Reference Resolution
 

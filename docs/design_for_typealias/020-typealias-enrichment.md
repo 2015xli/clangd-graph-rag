@@ -1,4 +1,4 @@
-# 011: TypeAlias Enrichment - Detailed Implementation Plan
+# 020: TypeAlias Enrichment - Detailed Implementation Plan
 
 This document details the implementation steps for the TypeAlias enrichment stage: enriching existing `Symbol` objects and creating synthetic ones based on the `TypeAliasSpan` data extracted by the parser.
 
@@ -32,6 +32,8 @@ To modify `source_span_provider.py` to integrate the `TypeAliasSpan` data, ensur
                     *   `sym.parent_id = matched_tas.parent_id`
                     *   `sym.scope = matched_tas.scope`
                     *   `sym.body_location = matched_tas.body_location`
+                    *   `sym.original_name = matched_tas.original_name`
+                    *   `sym.expanded_from_id = matched_tas.expanded_from_id`
                 *   Remove `matched_tas` from `self.type_alias_spans` to mark it as processed.
     *   **Create Synthetic `Symbol`s for Unmatched `TypeAliasSpan`s:**
         *   After the matching loop, iterate through the remaining `TypeAliasSpan`s in `self.type_alias_spans` (these are aliases found by the parser but not present in the clangd YAML).
@@ -48,6 +50,8 @@ To modify `source_span_provider.py` to integrate the `TypeAliasSpan` data, ensur
             *   Set `new_sym.parent_id = unmatched_tas.parent_id`.
             *   Set `new_sym.scope = unmatched_tas.scope`.
             *   Set `new_sym.body_location = unmatched_tas.body_location`.
+            *   Set `new_sym.original_name = unmatched_tas.original_name`.
+            *   Set `new_sym.expanded_from_id = unmatched_tas.expanded_from_id`.
             *   Add this `new_sym` to `self.symbol_parser.symbols`.
             *   Update `synthetic_id_to_index_id` mapping if necessary.
 

@@ -1,41 +1,41 @@
 Node Properties:
-  (PROJECT)
-    name: STRING
-    path: STRING
-    summary: STRING
-    summaryEmbedding: LIST
-  (FOLDER)
-    name: STRING
-    path: STRING (INDEXED) (UNIQUE)
-    summary: STRING
-    summaryEmbedding: LIST
-  (FILE)
-    name: STRING
-    path: STRING (INDEXED) (UNIQUE)
-    summary: STRING
-    summaryEmbedding: LIST
-  (CLASS_STRUCTURE|DATA_STRUCTURE)
-    name: STRING
+  (PROJECT)  # Root node of the project
     id: STRING (INDEXED) (UNIQUE)
-    kind: STRING
-    language: STRING
+    name: STRING
+    path: STRING  (# Absolute path of the project root)
+    summary: STRING
+  (FOLDER|FILE)  # Representing file system structure of the project
+    id: STRING (INDEXED) (UNIQUE)
+    name: STRING
+    path: STRING (INDEXED) (UNIQUE)  (# Relative path to the project root)
+    summary: STRING
+  (CLASS_STRUCTURE|DATA_STRUCTURE) # User defined composite types
+    id: STRING (INDEXED) (UNIQUE)
+    name: STRING
+    kind: STRING (# Class, Struct, Enum, Union) 
     path: STRING
+    name_location: LIST
     body_location: LIST
     summary: STRING
-    summaryEmbedding: LIST
-  (FIELD)
+  (TYPE_ALIAS)  # User defined type alias
+    id: STRING (INDEXED) (UNIQUE)
+    name: STRING
+    scope: STRING
+    qualified_name: STRING
+    path: STRING
+    name_location: LIST
+    body_location: LIST
+  (FIELD)  # Field member of composite types, static or non-static
     id: STRING (INDEXED) (UNIQUE)
     name: STRING
     is_static: BOOLEAN
     kind: STRING
-    language: STRING
     scope: STRING
     type: STRING
     path: STRING
-  (FUNCTION|METHOD)
+  (FUNCTION|METHOD)  # Function or methods
     id: STRING (INDEXED) (UNIQUE)
     name: STRING
-    language: STRING
     kind: STRING
     type: STRING
     return_type: STRING
@@ -44,8 +44,7 @@ Node Properties:
     path: STRING
     body_location: LIST
     summary: STRING
-    summaryEmbedding: LIST
-  (NAMESPACE)
+  (NAMESPACE)  # Namespace
     id: STRING (INDEXED) (UNIQUE)
     name: STRING
     scope: STRING
@@ -53,22 +52,20 @@ Node Properties:
     name_location: LIST
     path: STRING
     summary: STRING
-    summaryEmbedding: LIST
-  (VARIABLE)
+  (VARIABLE)  # Global variable
     id: STRING (INDEXED) (UNIQUE)
     name: STRING
     kind: STRING
     scope: STRING
     type: STRING
-    language: STRING
     path: STRING
     name_location: LIST
-  (TYPE_ALIAS)
+  (MACRO)  # Macro definition
     id: STRING (INDEXED) (UNIQUE)
     name: STRING
-    scope: STRING
-    qualified_name: STRING
+    macro_definition: STRING (# The full definition of the macro, without leading "#DEFINE")
     path: STRING
+    name_location: LIST 
     body_location: LIST
 
 
@@ -102,4 +99,4 @@ Property Explanations:
   return_type: Return type of a function/method.
   signature: Full signature of a function/method.
   summary: LLM-generated context-aware summary of the node's purpose.
-  summaryEmbedding: Vector embedding of the 'summary' for similarity search.
+   macro_definition: The full definition of the macro, without leading "#DEFINE" (e.g., MAX(a,b) ((a)>(b):(a):(b)) ) 

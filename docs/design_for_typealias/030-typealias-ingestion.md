@@ -1,4 +1,4 @@
-# 012: TypeAlias Ingestion - Detailed Implementation Plan
+# 030: TypeAlias Ingestion - Detailed Implementation Plan
 
 This document details the implementation steps for the TypeAlias graph ingestion stage: creating `:TYPE_ALIAS` nodes and their associated relationships in Neo4j. The `:TYPE_EXPRESSION` node type has been removed, and the `[:ALIAS_OF]` relationship is now optional, reflecting Solution Option 1 from the high-level plan.
 
@@ -21,6 +21,8 @@ To modify `clangd_symbol_nodes_builder.py` to ingest `TypeAlias` data, establish
     *   Add `symbol_data["parent_id"] = sym.parent_id`.
     *   Add `symbol_data["scope"] = sym.scope`.
     *   Add `symbol_data["qualified_name"] = sym.scope + sym.name`.
+    *   Add `symbol_data["original_name"] = sym.original_name`.
+    *   Add `symbol_data["expanded_from_id"] = sym.expanded_from_id`.
 *   We don't maintain qualified_name property in `Symbol` object to avoid the redundancy, so we construct it on the fly.
 
 #### 2. Update `SymbolProcessor.ingest_symbols_and_relationships`
@@ -34,6 +36,8 @@ To modify `clangd_symbol_nodes_builder.py` to ingest `TypeAlias` data, establish
     *   Add`_ingest_alias_of_relationships(self, type_alias_data_list: List[Dict], neo4j_mgr: Neo4jManager)`
         *   This method will create `[:ALIAS_OF]` relationships.
         *   It will iterate through `type_alias_data_list` to filter the TypeAlias symbols that have a valid `aliased_type_id`.
+    *   Add `_ingest_expanded_from_relationships(processed_symbols, neo4j_mgr)` (NEW)
+        *   This method creates `[:EXPANDED_FROM]` relationships for all generated symbols, including type aliases.
 
 #### 3. Modified Method: `_ingest_defines_relationships`
 

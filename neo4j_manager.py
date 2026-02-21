@@ -133,6 +133,7 @@ class Neo4jManager:
             "CREATE CONSTRAINT IF NOT EXISTS FOR (m:METHOD) REQUIRE m.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (f:FIELD) REQUIRE f.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (v:VARIABLE) REQUIRE v.id IS UNIQUE",
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (m:MACRO) REQUIRE m.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (ta:TYPE_ALIAS) REQUIRE ta.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (te:TYPE_EXPRESSION) REQUIRE te.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (n:NAMESPACE) REQUIRE n.id IS UNIQUE",
@@ -857,6 +858,7 @@ class Neo4jManager:
             property_explanations = {
                 "id": "Unique identifier for the node.",
                 "name": "Name of the entity (e.g., function name, file name).",
+                "original_name": "The original source text that generated this symbol (e.g., a macro invocation like DECLARE_MODULE(FS)).",
                 "path": "Relative path to the project root if it is within the project folder. The PROJECT node has the absolute path of the project root.",
                 "name_location": "Entity's name location in the file, showing the start position: [line, column].",
                 "body_location": "Entity's body location in the file, showing the range: [start_line, start_column, end_line, end_column].",
@@ -868,6 +870,7 @@ class Neo4jManager:
                 "return_type": "Return type of a function/method.",
                 "signature": "Full signature of a function/method.",
                 "has_definition": "Boolean indicating if a symbol has a definition/implementation, not just a declaration.",
+                "macro_definition": "The full source code text of a macro definition (e.g., #define MAX 100).",
                 "code_analysis": "Analysis of the entity's code literal functionality.",
                 "summary": "Context-aware summary of the node entity's purpose.",
                 "summaryEmbedding": "Vector embedding of the 'summary' for semantic similarity search.",

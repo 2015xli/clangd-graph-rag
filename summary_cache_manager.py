@@ -241,10 +241,10 @@ class SummaryCacheManager:
         query_configs = {
             "id_based_full": {
                 "labels": ["FUNCTION", "METHOD"],
-                "query": "MATCH (n:{label}) WHERE n.summary IS NOT NULL OR n.code_analysis IS NOT NULL RETURN n.id AS identifier, n.code_hash as code_hash, n.code_analysis AS code_analysis, n.summary AS summary ORDER BY n.id SKIP $skip LIMIT $limit"
+                "query": "MATCH (n:{label}) WHERE n.summary IS NOT NULL OR n.code_analysis IS NOT NULL RETURN n.id AS identifier, n.code_hash as code_hash, n.code_analysis AS code_analysis, n.summary AS summary, n.original_name AS original_name ORDER BY n.id SKIP $skip LIMIT $limit"
             },
             "id_based_simple": {
-                "labels": ["NAMESPACE", "CLASS_STRUCTURE"],
+                "labels": ["NAMESPACE", "CLASS_STRUCTURE", "MACRO"],
                 "query": "MATCH (n:{label}) WHERE n.summary IS NOT NULL RETURN n.id AS identifier, n.summary AS summary ORDER BY n.id SKIP $skip LIMIT $limit"
             },
             "path_based": {

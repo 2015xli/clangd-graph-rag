@@ -20,11 +20,11 @@ These passes prepare all data in memory before connecting to the database.
 
 *   **Pass 1: Parse Source Code**
     *   **Component**: `compilation_manager.CompilationManager`
-    *   **Purpose**: To parse the entire project's source code. This provides two critical pieces of data: the complete set of `#include` relationships and the precise body locations (spans) of every function.
+    *   **Purpose**: To parse the entire project's source code. This provides: include relationships, body locations for functions, **Type Alias** definitions, and ground-truth **Macro** definitions.
 
 *   **Pass 2: Enrich Symbols with Spans**
     *   **Component**: `source_span_provider.SourceSpanProvider`
-    *   **Purpose**: This class acts as an "enricher." It takes the symbols from Pass 0 and the span data from Pass 1, matches them, and attaches a `body_location` attribute directly to each in-memory `Symbol` object corresponding to a function.
+    *   **Purpose**: Matches indexed symbols with parsed source data. Attaches `body_location` and **macro causality metadata** (`original_name`, `expanded_from_id`) to symbols. It also **discovers and injects new Symbols** for macros and missing type aliases.
 
 ### Database Passes
 
@@ -37,10 +37,10 @@ With all data prepared, the orchestrator now connects to Neo4j and builds the gr
     *   **Purpose**: To create all `:FILE` and `:FOLDER` nodes and their `[:CONTAINS]` relationships.
     *   **Design Subtlety**: This pass is now highly robust. It receives data from both the symbol parser and the compilation manager, consolidating a master list of every file path that must exist. This ensures that even "invisible headers" (headers with no symbol definitions) are correctly created as nodes in the graph.
 
-*   **Pass 4: Ingest Symbol Definitions**
+*   **Pass 4: Ingest Symbols and Relationships**
     *   **Component**: `clangd_symbol_nodes_builder.SymbolProcessor`
-    *   **Purpose**: To create the `:FUNCTION` and `:DATA_STRUCTURE` nodes.
-    *   **Key Feature**: This pass reads the `body_location` attribute that was attached to the `Symbol` objects in Pass 2 and stores it as a property directly on each `:FUNCTION` node in the database.
+    *   **Purpose**: To create all symbol nodes (`:FUNCTION`, `:DATA_STRUCTURE`, `:CLASS_STRUCTURE`, **`:TYPE_ALIAS`**, **`:MACRO`**).
+    *   **Key Feature**: Ingests expansion causality (`[:EXPANDED_FROM]`) and type relationships (`[:ALIAS_OF]`). Stores macro source text in the `macro_definition` property.
 
 *   **Pass 5: Ingest Include Relations**
     *   **Component**: `include_relation_provider.IncludeRelationProvider`
@@ -50,14 +50,17 @@ With all data prepared, the orchestrator now connects to Neo4j and builds the gr
     *   **Component**: `clangd_call_graph_builder.ClangdCallGraphExtractor`
     *   **Purpose**: To create all function `[:CALLS]` relationships.
 
-*   **Pass 7: RAG Data Generation (Optional)**
+*   **Pass 7: Cleanup Orphan Nodes**
+    *   **Component**: `neo4j_manager.Neo4jManager`
+    *   **Purpose**: Removes nodes created but ended up with no relationships.
+
+*   **Pass 8: RAG Data Generation (Optional)**
     *   **Component**: `code_graph_rag_generator.RagGenerator`
     *   **Purpose**: To enrich the graph with AI-generated summaries and embeddings.
-    *   **Key Feature**: This component has been simplified. It no longer needs a separate provider for location data. It now queries `:FUNCTION` nodes directly for their `body_location` property to retrieve the source code needed for summarization.
 
-*   **Pass 8: Cleanup Orphan Nodes**
+*   **Pass 9: Add Agent-Facing Schema**
     *   **Component**: `neo4j_manager.Neo4jManager`
-    *   **Purpose**: An optional final pass to remove any nodes that were created but ended up with no relationships.
+    *   **Purpose**: Adds synthetic IDs, the `:ENTITY` label to all relevant nodes, and creates unified vector indexes to facilitate agent reasoning and semantic search.
 
 ## 3. Memory Management
 
