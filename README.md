@@ -1,6 +1,6 @@
 # Source Code Graph RAG (using Clang/Clangd)
 
-This project builds a Neo4j graph RAG (Retrieval-Augmented Generation) for a C/C++ software project based on clang/clangd, which can be queried for deep software project analysis. It works well with large codebases like the Linux kernel.
+This project builds a Neo4j graph RAG (Retrieval-Augmented Generation) for a C/C++ software project based on clang/clangd, which can be queried for deep software project analysis. It works well with large codebases like the Linux kernel, llvm, chromium, etc. 
 
 ### Example Questions it Can Help With:
 
@@ -29,6 +29,8 @@ The project provides the graph RAG building and updating tools, along with an ex
 ---
 
 ### Current Schema
+Here is a simplified version of the [current neo4j schema](neo4j_current_schema.txt) for AI agent to use.
+
 ![Current Schema](docs/neo4j_current_schema.png)
 
 ---
@@ -250,9 +252,8 @@ Contributions are welcome! This includes bug reports, feature requests, and pull
 ### Future Work
 
 The support to C/C++ is basically done. For next steps, we can focus on:
-- Support data-dependence relationships. 
+- Support data-dependence relationships. (What?!)
 - Support to merge multiple projects into one graph.
-- Support macro definition node and expansion relationship. 
 
 ## License
 

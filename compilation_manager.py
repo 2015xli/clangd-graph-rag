@@ -355,6 +355,8 @@ if __name__ == "__main__":
     parser.add_argument("paths", nargs='+', type=Path, help="One or more source files or folders to process.")
     parser.add_argument("--output", type=Path, help="Output YAML file path (default: stdout).")
 
+    input_params.add_worker_args(parser)
+    
     parser_group = parser.add_argument_group('Parser Configuration')
     input_params.add_source_parser_args(parser_group)
 

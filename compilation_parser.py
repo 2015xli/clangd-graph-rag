@@ -172,9 +172,9 @@ class _ClangWorkerImpl:
             self._parse_translation_unit(file_path, args)
 
         except clang.cindex.TranslationUnitLoadError as e:
-            logger.error(f"Clang worker failed to parse {file_path}: {e}")
+            logger.exception(f"Clang worker failed to parse {file_path}: {e}")
         except Exception as e:
-            logger.error(f"Clang worker had an unexpected error on {file_path}: {e}")
+            logger.exception(f"Clang worker had an unexpected error on {file_path}: {e}")
         finally:
             os.chdir(original_dir)
 
@@ -259,12 +259,12 @@ class _ClangWorkerImpl:
             if self._should_process_node(node, file_name):
                 self._process_generic_node(node, file_name)
 
-        # 2. If it's a TypeAlias declaration, process it
-        elif node.kind.name in ClangParser.NODE_KIND_TYPE_ALIAS:
+        # 4. If it's a TypeAlias declaration, process it
+        elif node.kind.name in ClangParser.NODE_KIND_TYPE_ALIASES:
             if self._should_process_node(node, file_name):
                 self._process_type_alias_node(node, file_name)
 
-        # 3. If it's a call expression inside a function, process the static call
+        # 5. If it's a call expression inside a function, process the static call
         elif node.kind == clang.cindex.CursorKind.CALL_EXPR and current_caller_cursor:
             callee_cursor = node.referenced
             # Check if the callee is a static function (internal linkage)
@@ -373,7 +373,8 @@ class _ClangWorkerImpl:
         scope = self._get_fully_qualified_scope(semantic_parent)
         parent_id = self._get_parent_id(node) # Use existing helper for parent_id
 
-        # Next, resolve Aliasee Info
+        # Next, resolve Aliasee Info. 
+        # We only care about those aliases that have a node in the graph.
         underlying_type = node.underlying_typedef_type
         aliased_canonical_spelling = underlying_type.get_canonical().spelling  #can be empty ''
         aliased_type_id = None
@@ -388,30 +389,40 @@ class _ClangWorkerImpl:
             is_aliasee_definition = aliasee_decl_cursor.is_definition()
             aliased_type_kind = self._convert_node_kind_to_index_kind(aliasee_decl_cursor)
 
-            # We should use USR-derived id for all declarations, but since we use synthetic key for SourceSpans, 
-            # we will keep it for now for data_structure/class_structure types, in order to be mapped in graph enrichment.
-            # (We use synthetic id in order to support anonymous structures. 
-            # TODO: we should consider to use USR-derived id as much as possible.
-            if aliasee_decl_cursor.kind.name in ClangParser.NODE_KIND_FOR_COMPOSITE_TYPES:
-                # Aliasee is a named user-defined composite type (struct, class, enum, union)
-                # Use synthetic ID for consistency with SourceSpan handling
-                aliasee_name_line, aliasee_name_col = self._get_symbol_name_location(aliasee_decl_cursor)
-                aliased_type_id = CompilationParser.make_synthetic_id(
-                    CompilationParser.make_symbol_key(
-                        aliasee_decl_cursor.spelling,
-                        aliased_type_kind,
-                        f"file://{os.path.abspath(aliasee_decl_cursor.location.file.name)}",
-                        aliasee_name_line,
-                        aliasee_name_col
-                    )
-                )
-            else:
-                aliased_type_id = self._hash_usr_to_id(aliasee_decl_cursor.get_usr())
-
             # If the target aliasee definition is out of the project, set aliased_type_id to None, so that we don't create a relationship to it
-            file_path = os.path.abspath(aliasee_decl_cursor.location.file.name)
-            if not file_path.startswith(self.project_path): 
+            # Or if it has no location file (like a primitive, or for unknown reason), we don't need to create a relationship to it
+            if aliasee_decl_cursor.location.file is None:
                 aliased_type_id = None
+
+            else:
+                # If it has a location, let's get its id if it is defined in the project
+                # We should use USR-derived id for all declarations, but since we use synthetic key for SourceSpans, 
+                # we will keep it for now for data_structure/class_structure types, in order to be mapped in graph enrichment.
+                # (We use synthetic id in order to support anonymous structures. 
+                # TODO: we should consider to use USR-derived id as much as possible.
+                if aliasee_decl_cursor.kind.name in ClangParser.NODE_KIND_FOR_COMPOSITE_TYPES:
+                    # Aliasee is a named user-defined composite type (struct, class, enum, union)
+                    # Use synthetic ID for consistency with SourceSpan handling (temporarily)
+                    aliasee_name_line, aliasee_name_col = self._get_symbol_name_location(aliasee_decl_cursor)
+                    aliased_type_id = CompilationParser.make_synthetic_id(
+                        CompilationParser.make_symbol_key(
+                            aliasee_decl_cursor.spelling,
+                            aliased_type_kind,
+                            f"file://{os.path.abspath(aliasee_decl_cursor.location.file.name)}",
+                            aliasee_name_line,
+                            aliasee_name_col
+                        )
+                    )
+                else:
+                    # Other aliasees are like ClangParser.NODE_KIND_FOR_TYPE_ALIAS
+                    # We don't use synthetic id for them, since we directly use USR-derived id for them in parsing.
+                    aliased_type_id = self._hash_usr_to_id(aliasee_decl_cursor.get_usr())
+
+                # If it is not defined in the project, set aliased_type_id to None. 
+                # We don't want to create a relationship to a type that is out of the project.
+                file_path = os.path.abspath(aliasee_decl_cursor.location.file.name)
+                if not file_path.startswith(self.project_path): 
+                    aliased_type_id = None
 
         else: 
         # 1) NO_DECL_FOUND cases:
@@ -421,7 +432,7 @@ class _ClangWorkerImpl:
         #    Aliasee is a template template parameter 
         #    template<template<class> class Op>
         #    struct X { using type = Op<int>; };
-        # In any case of NO_DECL_FOUND, we don't try to extract aliasee's info.
+        # In any case of the above, we don't try to extract aliasee's info.
             pass
 
         # Store TypeAliasSpan
@@ -684,7 +695,7 @@ class _ClangWorkerImpl:
             return "Class"
         elif node.kind.name in ClangParser.NODE_KIND_NAMESPACE:
             return "Namespace"
-        elif node.kind.name in ClangParser.NODE_KIND_TYPE_ALIAS:
+        elif node.kind.name in ClangParser.NODE_KIND_TYPE_ALIASES:
             return "TypeAlias"
         else:
             logger.error(f"Unknown Clang parser kind: {node.kind.name}")
@@ -941,7 +952,7 @@ class CompilationParser:
     CPP_SOURCE_EXTENSIONS = ('.cpp', '.cc', '.cxx')
     CPP20_MODULE_EXTENSIONS = ('.cppm', '.ccm', '.cxxm', '.c++m')
     C_HEADER_EXTENSIONS = ('.h',)
-    CPP_HEADER_EXTENSIONS = ('.hpp', '.hh', '.hxx', '.h++')
+    CPP_HEADER_EXTENSIONS = ('.hpp', '.hh', '.hxx', '.h++', '.inc')
 
     ALL_SOURCE_EXTENSIONS = C_SOURCE_EXTENSIONS + CPP_SOURCE_EXTENSIONS + CPP20_MODULE_EXTENSIONS
     ALL_HEADER_EXTENSIONS = C_HEADER_EXTENSIONS + CPP_HEADER_EXTENSIONS
@@ -1158,7 +1169,7 @@ class ClangParser(CompilationParser):
 
     NODE_KIND_FOR_SCOPES =  NODE_KIND_NAMESPACE | NODE_KIND_UNION | NODE_KIND_ENUM | NODE_KIND_STRUCT | NODE_KIND_CLASSES
 
-    NODE_KIND_TYPE_ALIAS = {
+    NODE_KIND_TYPE_ALIASES = {
         clang.cindex.CursorKind.TYPE_ALIAS_TEMPLATE_DECL.name,
         clang.cindex.CursorKind.TYPE_ALIAS_DECL.name,
         clang.cindex.CursorKind.TYPEDEF_DECL.name,
@@ -1166,7 +1177,7 @@ class ClangParser(CompilationParser):
 
     NODE_KIND_FOR_COMPOSITE_TYPES = NODE_KIND_UNION | NODE_KIND_ENUM | NODE_KIND_STRUCT | NODE_KIND_CLASSES
 
-    NODE_KIND_FOR_USER_DEFINED_TYPES = NODE_KIND_FOR_COMPOSITE_TYPES | NODE_KIND_TYPE_ALIAS
+    NODE_KIND_FOR_USER_DEFINED_TYPES = NODE_KIND_FOR_COMPOSITE_TYPES | NODE_KIND_TYPE_ALIASES
 
     def __init__(self, project_path: str, compile_commands_path: str):
         super().__init__(project_path)

@@ -75,6 +75,9 @@ class SymbolProcessor:
                     return None
             symbol_data["name_location"] = [primary_location.start_line, primary_location.start_column]
 
+        if hasattr(sym, 'body_location') and sym.body_location:
+                symbol_data["body_location"] = [sym.body_location.start_line, sym.body_location.start_column, sym.body_location.end_line, sym.body_location.end_column]
+
         if hasattr(sym, 'parent_id') and sym.parent_id:
             symbol_data["parent_id"] = sym.parent_id
 
@@ -95,30 +98,18 @@ class SymbolProcessor:
             symbol_data["node_label"] = "MACRO"
             symbol_data["is_function_like"] = sym.is_macro_function_like
             symbol_data["macro_definition"] = sym.macro_definition
-            if sym.body_location:
-                symbol_data["body_location"] = [sym.body_location.start_line, sym.body_location.start_column, sym.body_location.end_line, sym.body_location.end_column]
         elif sym.kind == "Function":
             symbol_data["node_label"] = "FUNCTION"
             symbol_data.update({"signature": sym.signature, "return_type": sym.return_type, "type": sym.type})
-            if hasattr(sym, 'body_location') and sym.body_location:
-                symbol_data["body_location"] = [sym.body_location.start_line, sym.body_location.start_column, sym.body_location.end_line, sym.body_location.end_column]
         elif sym.kind in ("InstanceMethod", "StaticMethod", "Constructor", "Destructor", "ConversionFunction"):
             symbol_data["node_label"] = "METHOD"
             symbol_data.update({"signature": sym.signature, "return_type": sym.return_type, "type": sym.type})
-            if hasattr(sym, 'body_location') and sym.body_location:
-                symbol_data["body_location"] = [sym.body_location.start_line, sym.body_location.start_column, sym.body_location.end_line, sym.body_location.end_column]
         elif sym.kind == "Class":
             symbol_data["node_label"] = "CLASS_STRUCTURE"
-            if hasattr(sym, 'body_location') and sym.body_location:
-                symbol_data["body_location"] = [sym.body_location.start_line, sym.body_location.start_column, sym.body_location.end_line, sym.body_location.end_column]
         elif sym.kind == "Struct":
             symbol_data["node_label"] = "CLASS_STRUCTURE" if sym.language and sym.language.lower() == "cpp" else "DATA_STRUCTURE"
-            if hasattr(sym, 'body_location') and sym.body_location:
-                symbol_data["body_location"] = [sym.body_location.start_line, sym.body_location.start_column, sym.body_location.end_line, sym.body_location.end_column]
         elif sym.kind in ("Union", "Enum"):
             symbol_data["node_label"] = "DATA_STRUCTURE"
-            if hasattr(sym, 'body_location') and sym.body_location:
-                symbol_data["body_location"] = [sym.body_location.start_line, sym.body_location.start_column, sym.body_location.end_line, sym.body_location.end_column]
         elif sym.kind == "Field":
             symbol_data["node_label"] = "FIELD"
             symbol_data.update({"type": sym.type, "is_static": False})
@@ -133,11 +124,8 @@ class SymbolProcessor:
             symbol_data["aliased_canonical_spelling"] = sym.aliased_canonical_spelling
             symbol_data["aliased_type_id"] = sym.aliased_type_id
             symbol_data["aliased_type_kind"] = sym.aliased_type_kind
-            symbol_data["parent_id"] = sym.parent_id
             symbol_data["scope"] = sym.scope
             symbol_data["qualified_name"] = sym.scope + sym.name
-            if sym.body_location:
-                symbol_data["body_location"] = [sym.body_location.start_line, sym.body_location.start_column, sym.body_location.end_line, sym.body_location.end_column]
         else:
             return None
 
@@ -230,8 +218,8 @@ class SymbolProcessor:
         grouped_defines_type_alias_relations = defaultdict(list)
         type_alias_symbols = processed_symbols.get('TYPE_ALIAS', [])
         for symbol_data in type_alias_symbols:
-            parent_id = symbol_data["parent_id"]
-            if parent_label := id_to_label_map.get(parent_id):
+            parent_id = symbol_data.get("parent_id")
+            if parent_id and (parent_label := id_to_label_map.get(parent_id)):
                 grouped_defines_type_alias_relations[(parent_label, "TYPE_ALIAS")].append({"parent_id": parent_id, "child_id": symbol_data["id"]})
         self._ingest_grouped_parental_relationships(grouped_defines_type_alias_relations, "DEFINES_TYPE_ALIAS", neo4j_mgr)
         del id_to_label_map
@@ -467,11 +455,11 @@ class SymbolProcessor:
         # Given our schema, we can match by id and then filter by label if needed, but id is unique.
         query = """
         UNWIND $data AS d
-        MATCH (s {id: d.id})
+        MATCH (s {id: d.id}) 
+        WHERE s:NAMESPACE|CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|METHOD|FIELD|VARIABLE|TYPE_ALIAS
         MATCH (m:MACRO {id: d.expanded_from_id})
         MERGE (s)-[:EXPANDED_FROM]->(m)
         """
-        
         total_rels_created = 0
         for i in tqdm(range(0, len(all_expanded_data), self.ingest_batch_size), desc=align_string("Ingesting EXPANDED_FROM")):
             batch = all_expanded_data[i:i + self.ingest_batch_size]

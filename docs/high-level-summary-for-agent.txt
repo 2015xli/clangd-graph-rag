@@ -2,8 +2,6 @@
   AI-queryable knowledge graph within a Neo4j database.
 
   Core Functionality:
-
-
    1. Ingestion: It parses compile_commands.json and a clangd-index.yaml file to build a foundational code graph. This
       graph represents the file/folder hierarchy, symbol definitions (functions, classes, etc.), and their relationships.
    2. Enrichment: The system goes beyond the clangd index by directly parsing source code using clang's libraries. This
@@ -20,8 +18,6 @@
       and an example rag_adk_agent that uses these tools to reason about the codebase and answer user questions.
 
   Key Design Principles:
-
-
    * Accuracy: It relies on compiler-level tools (clang) for parsing, ensuring a high-fidelity representation of the
      code.
    * Performance: It is built for speed and efficiency, using parallel processing for CPU-bound tasks (parsing) and
@@ -53,12 +49,11 @@
  │             compilation_parser.py  │
  ╰────────────────────────────────────╯
 ✦ Source file compilation_parser.py. This module is critical for extracting C/C++ source code details like function
-  spans, include relations, and type aliases. It offers ClangParser for semantic analysis via clang.cindex and
+  spans, include relations, type aliases, and macros. It offers ClangParser for semantic analysis via clang.cindex and
   TreesitterParser for syntactic analysis. Both leverage parallel processing with _ClangWorkerImpl or
   _TreesitterWorkerImpl to efficiently parse compilation units or files, respectively. The CompilationParser abstract
   base class defines common interfaces and utilities, including deterministic ID generation and a generic parallel
-  parsing mechanism. This module's output enriches the clangd index, forming a more comprehensive code graph. Next, I'll
-  read git_manager.py.
+  parsing mechanism. This module's output enriches the clangd index, forming a more comprehensive code graph.
  ╭───────────────────────────────────────────╮
  │             include_relation_provider.py  │
  ╰───────────────────────────────────────────╯
@@ -89,7 +84,7 @@
 ✦ Source file source_span_provider.py. This module's SourceSpanProvider class is vital for enriching clangd Symbol
   objects with source code span and parent-child relationship data from CompilationManager. It matches existing symbols,
   synthesizes new ones for unindexed entities, and assigns parent IDs based on lexical scope. It also integrates
-  TypeAlias data and static call relations. This process creates a more complete and accurate codebase representation by
+  TypeAlias, Macro data and static call relations. This process creates a more complete and accurate codebase representation by
   merging clangd index data with direct source analysis. 
  ╭─────────────────────────────────────────────╮
  │             clangd_symbol_nodes_builder.py  │

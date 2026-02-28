@@ -28,8 +28,14 @@ def unknown_tag(loader, tag_suffix, node):
     return loader.construct_mapping(node)
 
 yaml.SafeLoader.add_multi_constructor("!", unknown_tag)
-
-# --- Common Data Classes ---
+# Targeted removal of Boolean conversion only to avoid parsing yes, no, on, off, true, and false as booleans
+for char in "yYnNtTfFoO":
+    if char in yaml.SafeLoader.yaml_implicit_resolvers:
+        # Filter out only the 'bool' resolver, keep 'int', 'float', 'timestamp', etc.
+        yaml.SafeLoader.yaml_implicit_resolvers[char] = [
+            r for r in yaml.SafeLoader.yaml_implicit_resolvers[char] 
+            if r[0] != 'tag:yaml.org,2002:bool'
+        ]
 
 @dataclass(frozen=True, slots=True)
 class Location:
@@ -104,14 +110,15 @@ class Symbol:
     type: str = ""
     body_location: Optional[RelativeLocation] = None
     parent_id: Optional[str] = None
-    is_macro_function_like: bool = False
-    macro_definition: Optional[str] = None
-    original_name: Optional[str] = None
-    expanded_from_id: Optional[str] = None
-    # New fields for TypeAlias
-    aliased_canonical_spelling: Optional[str] = None
-    aliased_type_id: Optional[str] = None
-    aliased_type_kind: Optional[str] = None
+    # Fields for Macro related
+    is_macro_function_like: bool = False    #The macro is function-like, e.g., max(a, b)
+    macro_definition: Optional[str] = None  #The full definition of the maco (without the leading "#DEFINE")
+    original_name: Optional[str] = None     #The original name of the symbol if it's a macro, e.g., READ_FUNCTION(name, type)
+    expanded_from_id: Optional[str] = None  #The ID of the macro node where the symbol is expanded from
+    # Fields for TypeAlias
+    aliased_canonical_spelling: Optional[str] = None   #The canonical spelling of the target aliased type
+    aliased_type_id: Optional[str] = None   #The ID of the node (like Class, Struct, etc) of the target aliased type
+    aliased_type_kind: Optional[str] = None #The kind of the target aliased type (like Class, Struct, etc)
     
     def is_function(self) -> bool:
         return self.kind in ('Function', 'InstanceMethod', 'StaticMethod', 'Constructor', 'Destructor', 'ConversionFunction')
@@ -226,6 +233,10 @@ class SymbolParser:
                 continue
             if 'ID' in doc and 'SymInfo' in doc:
                 symbol = self._parse_symbol_doc(doc)
+                if not isinstance(symbol.name, str):
+                    logger.error(f"Symbol {symbol.id}: {symbol.name} has invalid name type: {type(symbol.name)}")
+                    pass
+
                 self.symbols[symbol.id] = symbol
             elif 'ID' in doc and 'References' in doc:
                 self.unlinked_refs.append(doc)

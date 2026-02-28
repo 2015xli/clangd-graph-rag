@@ -5,6 +5,20 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python Debugger: llvm",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "clangd_graph_rag_builder.py",
+            "args": ["~/Public/llvm/build-21.1.2/llvm-21.1.2-index.yaml", "~/Public/llvm/llvm-project/", "--compile-commands", "~/Public/llvm/build-21.1.2/compile_commands.json"]
+        },
+        {
+            "name": "Python Debugger: Compilation Manager",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "compilation_manager.py",
+            "args": ["--num-parse-workers=1", "--compile-commands", "/tmp/compile_commands.json", "/home/xli/Public/llvm/llvm-project/compiler-rt/lib/builtins/comparetf2.c"]
+        },
+        {
             "name": "Python Debugger: LLama Graph RAG builder original_0 (single parser)",
             "type": "debugpy",
             "request": "launch",

@@ -1,16 +1,16 @@
-Node Properties:
+Nodes and their properties:
   (PROJECT)  # Root node of the project
-    id: STRING (INDEXED) (UNIQUE)
+    id: STRING (UNIQUE)
     name: STRING
     path: STRING  (# Absolute path of the project root)
-    summary: STRING
+    summary: STRING  (# The summary of the node purpose and high-level analysis)
   (FOLDER|FILE)  # Representing file system structure of the project
-    id: STRING (INDEXED) (UNIQUE)
+    id: STRING   (UNIQUE)
     name: STRING
-    path: STRING (INDEXED) (UNIQUE)  (# Relative path to the project root)
+    path: STRING   (UNIQUE)  (# Relative path to the project root)
     summary: STRING
   (CLASS_STRUCTURE|DATA_STRUCTURE) # User defined composite types
-    id: STRING (INDEXED) (UNIQUE)
+    id: STRING   (UNIQUE)
     name: STRING
     kind: STRING (# Class, Struct, Enum, Union) 
     path: STRING
@@ -18,15 +18,16 @@ Node Properties:
     body_location: LIST
     summary: STRING
   (TYPE_ALIAS)  # User defined type alias
-    id: STRING (INDEXED) (UNIQUE)
+    id: STRING   (UNIQUE)
     name: STRING
     scope: STRING
     qualified_name: STRING
+    aliased_canonical_spelling: STRING (# the target alised type expression)
     path: STRING
     name_location: LIST
     body_location: LIST
   (FIELD)  # Field member of composite types, static or non-static
-    id: STRING (INDEXED) (UNIQUE)
+    id: STRING   (UNIQUE)
     name: STRING
     is_static: BOOLEAN
     kind: STRING
@@ -34,7 +35,7 @@ Node Properties:
     type: STRING
     path: STRING
   (FUNCTION|METHOD)  # Function or methods
-    id: STRING (INDEXED) (UNIQUE)
+    id: STRING   (UNIQUE)
     name: STRING
     kind: STRING
     type: STRING
@@ -45,7 +46,7 @@ Node Properties:
     body_location: LIST
     summary: STRING
   (NAMESPACE)  # Namespace
-    id: STRING (INDEXED) (UNIQUE)
+    id: STRING   (UNIQUE)
     name: STRING
     scope: STRING
     qualified_name: STRING
@@ -53,7 +54,7 @@ Node Properties:
     path: STRING
     summary: STRING
   (VARIABLE)  # Global variable
-    id: STRING (INDEXED) (UNIQUE)
+    id: STRING   (UNIQUE)
     name: STRING
     kind: STRING
     scope: STRING
@@ -61,29 +62,12 @@ Node Properties:
     path: STRING
     name_location: LIST
   (MACRO)  # Macro definition
-    id: STRING (INDEXED) (UNIQUE)
+    id: STRING   (UNIQUE)
     name: STRING
     macro_definition: STRING (# The full definition of the macro, without leading "#DEFINE")
     path: STRING
     name_location: LIST 
     body_location: LIST
-
-
-Relationships:
-  (PROJECT) -[:CONTAINS]-> (FOLDER|FILE)
-  (FOLDER) -[:CONTAINS]-> (FILE|FOLDER)
-  (FILE) -[:INCLUDES]-> (FILE)
-  (FILE) -[:DECLARES]-> (NAMESPACE|CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE)
-  (FILE) -[:DEFINES]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE|TYPE_ALIAS)
-  (NAMESPACE) -[:SCOPE_CONTAINS]-> (NAMESPACE|CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE)
-  (CLASS_STRUCTURE|DATA_STRUCTURE) -[:HAS_METHOD]-> (METHOD)
-  (CLASS_STRUCTURE|DATA_STRUCTURE) -[:HAS_FIELD]-> (FIELD)
-  (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|METHOD) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION)
-  (FUNCTION|METHOD) -[:CALLS]-> (FUNCTION|METHOD)
-  (CLASS_STRUCTURE) -[:INHERITS]-> (CLASS_STRUCTURE)
-  (METHOD) -[:OVERRIDDEN_BY]-> (METHOD)
-  (CLASS_STRUCTURE|DATA_STRUCTURE) -[:DEFINES_TYPE_ALIAS]-> (TYPE_ALIAS)
-  (TYPE_ALIAS) -[:ALIAS_OF]-> (CLASS_STRUCTURE|DATA_STRUCTURE|TYPE_ALIAS)
 
 
 Property Explanations:
@@ -99,4 +83,24 @@ Property Explanations:
   return_type: Return type of a function/method.
   signature: Full signature of a function/method.
   summary: LLM-generated context-aware summary of the node's purpose.
-   macro_definition: The full definition of the macro, without leading "#DEFINE" (e.g., MAX(a,b) ((a)>(b):(a):(b)) ) 
+  macro_definition: The full definition of the macro, without the leading "#DEFINE", e.g., "MAX(a,b) ((a)>(b):(a):(b))"
+  aliased_canonical_spelling: the target alised type expression of the type alias, e.g., "std::vector<bool>". 
+  
+
+Relationships:
+  (PROJECT) -[:CONTAINS]-> (FOLDER|FILE)
+  (FOLDER) -[:CONTAINS]-> (FILE|FOLDER)
+  (FILE) -[:INCLUDES]-> (FILE)
+  (FILE) -[:DECLARES]-> (NAMESPACE|CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE)
+  (FILE) -[:DEFINES]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE|TYPE_ALIAS|MACRO)
+  (NAMESPACE) -[:SCOPE_CONTAINS]-> (NAMESPACE|CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE)
+  (CLASS_STRUCTURE|DATA_STRUCTURE) -[:HAS_METHOD]-> (METHOD)
+  (CLASS_STRUCTURE|DATA_STRUCTURE) -[:HAS_FIELD]-> (FIELD)
+  (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|METHOD) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION)
+  (FUNCTION|METHOD) -[:CALLS]-> (FUNCTION|METHOD)
+  (CLASS_STRUCTURE) -[:INHERITS]-> (CLASS_STRUCTURE)
+  (METHOD) -[:OVERRIDDEN_BY]-> (METHOD)
+  (CLASS_STRUCTURE|DATA_STRUCTURE|NAMESPACE) -[:DEFINES_TYPE_ALIAS]-> (TYPE_ALIAS)
+  (TYPE_ALIAS) -[:ALIAS_OF]-> (CLASS_STRUCTURE|DATA_STRUCTURE|TYPE_ALIAS)
+  (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION) -[:EXPANDED_FROM]-> (MACRO)
+

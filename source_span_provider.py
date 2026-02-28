@@ -32,7 +32,6 @@ class SourceSpanProvider:
         """
         self.symbol_parser = symbol_parser
         self.compilation_manager = compilation_manager
-        self.type_alias_spans: Dict[str, TypeAliasSpan] = compilation_manager.get_type_alias_spans()
         self.synthetic_id_to_index_id: Dict[str, str] = {} # Maps synthetic span IDs to canonical Symbol IDs
         self.matched_symbol_count = 0
         self.matched_typealias_count = 0
@@ -125,6 +124,10 @@ class SourceSpanProvider:
 
         # Pass 1: Match clangd-indexed symbols with source spans
         for sym_id, sym in self.symbol_parser.symbols.items():
+            if False:
+                if sym.kind == "Namespace" and sym.name == "internal": #and sym.scope == "clang::dataflow":
+                    pass
+
             loc = sym.definition or sym.declaration
             if not loc:
                 continue
@@ -160,6 +163,11 @@ class SourceSpanProvider:
 
                 synthetic_symbols[source_span.id] = self._create_synthetic_symbol(source_span, file_uri, parent_id)
                 self.synthetic_id_to_index_id[source_span.id] = source_span.id # Map synthetic ID to itself
+
+                if False:
+                    sym = synthetic_symbols[source_span.id]
+                    if sym.kind == "Namespace" and sym.name == "internal": #and sym.scope == "clang::dataflow":
+                        pass
 
         # Add the new synthetic symbols to the main symbol parser
         self.symbol_parser.symbols.update(synthetic_symbols)
@@ -269,12 +277,14 @@ class SourceSpanProvider:
         for unmatched TypeAliasSpans.
         """
         logger.info("Enriching symbols with TypeAlias data.")
-        if not self.type_alias_spans:
+        type_alias_spans: Dict[str, TypeAliasSpan] = self.compilation_manager.get_type_alias_spans()
+
+        if not type_alias_spans:
             logger.info("No TypeAlias spans found to enrich.")
             return
 
         # Create a copy of the type_alias_spans to allow modification (deletion of matched spans)
-        unmatched_type_alias_spans = self.type_alias_spans.copy()
+        unmatched_type_alias_spans = type_alias_spans.copy()
 
         synthetic_type_alias_symbols = {}
         
@@ -315,7 +325,7 @@ class SourceSpanProvider:
             self.synthetic_id_to_index_id[unmatched_tas.id] = new_sym.id 
 
         self.symbol_parser.symbols.update(synthetic_type_alias_symbols)
-        logger.info(f"Processed {len(self.type_alias_spans)} TypeAlias.")
+        logger.info(f"Processed {len(type_alias_spans)} TypeAlias.")
         logger.info(f"Matched {self.matched_typealias_count} symbols ({self.assigned_parent_matched_alias} newly assigned parent)."
                     f"Added {len(synthetic_type_alias_symbols)} synthetic symbols ({self.assigned_parent_unmatched_alias} with parent)."
                    )

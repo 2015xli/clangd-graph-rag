@@ -126,7 +126,6 @@ class Neo4jManager:
         constraints = [
             "CREATE CONSTRAINT IF NOT EXISTS FOR (f:FILE) REQUIRE f.path IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (f:FOLDER) REQUIRE f.path IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:NAMESPACE) REQUIRE n.qualified_name IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (fn:FUNCTION) REQUIRE fn.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (ds:DATA_STRUCTURE) REQUIRE ds.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (c:CLASS_STRUCTURE) REQUIRE c.id IS UNIQUE",
@@ -135,9 +134,57 @@ class Neo4jManager:
             "CREATE CONSTRAINT IF NOT EXISTS FOR (v:VARIABLE) REQUIRE v.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (m:MACRO) REQUIRE m.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (ta:TYPE_ALIAS) REQUIRE ta.id IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (te:TYPE_EXPRESSION) REQUIRE te.id IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (n:NAMESPACE) REQUIRE n.id IS UNIQUE",
+            #"CREATE CONSTRAINT IF NOT EXISTS FOR (n:NAMESPACE) REQUIRE n.qualified_name IS UNIQUE",
         ]
+            # It is very weird that I hit two NAMESPACE symbols having same qualified_name in llvm's index yaml file
+            # --- !Symbol
+            #ID:              E1B385F53F8B0222
+            #Name:            internal
+            #Scope:           'clang::dataflow::'
+            #SymInfo:
+            #Kind:            Namespace
+            #Lang:            Cpp
+            #CanonicalDeclaration:
+            #FileURI:         'file:///home/xli/Public/llvm/llvm-project/clang/include/clang/ASTMatchers/ASTMatchersMacros.h'
+            #Start:
+            #    Line:            96
+            #    Column:          12
+            #End:
+            #    Line:            96
+            #    Column:          20
+            #Flags:           0
+            #Signature:       ''
+            #TemplateSpecializationArgs: ''
+            #CompletionSnippetSuffix: ''
+            #Documentation:   ''
+            #ReturnType:      ''
+            #Type:            ''
+            #...
+            #--- !Symbol
+            #ID:              B6A044C64358A92D
+            #Name:            internal
+            #Scope:           'clang::dataflow::'
+            #SymInfo:
+            #Kind:            Namespace
+            #Lang:            Cpp
+            #CanonicalDeclaration:
+            #FileURI:         'file:///home/xli/Public/llvm/llvm-project/clang/include/clang/Analysis/FlowSensitive/AdornedCFG.h'
+            #Start:
+            #    Line:            30
+            #    Column:          10
+            #End:
+            #    Line:            30
+            #    Column:          18
+            #References:      1
+            #Flags:           9
+            #Signature:       ''
+            #TemplateSpecializationArgs: ''
+            #CompletionSnippetSuffix: ''
+            #Documentation:   ''
+            #ReturnType:      ''
+            #Type:            ''
+            #...
         with self.driver.session() as session:
             for constraint in constraints:
                 session.run(constraint)
@@ -732,8 +779,9 @@ class Neo4jManager:
         constraints = [
             "CREATE CONSTRAINT IF NOT EXISTS FOR (f:FILE) REQUIRE f.path IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (f:FOLDER) REQUIRE f.path IS UNIQUE",
-            "CREATE CONSTRAINT IF NOT EXISTS FOR (n:NAMESPACE) REQUIRE n.qualified_name IS UNIQUE",
             "CREATE CONSTRAINT IF NOT EXISTS FOR (e:ENTITY) REQUIRE e.id IS UNIQUE",
+            # As mentioned previously, NAMESPACE symbols may have the same qualfied name.
+            #"CREATE CONSTRAINT IF NOT EXISTS FOR (n:NAMESPACE) REQUIRE n.qualified_name IS UNIQUE",
         ]
         with self.driver.session() as session:
             for constraint in constraints:

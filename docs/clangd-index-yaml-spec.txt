@@ -166,4 +166,62 @@ Object:
   ID:              14FC8C8A8594E7C0
 ...
 
+======================== Namespace symbol ===========
+Clangd index does not ensure the uniqueness of fully qualified name.
+For exmple, when indexing llvm project, it has two symbols with same fqn.
+We should not put a uniqueness constraint in neo4j on namespace's qualified_name property.
+--- !Symbol
+ID:              E1B385F53F8B0222
+Name:            internal
+Scope:           'clang::dataflow::'
+SymInfo:
+  Kind:            Namespace
+  Lang:            Cpp
+CanonicalDeclaration:
+  FileURI:         'file:///home/xli/Public/llvm/llvm-project/clang/include/clang/ASTMatchers/ASTMatchersMacros.h'
+  Start:
+    Line:            96
+    Column:          12
+  End:
+    Line:            96
+    Column:          20
+Flags:           0
+Signature:       ''
+TemplateSpecializationArgs: ''
+CompletionSnippetSuffix: ''
+Documentation:   ''
+ReturnType:      ''
+Type:            ''
+...
+--- !Symbol
+ID:              B6A044C64358A92D
+Name:            internal
+Scope:           'clang::dataflow::'
+SymInfo:
+  Kind:            Namespace
+  Lang:            Cpp
+CanonicalDeclaration:
+  FileURI:         'file:///home/xli/Public/llvm/llvm-project/clang/include/clang/Analysis/FlowSensitive/AdornedCFG.h'
+  Start:
+    Line:            30
+    Column:          10
+  End:
+    Line:            30
+    Column:          18
+References:      1
+Flags:           9
+Signature:       ''
+TemplateSpecializationArgs: ''
+CompletionSnippetSuffix: ''
+Documentation:   ''
+ReturnType:      ''
+Type:            ''
+...
 
+
+========================= Yaml parsing issue =========
+By default, yaml loader will automatically convert some values to boolean type.
+Yes, On, True, yes, on, true will be converted to bool value True (True in python); 
+No, Off, False, no, off, false will be converted to bool value False.
+Clangd does not use quotes for symbol names, so a symbol name of Yes or off will become True or False.
+We have to turn off the yaml loader's default resolver for bool values.

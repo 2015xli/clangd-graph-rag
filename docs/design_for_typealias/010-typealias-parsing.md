@@ -21,8 +21,8 @@ To modify `compilation_parser.py` to accurately identify `typedef` and `using` d
         *   `name: str`: The name of the aliaser (e.g., `MyInt`).
         *   `name_location: RelativeLocation`: The location of the aliaser's name.
         *   `body_location: RelativeLocation`: The extent of the entire alias declaration statement.
-        *   `aliased_canonical_spelling: str`: The canonical string representation of the underlying type (e.g., `"int"`, `"std::vector<int>"`, `"struct MyStruct"`). This will be the `name` for the `:TYPE_EXPRESSION` node if the aliased type is a type expression.
-        *   `aliased_type_id: Optional[str]`: The ID of the aliased type. This will be **USR-derived if the aliasee is another TypeAlias**, and **synthetic for all other aliasees** (`:CLASS_STRUCTURE`, `:DATA_STRUCTURE`, `:TYPE_EXPRESSION`, anonymous structures).
+        *   `aliased_canonical_spelling: str`: The canonical string representation of the underlying type (e.g., `"int"`, `"std::vector<int>"`, `"struct MyStruct"`). In my original plan, I thought to create a node type of `:TYPE_EXPRESSION`. This value will be the `name` for the `:TYPE_EXPRESSION` node if the aliased type is a type expression. But I dropped the idea later because lots of types are hard to be expressed.
+        *   `aliased_type_id: Optional[str]`: The ID of the aliased type. This will be **USR-derived if the aliasee is another TypeAlias**, and **synthetic for all other aliasees** (`:CLASS_STRUCTURE`, `:DATA_STRUCTURE`, and the planned-but-now-dropped `:TYPE_EXPRESSION`).
         *   `aliased_type_kind: Optional[str]`: The kind of the aliased type (e.g., "Class", "Struct", "TypeAlias").
         *   `is_aliasee_definition: bool`: Indicates if the aliased type's declaration is also a definition (e.g., `struct S { ... };` vs `struct S;`). Used for reconciliation.
         *   `scope: str`: The string representation of the parent scope (e.g., `MyNamespace::MyClass::`).
@@ -33,8 +33,8 @@ To modify `compilation_parser.py` to accurately identify `typedef` and `using` d
 
 #### 2. Modify `_ClangWorkerImpl` Class
 
-*   **Extend `NODE_KIND_TYPE_ALIAS`:**
-    *   Add `clang.cindex.CursorKind.TYPE_ALIAS_DECL` and `clang.cindex.CursorKind.TYPEDEF_DECL` to the `NODE_KIND_TYPE_ALIAS` set in `ClangParser`. This will ensure `_walk_ast` processes these cursors.
+*   **Extend `NODE_KIND_TYPE_ALIASES`:**
+    *   Add `clang.cindex.CursorKind.TYPE_ALIAS_DECL` and `clang.cindex.CursorKind.TYPEDEF_DECL` to the `NODE_KIND_TYPE_ALIASES` set in `ClangParser`. This will ensure `_walk_ast` processes these cursors.
 *   **New Method: `_process_type_alias_node(self, node, file_name)`:**
     *   This method will be called by `_walk_ast` when an alias cursor is encountered.
     *   **Scope Filtering:**
