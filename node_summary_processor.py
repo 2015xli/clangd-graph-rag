@@ -254,6 +254,10 @@ class NodeSummaryProcessor:
         cached_entry = self.cache_manager.get_cache_entry(label, node_id)
         cache_summary = cached_entry.get('summary') if cached_entry else None
 
+        # Figure out child entities labels 
+        for c in child_entities:
+            c['label'] = [l for l in c['labels'] if l in ["CLASS_STRUCTURE", "DATA_STRUCTURE", "FUNCTION", "VARIABLE", "TYPE_ALIAS", "MACRO"]][0]
+
         is_stale = any(
             self.cache_manager.get_runtime_status(dep['label'], dep['id']).get('summary_changed')
             for dep in child_entities
@@ -294,6 +298,10 @@ class NodeSummaryProcessor:
         cached_entry = self.cache_manager.get_cache_entry(label, node_id)
         cache_summary = cached_entry.get('summary') if cached_entry else None
 
+        # Figure out child entities labels 
+        for c in child_entities:
+            c['label'] = [l for l in c['labels'] if l in ["FILE", "FOLDER"]][0]
+
         is_stale = any(
             self.cache_manager.get_runtime_status(dep['label'], dep.get('path') or dep.get('id')).get('summary_changed')
             for dep in child_entities
@@ -333,6 +341,10 @@ class NodeSummaryProcessor:
         db_summary = node_data.get('summary')
         cached_entry = self.cache_manager.get_cache_entry(label, node_id)
         cache_summary = cached_entry.get('summary') if cached_entry else None
+
+        # Figure out child entities labels 
+        for c in child_entities:
+            c['label'] = [l for l in c['labels'] if l in ["FILE", "FOLDER"]][0]
 
         is_stale = any(
             self.cache_manager.get_runtime_status(dep['label'], dep.get('path') or dep.get('id')).get('summary_changed')

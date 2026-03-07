@@ -23,8 +23,7 @@ logger.setLevel(logging.DEBUG)
 
 class SummaryCacheManager:
     """
-    Manages the data and persistence of the summary cache, using a single,
-    evolving cache dictionary.
+    Manages the data and persistence of the summary cache as an L1 cache layer for nodes.
     """
 
     DEFAULT_CACHE_FILENAME = "summary_backup.json"

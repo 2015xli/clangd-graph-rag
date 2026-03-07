@@ -145,10 +145,11 @@
  │             llm_client.py  │
  ╰────────────────────────────╯
 ✦ Source file llm_client.py. This module provides a flexible factory for interacting with various LLM and embedding
-  APIs. It defines LlmClient and EmbeddingClient base classes, with implementations for OpenAI, DeepSeek, Ollama, and a
-  FakeLlmClient for LLMs, and SentenceTransformerClient for embeddings. The factory functions get_llm_client and
-  get_embedding_client allow dynamic client selection. This module is essential for the project's RAG and AI agent
-  functionalities, enabling summary and embedding generation. 
+  APIs. It defines LlmClient and EmbeddingClient base classes, with LiteLLM based LiteLLMClients and a
+  FakeLlmClient for faked LLM API calls, and SentenceTransformerClient for embeddings. The factory functions get_llm_client and
+  get_embedding_client allow dynamic client selection. It uses a centralized async worker loop (the "sidecar") for 
+  high concurrent LLM calls and also supports diskcache (FanoutCache) for caching LLM responses. This module is essential
+  for the project's RAG and AI agent functionalities, enabling summary and embedding generation. 
  ╭──────────────────────────────────────────╮
  │             clangd_graph_rag_updater.py  │
  ╰──────────────────────────────────────────╯

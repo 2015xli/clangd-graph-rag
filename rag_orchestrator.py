@@ -11,7 +11,7 @@ from collections import defaultdict
 from tqdm import tqdm
 
 from neo4j_manager import Neo4jManager, align_string
-from llm_client import get_llm_client, get_embedding_client
+from llm_client import get_llm_client, get_embedding_client, LlmCacheManager
 from rag_generation_prompts import RagGenerationPromptManager
 from summary_cache_manager import SummaryCacheManager
 from node_summary_processor import NodeSummaryProcessor
@@ -26,7 +26,6 @@ class RagOrchestrator:
                  args: dict):
         self.neo4j_mgr = neo4j_mgr
         self.project_path = os.path.abspath(project_path)
-        self.embedding_client = get_embedding_client(args.llm_api)
         self.args = args
         self.n_restored = 0
         self.n_generated = 0
@@ -34,10 +33,27 @@ class RagOrchestrator:
         self.n_nochildren = 0
         self.n_failed = 0
 
-        # New component-based architecture
+        self.num_local_workers = args.num_local_workers
+        self.num_remote_workers = args.num_remote_workers
+
+        # L1 cache
         self.summary_cache_manager = SummaryCacheManager(project_path)
-        
+
         llm_client = get_llm_client(args.llm_api)
+        self.is_local_llm = llm_client.is_local
+        num_workers = self.num_local_workers if self.is_local_llm else self.num_remote_workers
+        llm_client.launch_worker_thread(num_workers)
+
+        # L2 cache (System level cache)
+        if not args.no_llm_cache:
+            if not args.llm_cache_folder:
+                args.llm_cache_folder = os.path.join(project_path, ".cache", "llm_cache")
+            if not args.llm_cache_shards:
+                args.llm_cache_shards = self.num_local_workers
+
+            llm_cache_manager = LlmCacheManager(args.llm_cache_folder, args.llm_cache_shards, args.llm_cache_size, args.llm_cache_reset)
+            llm_client.enable_system_cache(llm_cache_manager)
+
         prompt_manager = RagGenerationPromptManager()
         self.node_processor = NodeSummaryProcessor(
             project_path=project_path,
@@ -47,10 +63,8 @@ class RagOrchestrator:
             token_encoding=args.token_encoding,
             max_context_token_size=args.max_context_size
         )
-        
-        self.num_local_workers = args.num_local_workers
-        self.num_remote_workers = args.num_remote_workers
-        self.is_local_llm = llm_client.is_local
+
+        self.embedding_client = get_embedding_client(args.llm_api)
 
     def _parallel_process(self, items: Iterable, process_func: Callable, max_workers: int, desc: str) -> Set[str]:
         """
@@ -204,7 +218,7 @@ class RagOrchestrator:
         MATCH (n:FUNCTION|METHOD)
         WHERE n.id IN $function_ids AND n.body_location IS NOT NULL
         RETURN n.id AS id, n.name AS name, n.path AS path, n.body_location as body_location,
-               n.code_hash as db_code_hash, n.code_analysis as db_code_analysis, labels(n)[-1] as label
+               n.code_hash as db_code_hash, n.code_analysis as db_code_analysis, labels(n) as labels
         """
         return self.neo4j_mgr.execute_read_query(query, {"function_ids": function_ids})
 
@@ -213,6 +227,7 @@ class RagOrchestrator:
         Wrapper function for the parallel executor. Calls the stateless processor
         and then performs the Neo4j update.
         """
+        node_data['label'] = [l for l in node_data['labels'] if l in ['FUNCTION', 'METHOD']][0]
         status, data = self.node_processor.get_function_code_analysis(node_data)
 
         if status in ["code_analysis_regenerated", "code_analysis_restored"]:
@@ -259,8 +274,8 @@ class RagOrchestrator:
         OPTIONAL MATCH (caller:FUNCTION|METHOD)-[:CALLS]->(n)
         OPTIONAL MATCH (n)-[:CALLS]->(callee:FUNCTION|METHOD)
         RETURN n, labels(n) as n_labels,
-               collect(DISTINCT {id: caller.id, label: labels(caller)[-1]}) AS callers,
-               collect(DISTINCT {id: callee.id, label: labels(callee)[-1]}) AS callees
+               collect(DISTINCT {id: caller.id, labels: labels(caller)}) AS callers,
+               collect(DISTINCT {id: callee.id, labels: labels(callee)}) AS callees
         """
         context_results = self.neo4j_mgr.execute_read_query(context_query, {"id": func_id})
         if not context_results or not context_results[0]['n']:
@@ -275,6 +290,12 @@ class RagOrchestrator:
         # Clean up dependency lists in case of no neighbors
         caller_entities = [c for c in record.get('callers', []) if c and c['id']]
         callee_entities = [c for c in record.get('callees', []) if c and c['id']]
+
+        # Clean up dependency labels
+        for caller in caller_entities:
+            caller['label'] = [l for l in caller['labels'] if l in ['FUNCTION', 'METHOD']][0]
+        for callee in callee_entities:
+            callee['label'] = [l for l in callee['labels'] if l in ['FUNCTION', 'METHOD']][0]
 
         # 2. Delegation: Pass to the processor which handles caching and generation
         status, data = self.node_processor.get_function_contextual_summary(
@@ -512,10 +533,10 @@ class RagOrchestrator:
         # 1. Preparation: Query DB for the node and its children
         context_query = """
         MATCH (ns:NAMESPACE {id: $id})
-        OPTIONAL MATCH (ns)-[:SCOPE_CONTAINS]->(child)
+        OPTIONAL MATCH (ns)-[:SCOPE_CONTAINS]->(child:NAMESPACE|CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE)
         WHERE child.summary IS NOT NULL
         RETURN ns as node,
-               collect(DISTINCT {id: child.id, label: labels(child)[-1], name: child.name}) as children
+               collect(DISTINCT {id: child.id, labels: labels(child), name: child.name}) as children
         """
         context_results = self.neo4j_mgr.execute_read_query(context_query, {"id": namespace_id})
         if not context_results or not context_results[0]['node']:
@@ -527,6 +548,10 @@ class RagOrchestrator:
         node_data['label'] = 'NAMESPACE'
         
         child_entities = [c for c in record.get('children', []) if c and c['id']]
+
+        # Clean up dependency labels
+        for child in child_entities:
+            child['label'] = [l for l in child['labels'] if l in ['NAMESPACE', 'CLASS_STRUCTURE', 'DATA_STRUCTURE', 'FUNCTION', 'VARIABLE']][0]
 
         # 2. Delegation: Pass to the processor
         status, data = self.node_processor.get_namespace_summary(
@@ -557,10 +582,13 @@ class RagOrchestrator:
         max_workers = self.num_local_workers if self.is_local_llm else self.num_remote_workers
 
         # Prepare items for the generic worker
+        query = """
+        MATCH (parent:FILE {path: $key})-[:DEFINES]->(child) 
+        WHERE child.summary IS NOT NULL 
+        RETURN collect(DISTINCT {id: child.id, labels: labels(child), name: child.name}) as children
+        """
         items_to_process = [
-            (file_path, 'FILE', 
-             "MATCH (parent:FILE {path: $key})-[:DEFINES]->(child) WHERE child.summary IS NOT NULL RETURN collect(DISTINCT {id: child.id, label: labels(child)[-1], name: child.name}) as children",
-             self.node_processor.get_file_summary)
+            (file_path, 'FILE', query, self.node_processor.get_file_summary)
             for file_path in file_paths
         ]
 
@@ -589,10 +617,13 @@ class RagOrchestrator:
             level_paths = paths_by_depth[depth]
             logging.info(f"Processing {len(level_paths)} folders at depth {depth}.")
 
+            query = """
+            MATCH (parent:FOLDER {path: $key})-[:CONTAINS]->(child) 
+            WHERE child.summary IS NOT NULL 
+            RETURN collect(DISTINCT {id: child.id, path: child.path, labels: labels(child), name: child.name}) as children
+            """
             items_to_process = [
-                (path, 'FOLDER',
-                 "MATCH (parent:FOLDER {path: $key})-[:CONTAINS]->(child) WHERE child.summary IS NOT NULL RETURN collect(DISTINCT {id: child.id, path: child.path, label: labels(child)[-1], name: child.name}) as children",
-                 self.node_processor.get_folder_summary)
+                (path, 'FOLDER', query, self.node_processor.get_folder_summary)
                 for path in level_paths
             ]
 
@@ -615,11 +646,12 @@ class RagOrchestrator:
         logging.info("Processing summary for PROJECT node.")
         max_workers = self.num_local_workers if self.is_local_llm else self.num_remote_workers
 
-        items_to_process = [
-            (project_path, 'PROJECT',
-             "MATCH (parent:PROJECT {path: $key})-[:CONTAINS]->(child) WHERE child.summary IS NOT NULL RETURN collect(DISTINCT {id: child.id, path: child.path, label: labels(child)[-1], name: child.name}) as children",
-             self.node_processor.get_project_summary)
-        ]
+        query = """
+        MATCH (parent:PROJECT {path: $key})-[:CONTAINS]->(child) 
+        WHERE child.summary IS NOT NULL 
+        RETURN collect(DISTINCT {id: child.id, path: child.path, labels: labels(child), name: child.name}) as children
+        """
+        items_to_process = [(project_path, 'PROJECT', query, self.node_processor.get_project_summary)]
 
         return self._parallel_process(
             items=items_to_process,

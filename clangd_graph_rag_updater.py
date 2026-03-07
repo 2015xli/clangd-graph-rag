@@ -216,6 +216,7 @@ def main():
     input_params.add_worker_args(parser)
     input_params.add_batching_args(parser)
     input_params.add_rag_args(parser)
+    input_params.add_llm_cache_args(parser)
     input_params.add_ingestion_strategy_args(parser)
     input_params.add_source_parser_args(parser)
 

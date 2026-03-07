@@ -161,6 +161,7 @@ def main():
     input_params.add_core_input_args(parser)
     input_params.add_rag_args(parser)
     input_params.add_worker_args(parser)
+    input_params.add_llm_cache_args(parser)
 
     args = parser.parse_args()
     args.project_path = str(args.project_path.resolve())

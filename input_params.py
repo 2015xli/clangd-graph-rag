@@ -47,6 +47,20 @@ def add_rag_args(parser: argparse.ArgumentParser):
     rag_group.add_argument('--token-encoding', type=str, default='cl100k_base',
                         help='The token encoding to use for tiktoken. (default: cl100k_base)')
 
+def add_llm_cache_args(parser: argparse.ArgumentParser):
+    """Adds arguments for configuring the LLM response cache."""
+    cache_group = parser.add_argument_group('LLM Cache (Optional)')
+    cache_group.add_argument('--llm-cache-folder', type=str, default=None,
+                             help='Path to the LLM response cache directory. (default: <project_path>/.cache/llm_cache)')
+    cache_group.add_argument('--llm-cache-shards', type=int, default=None,
+                             help='Number of shards for the LLM cache. (default: same as num-local-workers)')
+    cache_group.add_argument('--llm-cache-size', type=str, default='2GB',
+                             help='Maximum size of the LLM cache (e.g., 512MB, 2GB, 100KB). (default: 2GB)')
+    cache_group.add_argument('--llm-cache-reset', action='store_true',
+                             help='If set, the LLM cache directory will be cleared before the run.')
+    cache_group.add_argument('--no-llm-cache', action='store_true',
+                             help='If set, the LLM cache will be disabled.')
+
 def add_ingestion_strategy_args(parser: argparse.ArgumentParser):
     """Adds arguments that control ingestion strategy."""
     parser.add_argument('--defines-generation', choices=['unwind-sequential', 'isolated-parallel'], default='unwind-sequential',
@@ -72,4 +86,3 @@ def add_source_parser_args(parser: argparse.ArgumentParser):
     parser.add_argument('--source-parser', choices=['clang', 'treesitter'], default='clang',
                         help='The source code parser to use for spans and includes. (default: clang)')
     parser.add_argument('--compile-commands', help='Path to the compile_commands.json file (or its directory). Required for the `clang` parser. (Default: the project path)')
-

@@ -2,38 +2,49 @@
 
 ## 1. Role in the Pipeline
 
-This script is a crucial library module that acts as an abstraction layer for interacting with various Large Language Model (LLM) and embedding model APIs. It provides a consistent, unified interface that the `code_graph_rag_generator.py` can use without needing to know the specific details of the underlying API being called.
+This script is a crucial library module that acts as an abstraction layer for interacting with various Large Language Model (LLM) and embedding model APIs. It provides a consistent, unified interface that the `code_graph_rag_generator.py` and `rag_orchestrator.py` can use without needing to know the specific details of the underlying API being called.
 
-This allows the project to easily switch between different model providers (like OpenAI, DeepSeek, or a local Ollama instance) by simply changing a command-line argument.
+It enables the project to seamlessly switch between different model providers (like OpenAI, DeepSeek, or a local Ollama instance) while providing a high-performance, persistent caching layer.
 
 ## 2. Design and Architecture
 
-The script uses a classic **Factory and Strategy** design pattern.
+The script uses a combination of **Factory and Strategy** patterns, enriched with a **Centralized Async Worker** to handle high-concurrency I/O efficiently.
 
 ### Strategy Pattern
 
-*   **`LlmClient` / `EmbeddingClient`**: These are abstract base classes that define a common interface. For example, any LLM client must have a `generate_summary(prompt)` method, and any embedding client must have a `generate_embedding(text)` method.
-*   **Concrete Implementations**: For each supported service, a concrete class is created that inherits from the base class and implements the required methods. Examples include:
-    *   `OpenAiClient(LlmClient)`
-    *   `DeepSeekClient(LlmClient)`
-    *   `OllamaClient(LlmClient)`
-    *   `SentenceTransformerClient(EmbeddingClient)`
-*   **Subtlety (`is_local` flag)**: Each client class has a boolean flag, `is_local`. This allows the `RagGenerator` to intelligently choose the number of parallel workers to use. For a remote, network-bound API like `OpenAIClient`, it can use a high number of workers (`--num-remote-workers`). For a local, CPU-bound model like `OllamaClient` or `SentenceTransformerClient`, it will use a smaller number of workers (`--num-local-workers`) to avoid overloading the host machine.
+*   **`LlmClient` / `EmbeddingClient`**: Abstract base classes that define common interfaces (`generate_summary`, `generate_embeddings`).
+*   **`LiteLlmClient(LlmClient)`**: A unified implementation powered by the **LiteLLM** library. This single class replaces provider-specific implementations, handling OpenAI, DeepSeek, and Ollama through a standardized backend.
+*   **`FakeLlmClient(LlmClient)`**: A polymorphic mock client used for testing and dry-runs. It returns hardcoded text while still participating in the L2 caching system.
+*   **`SentenceTransformerClient(EmbeddingClient)`**: A local implementation for generating vector embeddings using the `sentence-transformers` library.
+
+### Centralized Async Worker (The "Sidecar" Loop)
+
+To support massive concurrency (e.g., 100+ remote workers) without resource exhaustion, the module implements a producer-consumer bridge:
+*   **Thread-to-Async Bridge**: While the main pipeline uses many threads, all LLM API calls and disk cache operations are offloaded to a **single background event loop** running in a dedicated thread.
+*   **Concurrency Management**: Uses an `asyncio.Semaphore` (dynamically matched to the number of worker threads) to manage active requests, preventing OS-level resource spikes and honoring provider rate limits.
+*   **Resource Efficiency**: This design specifically prevents "File Descriptor Explosion." By confining SQLite (via `diskcache`) to a single thread, the number of open files is drastically reduced compared to a traditional multi-threaded approach.
 
 ### Factory Pattern
 
-*   **`get_llm_client(api_name)` / `get_embedding_client(api_name)`**: These functions act as factories. They take a simple string (e.g., `'openai'`) and return an initialized instance of the corresponding client class.
-*   **Benefit**: This decouples the main application logic from the client creation process. The main script doesn't need a complex `if/elif/else` block to create a client; it simply calls the factory, making the code cleaner and easier to extend with new clients in the future.
+*   **`get_llm_client(api_name, concurrency_limit)`**: Decouples the application logic from client creation. It initializes the background worker and sets the internal semaphore based on the requested concurrency.
 
-## 3. Supported Models
+## 3. Caching Strategy (L2 Cache)
 
-### LLM Clients
+The project implements a robust, two-tier caching system to minimize costs and latency:
+*   **L1 Cache (Workflow Level)** (in `node_summary_processor.py` and `summary_cache_manager.py`): Managed by `SummaryCacheManager`, storing high-level summaries for graph nodes.
+*   **L2 Cache (System Level)**: Managed by `LlmCacheManager` using `diskcache.FanoutCache`.
+    *   **Prompt-Based Identity**: Keys are SHA-256 hashes of the full prompt, making the cache model-agnostic and resilient across different runs.
+    *   **Non-Blocking I/O**: Cache lookups and writes are offloaded to a thread pool executor (`loop.run_in_executor`), ensuring the event loop never stalls during disk operations.
+    *   **Persistence**: Uses a "Promotion-on-Success" strategy and `atexit` registration to ensure SQLite integrity and clean resource release.
 
-*   **`OpenAiClient`**: Interacts with the OpenAI API. Requires the `OPENAI_API_KEY` environment variable.
-*   **`DeepSeekClient`**: Interacts with the DeepSeek API. Requires the `DEEPSEEK_API_KEY` environment variable.
-*   **`OllamaClient`**: Interacts with a local Ollama instance. The URL and model name can be configured via `OLLAMA_BASE_URL` and `OLLAMA_MODEL` environment variables.
+## 4. Supported Models
 
-### Embedding Clients
+### LLM Providers (via LiteLLM)
 
-*   **`SentenceTransformerClient`**: Uses the popular `sentence-transformers` library to run embedding models locally. 
-*   **Subtlety**: This client will automatically download the specified model (e.g., `all-MiniLM-L6-v2`) on its first use and cache it for future runs. It requires `sentence-transformers` and a compatible version of `torch` to be installed.
+*   **OpenAI**: Configurable via `OPENAI_MODEL` and `OPENAI_API_KEY`.
+*   **DeepSeek**: Configurable via `DEEPSEEK_MODEL` and `DEEPSEEK_API_KEY`.
+*   **Ollama**: Configurable via `OLLAMA_MODEL` and `OLLAMA_BASE_URL`.
+
+### Embedding Models
+
+*   **SentenceTransformer**: Runs locally on CPU/GPU. It automatically downloads and caches models (e.g., `all-MiniLM-L6-v2`) on first use.

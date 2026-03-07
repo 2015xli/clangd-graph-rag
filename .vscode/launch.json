@@ -5,6 +5,13 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python Debugger: minijivm rag generator",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "code_graph_rag_generator.py",
+            "args": ["~/NAS/home/bin/mini-jvm/mini_jvm_clangd_index.yaml", "~/NAS/home/bin/mini-jvm/", "--llm-api", "fake", "--num-local-workers", "10", "--llm-cache-reset", "--llm-cache-shards", "20"]
+        },
+        {
             "name": "Python Debugger: llvm",
             "type": "debugpy",
             "request": "launch",
