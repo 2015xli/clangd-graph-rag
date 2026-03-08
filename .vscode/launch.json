@@ -26,11 +26,11 @@
             "args": ["--num-parse-workers=1", "--compile-commands", "/tmp/compile_commands.json", "/home/xli/Public/llvm/llvm-project/compiler-rt/lib/builtins/comparetf2.c"]
         },
         {
-            "name": "Python Debugger: LLama Graph RAG builder original_0 (single parser)",
+            "name": "Python Debugger: LLama Graph RAG builder original_4 (single parser)",
             "type": "debugpy",
             "request": "launch",
             "program": "clangd_graph_rag_builder.py",
-            "args": ["~/Public/llama.cpp/llama_cpp_original_0.yaml", "~/Public/llama.cpp/", "--num-parse-workers=1"]
+            "args": ["~/Public/llama.cpp/llama_cpp_original_4.yaml", "~/Public/llama.cpp/", "--num-parse-workers=1"]
         },
         {
             "name": "Python Debugger: LLama Graph RAG builder original_4",

@@ -533,7 +533,7 @@ class RagOrchestrator:
         # 1. Preparation: Query DB for the node and its children
         context_query = """
         MATCH (ns:NAMESPACE {id: $id})
-        OPTIONAL MATCH (ns)-[:SCOPE_CONTAINS]->(child:NAMESPACE|CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE)
+        OPTIONAL MATCH (ns)-[:SCOPE_CONTAINS]->(child)
         WHERE child.summary IS NOT NULL
         RETURN ns as node,
                collect(DISTINCT {id: child.id, labels: labels(child), name: child.name}) as children

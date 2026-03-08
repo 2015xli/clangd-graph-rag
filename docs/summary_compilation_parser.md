@@ -42,6 +42,9 @@ This is the primary and recommended strategy, valued for its accuracy.
     *   A `_local_header_cache` temporarily collects headers processed by the current TU before merging them into the `_global_header_cache` at the end of the TU's processing.
 *   **Node Deduplication**: Within a single TU's AST traversal, the `_process_generic_node` method uses a `node_key` (derived from symbol name, file URI, line, and column) to ensure that only one `SourceSpan` object is created and stored for each unique AST node. This prevents duplicate entries if `libclang` reports the same node multiple times.
 *   **Argument Sanitization**: The `_sanitize_args` method has been refined to remove more irrelevant flags (e.g., `-W`, `-O`, `--`) from compilation arguments, further improving the determinism and effectiveness of the `_tu_hash`.
+*   **Handling C++ Mapping Gaps**: The `ClangParser` incorporates specialized logic to overcome several limitations in the `libclang` Python bindings:
+    *   **Context-Aware Method Identification**: In the AST, `FUNCTION_TEMPLATE` is used for both top-level and member functions. The parser now checks the `semantic_parent` of such nodes. If the parent is a composite type (Class, Struct, etc.), it correctly re-classifies the symbol as a `StaticMethod` or `InstanceMethod` (via `is_static_method()`) to ensure the synthetic ID matches the Clangd index.
+    *   **Template Keyword Resolution**: `libclang` often identifies all templated types as `CLASS_TEMPLATE`, losing the distinction between `struct`, `class`, and `union`. The parser solves this by performing a targeted token scan (using `islice` for efficiency) immediately after the template parameter list (`>`) to find the actual defining keyword and assign the correct `kind`.
 
 ### 3.1. Output Data Structure: `SourceSpan` and `source_spans`
 

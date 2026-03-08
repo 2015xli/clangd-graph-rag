@@ -329,6 +329,7 @@ class _ClangWorkerImpl:
 
         kind = self._convert_node_kind_to_index_kind(node)
         node_key = CompilationParser.make_symbol_key(node.spelling, kind, file_uri, name_start_line, name_start_col)
+        
         if node_key in self.span_results[(file_uri, self._tu_hash)]: 
             # Same node can be defined in same header file of multiple TUs that have different TU hash, but we only want to keep one copy - for our purpose.
             # In the same TU, it is also possible to meet same node more than once, e.g., typedef struct { ... } A;
@@ -670,35 +671,71 @@ class _ClangWorkerImpl:
         # We add a trailing :: at the very end
         return "::".join(reversed(scope_parts)) + "::"
 
+    def _identify_template_type(self, node) -> str:
+        """
+        Distinguishes between 'Class', 'Struct', and 'Union' for templates by
+        inspecting tokens after the template parameter list.
+        """
+        # TODO: This is only a perf heuristic, may miss some very long template header
+        # Limit tokenization to avoid overhead on large classes
+        tokens = islice(node.get_tokens(), 100)
+        bracket_depth = 0
+        found_params = False
+
+        for token in tokens:
+            s = token.spelling
+            if s == '<':
+                bracket_depth += 1
+                found_params = True
+            elif s == '>':
+                bracket_depth -= 1
+            elif found_params and bracket_depth == 0:
+                tag = s.lower()
+                if tag in ('struct', 'class', 'union'):
+                    return tag.capitalize()
+
+        return "Class" # Default fallback
+
     def _convert_node_kind_to_index_kind(self, node):
         """Converts a Clang parser kind to a Clangd index kind."""
 
-        if node.kind.name in ClangParser.NODE_KIND_FUNCTIONS:
+        kind_name = node.kind.name
+
+        if kind_name in ClangParser.NODE_KIND_FUNCTIONS:
+            # Check if it's actually a method (inside a class/struct/template)
+            parent = node.semantic_parent
+            if parent and parent.kind.name in ClangParser.NODE_KIND_FOR_COMPOSITE_TYPES:
+                if node.is_static_method():
+                    return "StaticMethod"
+                return "InstanceMethod"
             return "Function"
-        elif node.kind.name in ClangParser.NODE_KIND_CONSTRUCTOR:
+        elif kind_name in ClangParser.NODE_KIND_CONSTRUCTOR:
             return "Constructor"
-        elif node.kind.name in ClangParser.NODE_KIND_DESTRUCTOR:
+        elif kind_name in ClangParser.NODE_KIND_DESTRUCTOR:
             return "Destructor"
-        elif node.kind.name in ClangParser.NODE_KIND_CONVERSION_FUNCTION:
+        elif kind_name in ClangParser.NODE_KIND_CONVERSION_FUNCTION:
             return "ConversionFunction"
-        elif node.kind.name in ClangParser.NODE_KIND_CXX_METHOD:
+        elif kind_name in ClangParser.NODE_KIND_CXX_METHOD:
             if node.is_static_method():
                 return "StaticMethod"
             return "InstanceMethod"
-        elif node.kind.name in ClangParser.NODE_KIND_STRUCT:
+        elif kind_name in ClangParser.NODE_KIND_STRUCT:
             return "Struct"
-        elif node.kind.name in ClangParser.NODE_KIND_UNION:
+        elif kind_name in ClangParser.NODE_KIND_UNION:
             return "Union"
-        elif node.kind.name in ClangParser.NODE_KIND_ENUM:
+        elif kind_name in ClangParser.NODE_KIND_ENUM:
             return "Enum"
-        elif node.kind.name in ClangParser.NODE_KIND_CLASSES:
+        elif kind_name in ClangParser.NODE_KIND_CLASSES:
+            #Clang.cindex treats all templated structures as templated class, has to figure out the right type.
+            if kind_name != clang.cindex.CursorKind.CLASS_DECL.name:
+                return self._identify_template_type(node)
             return "Class"
-        elif node.kind.name in ClangParser.NODE_KIND_NAMESPACE:
+        elif kind_name in ClangParser.NODE_KIND_NAMESPACE:
             return "Namespace"
-        elif node.kind.name in ClangParser.NODE_KIND_TYPE_ALIASES:
+        elif kind_name in ClangParser.NODE_KIND_TYPE_ALIASES:
             return "TypeAlias"
         else:
-            logger.error(f"Unknown Clang parser kind: {node.kind.name}")
+            logger.error(f"Unknown Clang parser kind: {kind_name}")
             return "Unknown"
 
     def _sanitize_args(self, args: List[str], file_path: str) -> List[str]:
@@ -993,6 +1030,19 @@ class CompilationParser:
         """
         Deterministic symbol key.
         Format: kind::symbol name::file URI:line:col
+
+        NOTE: We added kind to the make_symbol_key (and subsequently the synthetic ID) specifically to prevent
+        collisions between different entity types at the same source location, particularly in the context of macros and
+        anonymous structures.
+
+        1. Anonymous Struct + Typedef Collision: In C, it's common to see typedef struct { ... } MyType;. Both the anonymous
+            struct and the typedef (TypeAlias) start at the same line and column. Without kind in the key, they would generate
+            the same synthetic ID, causing one to overwrite the other in the graph or cache.
+        2. Macro Identity: When a macro generates multiple entities (e.g., a struct and a using alias) at the exact same
+            expansion point, the kind ensures they remain distinct nodes.
+        3. Clangd Alignment: Clangd's own USRs (Unified Symbol Resolutions) are kind-aware. By including kind in our
+            synthetic key (kind::name::file:line:col), we make our identification logic more robust and closer to how the
+            compiler distinguishes symbols that share a location.
         """
         key = f"{kind}::{name}::{file_uri}:{line}:{col}"
         return key
@@ -1158,7 +1208,9 @@ class ClangParser(CompilationParser):
         clang.cindex.CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION.name,
     }
     
-    NODE_KIND_FOR_BODY_SPANS = NODE_KIND_FUNCTIONS | NODE_KIND_METHODS | NODE_KIND_UNION | NODE_KIND_ENUM | NODE_KIND_STRUCT | NODE_KIND_CLASSES 
+    NODE_KIND_FOR_COMPOSITE_TYPES = NODE_KIND_UNION | NODE_KIND_ENUM | NODE_KIND_STRUCT | NODE_KIND_CLASSES
+
+    NODE_KIND_FOR_BODY_SPANS = NODE_KIND_FUNCTIONS | NODE_KIND_METHODS | NODE_KIND_FOR_COMPOSITE_TYPES
     
     # NOTE: We don't include NAMESPACE spans although they have body spans. 
     # The reason is, same namespaces are declared in multiple sites with different name_locations hence the synthetic ids, which are considered as different symbols
@@ -1167,15 +1219,13 @@ class ClangParser(CompilationParser):
     # TODO: Check if we need create parent (or scope) relation from a structure to a namespace literal.
     NODE_KIND_NAMESPACE = { clang.cindex.CursorKind.NAMESPACE.name }
 
-    NODE_KIND_FOR_SCOPES =  NODE_KIND_NAMESPACE | NODE_KIND_UNION | NODE_KIND_ENUM | NODE_KIND_STRUCT | NODE_KIND_CLASSES
+    NODE_KIND_FOR_SCOPES =  NODE_KIND_NAMESPACE | NODE_KIND_FOR_COMPOSITE_TYPES
 
     NODE_KIND_TYPE_ALIASES = {
         clang.cindex.CursorKind.TYPE_ALIAS_TEMPLATE_DECL.name,
         clang.cindex.CursorKind.TYPE_ALIAS_DECL.name,
         clang.cindex.CursorKind.TYPEDEF_DECL.name,
     }
-
-    NODE_KIND_FOR_COMPOSITE_TYPES = NODE_KIND_UNION | NODE_KIND_ENUM | NODE_KIND_STRUCT | NODE_KIND_CLASSES
 
     NODE_KIND_FOR_USER_DEFINED_TYPES = NODE_KIND_FOR_COMPOSITE_TYPES | NODE_KIND_TYPE_ALIASES
 

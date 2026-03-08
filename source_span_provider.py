@@ -104,7 +104,14 @@ class SourceSpanProvider:
             # So it means if a symbol has a definition (or declaration) reference inside another symbol's scope, 
             # then the container symbol is its parent.
             for ref in sym.references:
-                if ref.location == loc and ref.kind & 3 and not ref.kind & 4 and ref.container_id != '0000000000000000':
+                # We had required ref.location == loc in the following checking, but this condition is unnecessary because
+                # it's possible a symbol is defined in a different file from its parent, such as 
+                # a class member is defined seperately with a scope like aclass::foo(){...}; 
+                # This is very common when a macro is expanded in a file (where a class is generated), while the macro (class members) is defined in another file.
+                # The macro case happens overwhelmingly in llvm project. 
+                # Even with this condition removed, llvm still has lots of member symbols that don't have their parent symbol in ref containers.
+                # We improve it further by matching the scope string to the qualified name of a class/struct.
+                if ref.kind & 3 and not ref.kind & 4 and ref.container_id != '0000000000000000': 
                     sym.parent_id = ref.container_id 
                     self.assigned_parent_in_sym += 1
                     break    
@@ -124,8 +131,8 @@ class SourceSpanProvider:
 
         # Pass 1: Match clangd-indexed symbols with source spans
         for sym_id, sym in self.symbol_parser.symbols.items():
-            if False:
-                if sym.kind == "Namespace" and sym.name == "internal": #and sym.scope == "clang::dataflow":
+            if True:
+                if sym.id == "EE5CFDFF32865E00":
                     pass
 
             loc = sym.definition or sym.declaration
@@ -152,6 +159,10 @@ class SourceSpanProvider:
         synthetic_symbols = {}
         for file_uri, key_spans in file_span_data_copy.items():
             for key, source_span in key_spans.items():
+                if True:
+                    if source_span.id == "09ddd090bd1f733f05fee31edfe73381":
+                        pass
+
                 synth_parent_id = source_span.parent_id
                 parent_id = self.synthetic_id_to_index_id.get(synth_parent_id, synth_parent_id)
                 if parent_id != synth_parent_id:
@@ -163,11 +174,6 @@ class SourceSpanProvider:
 
                 synthetic_symbols[source_span.id] = self._create_synthetic_symbol(source_span, file_uri, parent_id)
                 self.synthetic_id_to_index_id[source_span.id] = source_span.id # Map synthetic ID to itself
-
-                if False:
-                    sym = synthetic_symbols[source_span.id]
-                    if sym.kind == "Namespace" and sym.name == "internal": #and sym.scope == "clang::dataflow":
-                        pass
 
         # Add the new synthetic symbols to the main symbol parser
         self.symbol_parser.symbols.update(synthetic_symbols)
@@ -208,8 +214,9 @@ class SourceSpanProvider:
             variable_kind = {"Field", "Variable", "EnumConstant", "StaticProperty"}
             # This is for the functions that are not defined in the code, like constructor() = 0;
             # For this kind of functions, we ensure they don't have body definition.
-            function_kind = {"Constructor", "Destructor", "InstanceMethod", "ConversionFunction"}
-            if sym.kind in variable_kind or (sym.kind in function_kind and not sym.body_location):
+            # Also for declarations of Struct and Class
+            special_kinds = {"Constructor", "Destructor", "InstanceMethod", "ConversionFunction", "Struct"}
+            if sym.kind in variable_kind or (sym.kind in special_kinds and not sym.body_location):
                 field_name = RelativeLocation(loc.start_line, loc.start_column, loc.end_line, loc.end_column)
                 field_span = SourceSpan(sym.name, "Variable", sym.language, field_name, field_name, '', '')
                 span_tree = file_span_data.get(loc.file_uri, {}) 
@@ -219,18 +226,20 @@ class SourceSpanProvider:
                     self.assigned_parent_no_span += 1
 
                 else:
-                    # Variables defined at top level have no parent scope
-                    if not sym.kind in {"Variable"}:
+                    # Variables and no-body Structs defined at top level have no parent scope
+                    if not sym.kind in {"Variable", "Struct"}:
                         logger.debug(f"Could not find container for no-body {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
                 
                 #now we have the parent scope id in parent_synth_id
 
             else:
-                # For other symbols (except Variable and no-body function): find parent id from span lookup
-                # We skip two cases:
+                # For other symbols (except Variable and no-body function): 
+                # We assume they have body spans, thus find parent id from span lookup
+                # We skip following cases:
                 # 1. TypeAlias: We handle it separately. They are not managed in SpanTrees.
                 # 2. Function without definition, which is only a declaration that we don't care.
-                if sym.kind == "TypeAlias" or (sym.kind == "Function" and not sym.definition):
+                # 3. Using: We don't support it yet.
+                if sym.kind in {"TypeAlias", "Using"} or (sym.kind in {"Function"} and not sym.definition):
                     continue
 
                 key = CompilationParser.make_symbol_key(sym.name, sym.kind, loc.file_uri, loc.start_line, loc.start_column)
