@@ -12,6 +12,7 @@ import logging
 import gc, copy, sys
 import hashlib
 from typing import Optional, Dict, List, Set
+from collections import defaultdict
 from urllib.parse import urlparse, unquote
 
 from clangd_index_yaml_parser import SymbolParser, Symbol, Reference, Location, RelativeLocation
@@ -54,7 +55,19 @@ class SourceSpanProvider:
 
         self._filter_symbols_by_project_path()
         self._assign_parent_ids_from_symbol_ref_container()
-        self._match_and_enrich_with_source_spans()
+        self._infer_parent_ids_from_scope()
+        
+        # Match Clangd symbols with source spans and create synthetic symbols for unmatched spans
+        file_span_data = self.compilation_manager.get_source_spans()
+        file_span_data_copy = copy.deepcopy(file_span_data)
+        
+        self._match_symbols_by_location(file_span_data_copy)
+        self._match_symbols_by_context_fallback(file_span_data_copy)
+        self._create_synthetic_symbols(file_span_data_copy)
+        
+        del file_span_data_copy
+        gc.collect()
+
         self._assign_parent_ids_lexically()
         self._enrich_with_type_alias_data() # New pass for TypeAlias
         self._discover_macros() # New pass for Macros
@@ -115,26 +128,47 @@ class SourceSpanProvider:
                     sym.parent_id = ref.container_id 
                     self.assigned_parent_in_sym += 1
                     break    
+                
+        logger.info(f"Successfully assigned {self.assigned_parent_in_sym} parent IDs from reference container id.")
             
-
-    def _match_and_enrich_with_source_spans(self):
+    def _infer_parent_ids_from_scope(self):
         """
-        Matches existing symbols with SourceSpan data and synthesizes new symbols
-        for unmatched SourceSpans (e.g., anonymous structures).
+        Uses the scope string of symbols to infer their parent_id.
+        This is a fallback for when the container_id is not available in the index.
         """
-        # Pass 0: Get span data
-        file_span_data = self.compilation_manager.get_source_spans()
-        logger.info(f"Processing SourceSpans from {len(file_span_data)} files for enrichment.")
-
-        # Copy the file span data to avoid modifying the original data
-        file_span_data_copy = copy.deepcopy(file_span_data)
-
-        # Pass 1: Match clangd-indexed symbols with source spans
+        logger.info("Inferring parent IDs from scope strings...")
+        
+        # Build a map of qualified name -> symbol ID for scope-defining symbols
+        scope_to_id = {}
+        scope_defining_kinds = {"Namespace", "Class", "Struct", "Union", "Enum"}
+        
         for sym_id, sym in self.symbol_parser.symbols.items():
-            if True:
-                if sym.id == "EE5CFDFF32865E00":
-                    pass
+            if sym.kind in scope_defining_kinds:
+                qualified_name = sym.scope + sym.name + "::"
+                # If there are duplicates (unlikely for qualified names), keep the first one
+                if qualified_name not in scope_to_id:
+                    scope_to_id[qualified_name] = sym_id
 
+        inferred_count = 0
+        for sym_id, sym in self.symbol_parser.symbols.items():
+            # Only infer if parent_id is not already set and it has a scope
+            if sym.parent_id is None and sym.scope:
+                if parent_id := scope_to_id.get(sym.scope):
+                    # Safety: don't set yourself as parent
+                    if parent_id != sym_id:
+                        sym.parent_id = parent_id
+                        inferred_count += 1
+        
+        logger.info(f"Successfully inferred {inferred_count} parent IDs from scope strings.")
+        self.assigned_parent_in_sym += inferred_count
+
+    def _match_symbols_by_location(self, file_span_data_copy: Dict[str, Dict[str, SourceSpan]]):
+        """
+        PASS 1: Exact location match.
+        Matches Clangd symbols with SourceSpans based on their name, kind, and location.
+        """
+        logger.info("Matching symbols by exact location...")
+        for sym_id, sym in self.symbol_parser.symbols.items():
             loc = sym.definition or sym.declaration
             if not loc:
                 continue
@@ -152,17 +186,83 @@ class SourceSpanProvider:
             
             self.synthetic_id_to_index_id[source_span.id] = sym_id
             self.matched_symbol_count += 1
-            # Remove the span from the file spans in order to use the remaining spans for synthetic symbols
+            # Remove the span from the copy to mark it as processed
             del file_span_data_copy[loc.file_uri][key]
 
-        # Pass 2: Any remaining spans are not clangd-indexed (such as anonymous structures or unused symbols)
+    def _match_symbols_by_context_fallback(self, file_span_data_copy: Dict[str, Dict[str, SourceSpan]]):
+        """
+        PASS 1.5: Semantic fallback match.
+        Matches remaining macro-generated symbols by their parent context, name, and kind.
+        This is a safe fallback for when Clangd uses the spelling location (header)
+        but the parser uses the expansion location (cpp).
+        """
+        logger.info("Performing semantic matching for remaining macro-generated symbols...")
+        
+        # 1. Build a lookup for remaining spans: (resolved_parent_id, name, kind) -> (file_uri, key, SourceSpan)
+        # We only match if the context is unique among remaining spans.
+        remaining_spans_by_context = {}
+        for file_uri, key_spans in file_span_data_copy.items():
+            for key, span in key_spans.items():
+                if span.parent_id:
+                    # Map the synthetic parent_id to the index_id if possible
+                    resolved_parent_id = self.synthetic_id_to_index_id.get(span.parent_id, span.parent_id)
+                    context_key = (resolved_parent_id, span.name, span.kind)
+                    if context_key in remaining_spans_by_context:
+                        remaining_spans_by_context[context_key] = None # Mark as ambiguous (multiple spans)
+                    else:
+                        remaining_spans_by_context[context_key] = (file_uri, key, span)
+
+        # 2. Identify candidate Clangd symbols and group them by context to check uniqueness
+        candidate_symbols_by_context = {}
+        for sym_id, sym in self.symbol_parser.symbols.items():
+            if sym.body_location or not sym.parent_id:
+                continue
+            context_key = (sym.parent_id, sym.name, sym.kind)
+            if context_key in candidate_symbols_by_context:
+                # Mark as ambiguous (multiple symbols)
+                candidate_symbols_by_context[context_key] = None
+            else:
+                candidate_symbols_by_context[context_key] = sym
+
+        # 3. Perform matching only if unique on both sides (one span, one symbol)
+        semantic_match_count = 0
+        for context_key, sym in candidate_symbols_by_context.items():
+            # Rule A: Must be exactly one Clangd symbol for this context
+            if sym is None:
+                continue
+            
+            # Rule B: Must be exactly one synthetic span for this context
+            match_info = remaining_spans_by_context.get(context_key)
+            if not match_info: # Missing or marked None (ambiguous)
+                continue
+                
+            file_uri, key, source_span = match_info
+            
+            # Found a safe one-to-one semantic match!
+            sym.body_location = source_span.body_location
+            sym.original_name = source_span.original_name
+            sym.expanded_from_id = source_span.expanded_from_id
+            
+            self.synthetic_id_to_index_id[source_span.id] = sym_id
+            self.matched_symbol_count += 1
+            semantic_match_count += 1
+            
+            # Cleanup: remove from span collection to prevent synthetic symbol creation
+            if key in file_span_data_copy[file_uri]:
+                del file_span_data_copy[file_uri][key]
+
+        logger.info(f"Semantically matched {semantic_match_count} symbols by context (parent/name/kind).")
+
+    def _create_synthetic_symbols(self, file_span_data_copy: Dict[str, Dict[str, SourceSpan]]):
+        """
+        PASS 2: Creation of synthetic symbols.
+        Creates new Symbol objects for remaining spans that are not clangd-indexed 
+        (e.g., anonymous structures or unused symbols).
+        """
+        logger.info("Creating synthetic symbols for remaining unmatched spans...")
         synthetic_symbols = {}
         for file_uri, key_spans in file_span_data_copy.items():
             for key, source_span in key_spans.items():
-                if True:
-                    if source_span.id == "09ddd090bd1f733f05fee31edfe73381":
-                        pass
-
                 synth_parent_id = source_span.parent_id
                 parent_id = self.synthetic_id_to_index_id.get(synth_parent_id, synth_parent_id)
                 if parent_id != synth_parent_id:
@@ -177,10 +277,8 @@ class SourceSpanProvider:
 
         # Add the new synthetic symbols to the main symbol parser
         self.symbol_parser.symbols.update(synthetic_symbols)
-        logger.info(f"Matched and enriched {self.matched_symbol_count} existing symbols; added {len(synthetic_symbols)} synthetic symbols.")
+        logger.info(f"Added {len(synthetic_symbols)} synthetic symbols.")
         logger.info(f"Assigned parent_id to symbols: {self.assigned_parent_in_sym} by ref, {self.assigned_sym_parent_in_span} by span sym id, {self.assigned_syn_parent_in_span} by span synth id.")
-        del file_span_data_copy, synthetic_symbols
-        gc.collect()
 
     def _assign_parent_ids_lexically(self):
         """
@@ -510,4 +608,3 @@ class SourceSpanProvider:
             original_name=span.original_name,
             expanded_from_id=span.expanded_from_id
         )
-

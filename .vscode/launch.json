@@ -19,6 +19,13 @@
             "args": ["~/Public/llvm/build-21.1.2/llvm-21.1.2-index.yaml", "~/Public/llvm/llvm-project/", "--compile-commands", "~/Public/llvm/build-21.1.2/compile_commands.json"]
         },
         {
+            "name": "Python Debugger: llvm - with summary",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "clangd_graph_rag_builder.py",
+            "args": ["~/Public/llvm/build-21.1.2/llvm-21.1.2-index-new.yaml", "~/Public/llvm/llvm-project/", "--compile-commands", "~/Public/llvm/build-21.1.2/compile_commands.json", "--generate-summary"]
+        },
+        {
             "name": "Python Debugger: Compilation Manager",
             "type": "debugpy",
             "request": "launch",
