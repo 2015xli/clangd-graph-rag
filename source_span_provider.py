@@ -128,7 +128,7 @@ class SourceSpanProvider:
                     sym.parent_id = ref.container_id 
                     self.assigned_parent_in_sym += 1
                     break    
-                
+
         logger.info(f"Successfully assigned {self.assigned_parent_in_sym} parent IDs from reference container id.")
             
     def _infer_parent_ids_from_scope(self):
@@ -140,14 +140,19 @@ class SourceSpanProvider:
         
         # Build a map of qualified name -> symbol ID for scope-defining symbols
         scope_to_id = {}
-        scope_defining_kinds = {"Namespace", "Class", "Struct", "Union", "Enum"}
+        # Namespace is not included because it will be processed seperately when injesting nodes. 
+        # TODO: 
+        scope_defining_kinds = {"Namespace", "Class", "Struct", "Union", "Enum"} 
         
         for sym_id, sym in self.symbol_parser.symbols.items():
             if sym.kind in scope_defining_kinds:
                 qualified_name = sym.scope + sym.name + "::"
-                # If there are duplicates (unlikely for qualified names), keep the first one
+                # If there are duplicates fully qualified names, we set it to None to avoid ambiguity.
                 if qualified_name not in scope_to_id:
                     scope_to_id[qualified_name] = sym_id
+                else:
+                    scope_to_id[qualified_name] = None
+
 
         inferred_count = 0
         for sym_id, sym in self.symbol_parser.symbols.items():
@@ -155,9 +160,9 @@ class SourceSpanProvider:
             if sym.parent_id is None and sym.scope:
                 if parent_id := scope_to_id.get(sym.scope):
                     # Safety: don't set yourself as parent
-                    if parent_id != sym_id:
-                        sym.parent_id = parent_id
-                        inferred_count += 1
+                    assert parent_id != sym_id, f"Symbol {sym_id} has itself as parent."
+                    sym.parent_id = parent_id
+                    inferred_count += 1
         
         logger.info(f"Successfully inferred {inferred_count} parent IDs from scope strings.")
         self.assigned_parent_in_sym += inferred_count
@@ -242,6 +247,9 @@ class SourceSpanProvider:
             sym.body_location = source_span.body_location
             sym.original_name = source_span.original_name
             sym.expanded_from_id = source_span.expanded_from_id
+            
+            # Anchor to the implementation file and name location
+            sym.definition = Location.from_relative_location(source_span.name_location, file_uri)
             
             self.synthetic_id_to_index_id[source_span.id] = sym_id
             self.matched_symbol_count += 1

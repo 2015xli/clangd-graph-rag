@@ -68,7 +68,7 @@ class NodeSummaryProcessor:
             start_line, end_line
         )
         if not source_code:
-            #logger.error(f"Cannot generate code analysis for {label} {node_id}: source code not found.")       #TODO: should turn on after fixing the bug
+            logger.error(f"Cannot generate code analysis for {label} {node_id}: source code not found.")       #TODO: should turn on after fixing the bug
             return "generation_failed", {} # Cannot process
 
         # 2. Calculate new hash
