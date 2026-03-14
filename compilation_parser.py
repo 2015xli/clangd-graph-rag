@@ -272,8 +272,8 @@ class _ClangWorkerImpl:
                 caller_usr = current_caller_cursor.get_usr()
                 callee_usr = callee_cursor.get_usr()
                 if caller_usr and callee_usr:
-                    caller_id = self._hash_usr_to_id(caller_usr)
-                    callee_id = self._hash_usr_to_id(callee_usr)
+                    caller_id = CompilationParser.hash_usr_to_id(caller_usr)
+                    callee_id = CompilationParser.hash_usr_to_id(callee_usr)
                     self.static_call_relations.add((caller_id, callee_id))
 
         # --- Recurse to children ---
@@ -328,8 +328,21 @@ class _ClangWorkerImpl:
         file_uri = f"file://{file_name}"
 
         kind = self._convert_node_kind_to_index_kind(node)
-        node_key = CompilationParser.make_symbol_key(node.spelling, kind, file_uri, name_start_line, name_start_col)
         
+        # Determine if this is an anonymous composite type (Enum, Struct, Union, Class)
+        # libclang often uses pattern like "(unnamed enum at ...)" for spelling
+        is_anonymous = node.spelling.startswith("(unnamed") or not node.spelling
+        if is_anonymous and node.kind.name in ClangParser.NODE_KIND_FOR_COMPOSITE_TYPES:
+            usr = node.get_usr()
+            # Use USR as name for debug info and hash USR for ID to match Clangd's Type bridge
+            node_name = usr
+            synthetic_id = CompilationParser.hash_usr_to_id(usr) 
+            node_key = synthetic_id
+        else:
+            node_name = node.spelling
+            node_key = CompilationParser.make_symbol_key(node_name, kind, file_uri, name_start_line, name_start_col)
+            synthetic_id = CompilationParser.make_synthetic_id(node_key)
+
         if node_key in self.span_results[(file_uri, self._tu_hash)]: 
             # Same node can be defined in same header file of multiple TUs that have different TU hash, but we only want to keep one copy - for our purpose.
             # In the same TU, it is also possible to meet same node more than once, e.g., typedef struct { ... } A;
@@ -337,18 +350,12 @@ class _ClangWorkerImpl:
             #pass
             return  
 
-        if True:
-            if kind == "Enum":
-                print(node.get_usr())
-
-        synthetic_id = CompilationParser.make_synthetic_id(node_key)        
         parent_id = self._get_parent_id(node)
 
-        kind = self._convert_node_kind_to_index_kind(node)
         original_name, expanded_from_id = self._get_macro_causality(node, file_uri)
 
         span = SourceSpan(
-            name=sys.intern(node.spelling),
+            name=sys.intern(node_name),
             kind=sys.intern(kind),
             lang=self.lang,
             name_location=RelativeLocation(name_start_line, name_start_col, name_start_line, name_start_col + len(node.spelling)),
@@ -374,7 +381,7 @@ class _ClangWorkerImpl:
         body_start_line, body_start_col = node.extent.start.line - 1, node.extent.start.column - 1
         body_end_line, body_end_col = node.extent.end.line - 1, node.extent.end.column - 1
         file_uri = f"file://{file_name}"
-        aliaser_id = self._hash_usr_to_id(node.get_usr())
+        aliaser_id = CompilationParser.hash_usr_to_id(node.get_usr())
         scope = self._get_fully_qualified_scope(semantic_parent)
         parent_id = self._get_parent_id(node) # Use existing helper for parent_id
 
@@ -408,20 +415,25 @@ class _ClangWorkerImpl:
                 if aliasee_decl_cursor.kind.name in ClangParser.NODE_KIND_FOR_COMPOSITE_TYPES:
                     # Aliasee is a named user-defined composite type (struct, class, enum, union)
                     # Use synthetic ID for consistency with SourceSpan handling (temporarily)
-                    aliasee_name_line, aliasee_name_col = self._get_symbol_name_location(aliasee_decl_cursor)
-                    aliased_type_id = CompilationParser.make_synthetic_id(
-                        CompilationParser.make_symbol_key(
-                            aliasee_decl_cursor.spelling,
-                            aliased_type_kind,
-                            f"file://{os.path.abspath(aliasee_decl_cursor.location.file.name)}",
-                            aliasee_name_line,
-                            aliasee_name_col
+                    is_anonymous = aliasee_decl_cursor.spelling.startswith("(unnamed") or not aliasee_decl_cursor.spelling
+                    if is_anonymous:
+                        usr = node.get_usr()
+                        aliased_type_id = CompilationParser.hash_usr_to_id(usr) 
+                    else:
+                        aliasee_name_line, aliasee_name_col = self._get_symbol_name_location(aliasee_decl_cursor)
+                        aliased_type_id = CompilationParser.make_synthetic_id(
+                            CompilationParser.make_symbol_key(
+                                aliasee_decl_cursor.spelling,
+                                aliased_type_kind,
+                                f"file://{os.path.abspath(aliasee_decl_cursor.location.file.name)}",
+                                aliasee_name_line,
+                                aliasee_name_col
+                            )
                         )
-                    )
                 else:
                     # Other aliasees are like ClangParser.NODE_KIND_FOR_TYPE_ALIAS
                     # We don't use synthetic id for them, since we directly use USR-derived id for them in parsing.
-                    aliased_type_id = self._hash_usr_to_id(aliasee_decl_cursor.get_usr())
+                    aliased_type_id = CompilationParser.hash_usr_to_id(aliasee_decl_cursor.get_usr())
 
                 # If it is not defined in the project, set aliased_type_id to None. 
                 # We don't want to create a relationship to a type that is out of the project.
@@ -515,7 +527,15 @@ class _ClangWorkerImpl:
         file_uri = f"file://{os.path.abspath(file_name)}"
         line, col = self._get_symbol_name_location(parent)
         parent_kind = self._convert_node_kind_to_index_kind(parent)
-        parent_key = CompilationParser.make_symbol_key(parent.spelling, parent_kind, file_uri, line, col)
+        
+        is_anonymous = not parent.spelling or parent.spelling.startswith("(unnamed") 
+        if is_anonymous and parent.kind.name in ClangParser.NODE_KIND_FOR_COMPOSITE_TYPES:
+            usr = parent.get_usr()
+            synthetic_id = CompilationParser.hash_usr_to_id(usr) 
+            parent_key = synthetic_id
+        else:
+            parent_key = CompilationParser.make_symbol_key(parent.spelling, parent_kind, file_uri, line, col)
+
         # Parent span should be created earlier. Return existing ID to its semantic children as parent id. Otherwise, return None.
         if (file_uri, self._tu_hash) not in self.span_results:
             return None
@@ -631,15 +651,6 @@ class _ClangWorkerImpl:
         except Exception as e:
             logger.error(f"Error reading source text for extent in {file_path}: {e}")
             return ""
-
-    @staticmethod
-    def _hash_usr_to_id(usr: str) -> str:
-        """
-        Replicates clangd's ID generation by taking the first 8 bytes of
-        the SHA1 hash of the USR.
-        """
-        sha1_hash = hashlib.sha1(usr.encode()).digest()
-        return sha1_hash[:8].hex().upper()
 
     def _get_fully_qualified_scope(self, node: clang.cindex.Cursor) -> str:
         """
@@ -1028,6 +1039,15 @@ class CompilationParser:
 
     def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
         raise NotImplementedError
+
+    @staticmethod
+    def hash_usr_to_id(usr: str) -> str:
+        """
+        Replicates clangd's ID generation by taking the first 8 bytes of
+        the SHA1 hash of the USR.
+        """
+        sha1_hash = hashlib.sha1(usr.encode()).digest()
+        return sha1_hash[:8].hex().upper()
 
     @classmethod
     def make_symbol_key(cls, name: str, kind: str, file_uri: str, line: int, col: int) -> str:

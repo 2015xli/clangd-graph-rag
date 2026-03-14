@@ -141,7 +141,7 @@ class SourceSpanProvider:
                 # We improve it further by matching the scope string to the qualified name of a class/struct.
                 if ref.kind & 3 and not ref.kind & 4 and ref.container_id != '0000000000000000': 
                     if sym.parent_id: 
-                        logger.warning(f"Symbol {sym.id} already has a parent ID {sym.parent_id}, but hits a new one {ref.container_id}. Symbol:{sym.name}")
+                        logger.error(f"Symbol {sym.id} already has a parent ID {sym.parent_id}, but hits a new one {ref.container_id}. Symbol:{sym.name}")
                         sym.parent_id = None 
                         break
                     #check if parent_id exists. It may not exist, e.g., Member Function Specialization, which has container of partial specialized class that does not have a symbol.
@@ -373,9 +373,13 @@ class SourceSpanProvider:
         file_span_data = self.compilation_manager.get_source_spans()
 
         for sym_id, sym in self.symbol_parser.symbols.items():
-            if sym.kind == "EnumConstant":
+            if sym.id in {"7C6BED72377AC81D", "BE189C83F01CA12A"}:
                 pass
-
+            
+            # We should skip the synthetic symbols that come from the spans. No need to find their original spans.
+            if sym.name.startswith("c:"):
+                continue 
+                
             # Skip symbols that already assigned parent id in pass 1
             if sym.parent_id:
                 continue
@@ -411,9 +415,19 @@ class SourceSpanProvider:
                     self.assigned_parent_no_span += 1
 
                 else:
-                    # Variables and no-body Structs defined at top level have no parent scope
-                    if not sym.kind in {"Variable", "Struct"}:
-                        logger.debug(f"Could not find container for no-body {sym.kind}:{sym.id} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                    # Fallback for EnumConstants in anonymous enums via USR-bridging (sym.type)
+                    if sym.kind == "EnumConstant" and sym.type:
+                        # Clean USR (strip extra '$')
+                        cleaned_usr = sym.type.replace('$', '')
+                        usr_parent_id = CompilationParser.hash_usr_to_id(cleaned_usr)
+                        if usr_parent_id in self.symbol_parser.symbols:
+                            parent_synth_id = usr_parent_id # Direct match to indexed/synthetic ID
+                            self.assigned_parent_no_span += 1
+                    
+                    if not parent_synth_id:
+                        # Variables and no-body Structs defined at top level have no parent scope
+                        if not sym.kind in {"Variable", "Struct"}:
+                            logger.debug(f"Could not find container for no-body {sym.kind}:{sym.id} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
                 
                 #now we have the parent scope id in parent_synth_id
 
