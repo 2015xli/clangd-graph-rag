@@ -337,6 +337,10 @@ class _ClangWorkerImpl:
             #pass
             return  
 
+        if True:
+            if kind == "Enum":
+                print(node.get_usr())
+
         synthetic_id = CompilationParser.make_synthetic_id(node_key)        
         parent_id = self._get_parent_id(node)
 
@@ -504,15 +508,15 @@ class _ClangWorkerImpl:
         
         # We don't catch Namespace nodes for the moment...
         if parent.kind.name not in ClangParser.NODE_KIND_FOR_BODY_SPANS:
-            if not parent.kind.name in "ClangParser.NODE_KIND_NAMESPACE":
-                logger.warning(f"Parent {parent.kind.name} {parent.spelling} at {parent.location}) of node {node.spelling} at {node.location} is not in NODE_KIND_FOR_BODY_SPANS")
-            return None
+            if parent.kind.name not in "ClangParser.NODE_KIND_NAMESPACE": 
+                logger.error(f"Parent {parent.kind.name} {parent.spelling} at {parent.location}) of node {node.spelling} at {node.location} is not in NODE_KIND_FOR_BODY_SPANS")
+                return None
 
         file_uri = f"file://{os.path.abspath(file_name)}"
         line, col = self._get_symbol_name_location(parent)
         parent_kind = self._convert_node_kind_to_index_kind(parent)
         parent_key = CompilationParser.make_symbol_key(parent.spelling, parent_kind, file_uri, line, col)
-        # Return existing ID to its semantic children as parent id. Otherwise, return None.
+        # Parent span should be created earlier. Return existing ID to its semantic children as parent id. Otherwise, return None.
         if (file_uri, self._tu_hash) not in self.span_results:
             return None
         parent_span = self.span_results[(file_uri, self._tu_hash)].get(parent_key)

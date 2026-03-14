@@ -33,7 +33,10 @@ class SourceSpanProvider:
         """
         self.symbol_parser = symbol_parser
         self.compilation_manager = compilation_manager
-        self.synthetic_id_to_index_id: Dict[str, str] = {} # Maps synthetic span IDs to canonical Symbol IDs
+        self.synthetic_id_to_index_id: Dict[str, str] = {} # Maps synthetic span IDs to canonical clangd Symbol IDs
+        # Maps a sym's ID to its matched sourcespan's parent_id. 
+        # If the parent_id is mapped to a clangd symbol id, then the sym's parent_id is set to that id.
+        self.sym_source_span_parent:Dict[int, int] = {} 
         self.matched_symbol_count = 0
         self.matched_typealias_count = 0
         self.assigned_parent_count = 0
@@ -52,7 +55,8 @@ class SourceSpanProvider:
         if not self.symbol_parser:
             logger.warning("No SymbolParser provided; cannot enrich symbols.")
             return
-
+       
+        # assigne parent ids based on symbol's information
         self._filter_symbols_by_project_path()
         self._assign_parent_ids_from_symbol_ref_container()
         self._infer_parent_ids_from_scope()
@@ -61,16 +65,26 @@ class SourceSpanProvider:
         file_span_data = self.compilation_manager.get_source_spans()
         file_span_data_copy = copy.deepcopy(file_span_data)
         
+        # Match symbols to sourcespans based on location and context
         self._match_symbols_by_location(file_span_data_copy)
+        self._assign_sym_parent_based_on_sourcespan_parent()
         self._match_symbols_by_context_fallback(file_span_data_copy)
+        self._assign_sym_parent_based_on_sourcespan_parent()
+
+        # No more symbols can be matched, convert the remaining sourcespans to symbols
         self._create_synthetic_symbols(file_span_data_copy)
         
         del file_span_data_copy
         gc.collect()
-
+        
+        # Build parent relations based on span containingship
         self._assign_parent_ids_lexically()
-        self._enrich_with_type_alias_data() # New pass for TypeAlias
-        self._discover_macros() # New pass for Macros
+        
+        # Pass for enriching symbols with additional data for TypeAlias and Macro
+        self._enrich_with_type_alias_data() 
+        self._discover_macros() 
+
+        # Build more relationship
         self._enrich_with_static_calls()
 
         logger.info(f"Enrichment complete. Matched {self.matched_symbol_count} symbols with body spans.")
@@ -116,6 +130,7 @@ class SourceSpanProvider:
             # ref.kind & 3 and not ref.kind & 4, means it is either a definition or declaration, but not a reference.
             # So it means if a symbol has a definition (or declaration) reference inside another symbol's scope, 
             # then the container symbol is its parent.
+            nonexitent_parent = None
             for ref in sym.references:
                 # We had required ref.location == loc in the following checking, but this condition is unnecessary because
                 # it's possible a symbol is defined in a different file from its parent, such as 
@@ -125,6 +140,25 @@ class SourceSpanProvider:
                 # Even with this condition removed, llvm still has lots of member symbols that don't have their parent symbol in ref containers.
                 # We improve it further by matching the scope string to the qualified name of a class/struct.
                 if ref.kind & 3 and not ref.kind & 4 and ref.container_id != '0000000000000000': 
+                    if sym.parent_id: 
+                        logger.warning(f"Symbol {sym.id} already has a parent ID {sym.parent_id}, but hits a new one {ref.container_id}. Symbol:{sym.name}")
+                        sym.parent_id = None 
+                        break
+                    #check if parent_id exists. It may not exist, e.g., Member Function Specialization, which has container of partial specialized class that does not have a symbol.
+                    is_parent_existing = self.symbol_parser.symbols.get(ref.container_id)
+                    if not is_parent_existing:
+                        nonexitent_parent = ref.container_id
+                        #logger.warning(f"Symbol {sym.id} has a non-existent parent ID {nonexitent_parent}. Symbol:{sym.name}")
+                        continue
+                    elif (sym.kind in {"Field", "StaticProperty", "EnumConstant", "InstanceMethod", "StaticMethod", "Constructor", "Destructor", "ConversionFunction"}) and \
+                         (is_parent_existing.kind == "Namespace"):
+                        # Namespace should not directly contain those member/field symbols. 
+                        # They are contained because their parent structure is anonymous. We don't add its parent here, but by other approaches later.
+                        break
+        
+                    if nonexitent_parent:
+                        logger.warning(f"Symbol {sym.id} before had a non-existent parent ID {nonexitent_parent}. Now has parent ID {ref.container_id}. Symbol:{sym.name}")
+
                     sym.parent_id = ref.container_id 
                     self.assigned_parent_in_sym += 1
                     break    
@@ -140,13 +174,11 @@ class SourceSpanProvider:
         
         # Build a map of qualified name -> symbol ID for scope-defining symbols
         scope_to_id = {}
-        # Namespace is not included because it will be processed seperately when injesting nodes. 
-        # TODO: 
         scope_defining_kinds = {"Namespace", "Class", "Struct", "Union", "Enum"} 
         
         for sym_id, sym in self.symbol_parser.symbols.items():
             if sym.kind in scope_defining_kinds:
-                qualified_name = sym.scope + sym.name + "::"
+                qualified_name = sym.scope + sym.name + sym.template_specialization_args + "::"
                 # If there are duplicates fully qualified names, we set it to None to avoid ambiguity.
                 if qualified_name not in scope_to_id:
                     scope_to_id[qualified_name] = sym_id
@@ -159,13 +191,35 @@ class SourceSpanProvider:
             # Only infer if parent_id is not already set and it has a scope
             if sym.parent_id is None and sym.scope:
                 if parent_id := scope_to_id.get(sym.scope):
-                    # Safety: don't set yourself as parent
-                    assert parent_id != sym_id, f"Symbol {sym_id} has itself as parent."
+                    parent_kind = self.symbol_parser.symbols[parent_id].kind
+                    if (sym.kind in {"Field", "StaticProperty", "EnumConstant", "InstanceMethod", "StaticMethod", "Constructor", "Destructor", "ConversionFunction"}) and \
+                            (parent_kind == "Namespace"):
+                        # Namespace should not directly contain those member/field symbols. 
+                        # They are contained because their parent structure is anonymous. We don't add its parent here, but by other approaches later.
+                        continue
                     sym.parent_id = parent_id
                     inferred_count += 1
         
         logger.info(f"Successfully inferred {inferred_count} parent IDs from scope strings.")
         self.assigned_parent_in_sym += inferred_count
+
+    def _assign_sym_parent_based_on_sourcespan_parent(self):
+        # check if the matched source span's parent id has a matched clangd symbol id 
+        assigned_sym_parent_with_span_parent = 0
+        for sym_id, sym in self.symbol_parser.symbols.items():
+            if sym.parent_id: continue
+            syn_parent_id = self.sym_source_span_parent.get(sym_id)
+            if not syn_parent_id: continue 
+            sym_parent_id = self.synthetic_id_to_index_id.get(syn_parent_id)
+            if not sym_parent_id: continue
+            # Update the parent id to the clangd symbol id
+            sym.parent_id = sym_parent_id
+            del self.sym_source_span_parent[sym_id]
+            assigned_sym_parent_with_span_parent += 1
+
+        logger.info(f"Assigned {assigned_sym_parent_with_span_parent} parent id based on source span parent."
+                     f"Remaining {len(self.sym_source_span_parent)} unassigned."
+                    )    
 
     def _match_symbols_by_location(self, file_span_data_copy: Dict[str, Dict[str, SourceSpan]]):
         """
@@ -188,6 +242,9 @@ class SourceSpanProvider:
             sym.body_location = source_span.body_location
             sym.original_name = source_span.original_name
             sym.expanded_from_id = source_span.expanded_from_id
+            # If no parent, save source span's parent.
+            if (not sym.parent_id) and source_span.parent_id:
+                self.sym_source_span_parent[sym.id] = source_span.parent_id
             
             self.synthetic_id_to_index_id[source_span.id] = sym_id
             self.matched_symbol_count += 1
@@ -201,65 +258,84 @@ class SourceSpanProvider:
         This is a safe fallback for when Clangd uses the spelling location (header)
         but the parser uses the expansion location (cpp).
         """
-        logger.info("Performing semantic matching for remaining macro-generated symbols...")
+        logger.info("Performing iterative semantic matching for macro-generated symbols...")
         
-        # 1. Build a lookup for remaining spans: (resolved_parent_id, name, kind) -> (file_uri, key, SourceSpan)
-        # We only match if the context is unique among remaining spans.
-        remaining_spans_by_context = {}
-        for file_uri, key_spans in file_span_data_copy.items():
-            for key, span in key_spans.items():
-                if span.parent_id:
-                    # Map the synthetic parent_id to the index_id if possible
-                    resolved_parent_id = self.synthetic_id_to_index_id.get(span.parent_id, span.parent_id)
-                    context_key = (resolved_parent_id, span.name, span.kind)
-                    if context_key in remaining_spans_by_context:
-                        remaining_spans_by_context[context_key] = None # Mark as ambiguous (multiple spans)
-                    else:
-                        remaining_spans_by_context[context_key] = (file_uri, key, span)
-
-        # 2. Identify candidate Clangd symbols and group them by context to check uniqueness
+        # 1. Identify candidate Clangd symbols once. 
+        # These keys are stable because sym.parent_id is already the index ID or None.
         candidate_symbols_by_context = {}
         for sym_id, sym in self.symbol_parser.symbols.items():
-            if sym.body_location or not sym.parent_id:
+            if sym.body_location: # Only match symbols that haven't been matched yet
                 continue
             context_key = (sym.parent_id, sym.name, sym.kind)
             if context_key in candidate_symbols_by_context:
-                # Mark as ambiguous (multiple symbols)
-                candidate_symbols_by_context[context_key] = None
+                candidate_symbols_by_context[context_key] = None # Mark as ambiguous
             else:
                 candidate_symbols_by_context[context_key] = sym
 
-        # 3. Perform matching only if unique on both sides (one span, one symbol)
-        semantic_match_count = 0
-        for context_key, sym in candidate_symbols_by_context.items():
-            # Rule A: Must be exactly one Clangd symbol for this context
-            if sym is None:
-                continue
+        iteration = 0
+        total_semantic_matches = 0
+        
+        while True:
+            iteration += 1
+            round_matches = 0
             
-            # Rule B: Must be exactly one synthetic span for this context
-            match_info = remaining_spans_by_context.get(context_key)
-            if not match_info: # Missing or marked None (ambiguous)
-                continue
-                
-            file_uri, key, source_span = match_info
-            
-            # Found a safe one-to-one semantic match!
-            sym.body_location = source_span.body_location
-            sym.original_name = source_span.original_name
-            sym.expanded_from_id = source_span.expanded_from_id
-            
-            # Anchor to the implementation file and name location
-            sym.definition = Location.from_relative_location(source_span.name_location, file_uri)
-            
-            self.synthetic_id_to_index_id[source_span.id] = sym_id
-            self.matched_symbol_count += 1
-            semantic_match_count += 1
-            
-            # Cleanup: remove from span collection to prevent synthetic symbol creation
-            if key in file_span_data_copy[file_uri]:
-                del file_span_data_copy[file_uri][key]
+            # 2. Build lookup for remaining spans. 
+            # Rebuild because span.parent_id resolution changes as parents are matched.
+            remaining_spans_by_context = {}
+            for file_uri, key_spans in file_span_data_copy.items():
+                for key, span in key_spans.items():
+                    # Map synthetic parent_id to index_id. If parent was matched in a previous 
+                    # iteration, this will now return the canonical index_id.
+                    resolved_parent_id = self.synthetic_id_to_index_id.get(span.parent_id)
+                    
+                    # Optimization: Skip if parent hasn't been matched yet (unless it's a global symbol)
+                    if (span.parent_id is not None) and not resolved_parent_id:
+                        continue
+                    
+                    context_key = (resolved_parent_id, span.name, span.kind)
+                    if context_key in remaining_spans_by_context:
+                        remaining_spans_by_context[context_key] = None # Ambiguous
+                    else:
+                        remaining_spans_by_context[context_key] = (file_uri, key, span)
 
-        logger.info(f"Semantically matched {semantic_match_count} symbols by context (parent/name/kind).")
+            # 3. Match round
+            # Iterate over a copy of keys to allow deletion from the candidate map
+            for context_key in list(candidate_symbols_by_context.keys()):
+                sym = candidate_symbols_by_context[context_key]
+                if sym is None: 
+                    continue # Skip ambiguous Clangd symbols
+                
+                match_info = remaining_spans_by_context.get(context_key)
+                if not match_info: 
+                    continue # Missing or ambiguous synthetic span
+                
+                file_uri, key, source_span = match_info
+                
+                # Found a safe one-to-one semantic match!
+                sym.body_location = source_span.body_location
+                sym.original_name = source_span.original_name
+                sym.expanded_from_id = source_span.expanded_from_id
+                
+                # Anchor to the implementation file and name location
+                sym.definition = Location.from_relative_location(source_span.name_location, file_uri)
+                
+                self.synthetic_id_to_index_id[source_span.id] = sym.id
+                self.matched_symbol_count += 1
+                round_matches += 1
+                
+                # Cleanup: remove from both collections
+                if key in file_span_data_copy[file_uri]:
+                    del file_span_data_copy[file_uri][key]
+                del candidate_symbols_by_context[context_key]
+
+            total_semantic_matches += round_matches
+            if round_matches > 0:
+                logger.info(f"Iteration {iteration}: Semantically matched {round_matches} symbols.")
+            
+            if round_matches == 0:
+                break
+
+        logger.info(f"Successfully iterative-matched {total_semantic_matches} symbols by context.")
 
     def _create_synthetic_symbols(self, file_span_data_copy: Dict[str, Dict[str, SourceSpan]]):
         """
@@ -297,6 +373,9 @@ class SourceSpanProvider:
         file_span_data = self.compilation_manager.get_source_spans()
 
         for sym_id, sym in self.symbol_parser.symbols.items():
+            if sym.kind == "EnumConstant":
+                pass
+
             # Skip symbols that already assigned parent id in pass 1
             if sym.parent_id:
                 continue
@@ -334,7 +413,7 @@ class SourceSpanProvider:
                 else:
                     # Variables and no-body Structs defined at top level have no parent scope
                     if not sym.kind in {"Variable", "Struct"}:
-                        logger.debug(f"Could not find container for no-body {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                        logger.debug(f"Could not find container for no-body {sym.kind}:{sym.id} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
                 
                 #now we have the parent scope id in parent_synth_id
 
@@ -355,12 +434,12 @@ class SourceSpanProvider:
                         # When the graph is incrementally updated (not built from scratch), it is normal that some files don't have span trees.
                         # The reason is, the symbol (and its file) is extended from the seed symbols, whose source file may not be parsed.
                         # We only log the debug message for the builder, when all the source files should be parsed, and have span trees.
-                        logger.debug(f"Could not find span tree for file {loc.file_uri}, symbol {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                        logger.debug(f"Could not find span tree for file {loc.file_uri}, symbol {sym.name} {sym.id} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
                     continue
 
                 span = span_tree.get(key)
                 if not span:  # No matching container found. 
-                    logger.debug(f"Could not find body span for sym with-body {sym.kind} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                    logger.debug(f"Could not find body span for sym with-body {sym.kind} {sym.id} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
                     continue
 
                 parent_synth_id = span.parent_id
@@ -373,7 +452,7 @@ class SourceSpanProvider:
             # Resolve the parent's ID (use the real ID if it exists, otherwise the synthetic one)
             parent_id = self.synthetic_id_to_index_id.get(parent_synth_id, parent_synth_id)
             if parent_id == sym.id:
-                logger.warning(f"Found same parent id {parent_id} for {sym.kind} -- {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                logger.error(f"Found same parent id {parent_id} for {sym.kind} {sym.id} -- {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
                 continue
 
             sym.parent_id = parent_id

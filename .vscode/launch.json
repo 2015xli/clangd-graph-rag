@@ -5,6 +5,13 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python Debugger: clang-debug",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "clangd_graph_rag_builder.py",
+            "args": ["~/NAS/home/bin/clang_anonymous_nested/anonymous_nested.idx.yaml", "~/NAS/home/bin/clang_anonymous_nested/", "--compile-commands", "~/NAS/home/bin/clang_anonymous_nested/compile_commands.json", "--num-parse-workers", "1", "--llm-api", "fake", "--num-local-workers", "10", "--llm-cache-reset", "--llm-cache-shards", "20"]
+        },
+        {
             "name": "Python Debugger: minijivm rag generator",
             "type": "debugpy",
             "request": "launch",

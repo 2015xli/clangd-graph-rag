@@ -110,6 +110,7 @@ class Symbol:
     type: str = ""
     body_location: Optional[RelativeLocation] = None
     parent_id: Optional[str] = None
+    template_specialization_args: str = ""
     # Fields for Macro related
     is_macro_function_like: bool = False    #The macro is function-like, e.g., max(a, b)
     macro_definition: Optional[str] = None  #The full definition of the maco (without the leading "#DEFINE")
@@ -295,6 +296,7 @@ class SymbolParser:
             scope=doc.get('Scope', ''),
             language=sym_info.get('Lang', ''),
             signature=doc.get('Signature', ''),
+            template_specialization_args=doc.get('TemplateSpecializationArgs', ''),
             return_type=doc.get('ReturnType', ''),
             type=doc.get('Type', '')
         )
