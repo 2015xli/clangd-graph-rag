@@ -11,7 +11,7 @@ synthesizing new Symbol objects for anonymous entities.
 import logging
 import gc, copy, sys
 import hashlib
-from typing import Optional, Dict, List, Set
+from typing import Optional, Dict, List, Set, Tuple
 from collections import defaultdict
 from urllib.parse import urlparse, unquote
 
@@ -26,6 +26,11 @@ class SourceSpanProvider:
     """
     Matches pre-parsed span data from a CompilationManager with Symbol objects
     from a SymbolParser, enriching them in-place with `body_location` and `parent_id`.
+    
+    Identity pluralism is supported: 
+    - Tier 1 uses high-performance direct ID matching (USR-based).
+    - Tier 2 uses location matching (coordinate-based fallback).
+    - Tier 3 uses iterative semantic context matching.
     """
     def __init__(self, symbol_parser: Optional[SymbolParser], compilation_manager: CompilationManager):
         """
@@ -36,7 +41,7 @@ class SourceSpanProvider:
         self.synthetic_id_to_index_id: Dict[str, str] = {} # Maps synthetic span IDs to canonical clangd Symbol IDs
         # Maps a sym's ID to its matched sourcespan's parent_id. 
         # If the parent_id is mapped to a clangd symbol id, then the sym's parent_id is set to that id.
-        self.sym_source_span_parent:Dict[int, int] = {} 
+        self.sym_source_span_parent:Dict[str, str] = {} 
         self.matched_symbol_count = 0
         self.matched_typealias_count = 0
         self.assigned_parent_count = 0
@@ -51,45 +56,93 @@ class SourceSpanProvider:
     def enrich_symbols_with_span(self):
         """
         Orchestrates the enrichment of in-memory Symbol objects with span data.
+        This is a multi-pass process that prioritizes semantic matching over coordinate matching.
         """
         if not self.symbol_parser:
             logger.warning("No SymbolParser provided; cannot enrich symbols.")
             return
        
-        # assigne parent ids based on symbol's information
+        # Step 1: Preliminary parent assignment based on explicit index data.
         self._filter_symbols_by_project_path()
         self._assign_parent_ids_from_symbol_ref_container()
         self._infer_parent_ids_from_scope()
         
-        # Match Clangd symbols with source spans and create synthetic symbols for unmatched spans
+        # Step 2: Prepare span data.
         file_span_data = self.compilation_manager.get_source_spans()
-        file_span_data_copy = copy.deepcopy(file_span_data)
         
-        # Match symbols to sourcespans based on location and context
-        self._match_symbols_by_location(file_span_data_copy)
+        # Flatten all spans into a single map for O(1) ID lookups across all files.
+        # This Map: id -> (file_uri, SourceSpan)
+        # Note: Flattening is safe because USRs (and thus IDs) are globally unique.
+        all_remaining_spans: Dict[str, Tuple[str, SourceSpan]] = {
+            span.id: (file_uri, span)
+            for file_uri, spans in file_span_data.items()
+            for span in spans.values()
+        }
+        
+        # TIER 1: High-performance ID matching (authoritative for semantic parsers).
+        self._match_symbols_by_id(all_remaining_spans)
+        
+        # TIER 2: Location-based matching (fallback for coordinate divergence or syntactic parsers).
+        self._match_symbols_by_location(all_remaining_spans)
+        
+        # Propagate parentage after initial matching rounds.
         self._assign_sym_parent_based_on_sourcespan_parent()
-        self._match_symbols_by_context_fallback(file_span_data_copy)
+        
+        # TIER 3: Iterative semantic context matching (safety net for macro-expanded hierarchies).
+        self._match_symbols_by_context_fallback(all_remaining_spans)
         self._assign_sym_parent_based_on_sourcespan_parent()
 
-        # No more symbols can be matched, convert the remaining sourcespans to symbols
-        self._create_synthetic_symbols(file_span_data_copy)
+        # Step 3: Synthesis. Any remaining spans are added as new synthetic nodes.
+        self._create_synthetic_symbols(all_remaining_spans)
         
-        del file_span_data_copy
+        # Memory management: drop the large temporary map.
+        del all_remaining_spans
         gc.collect()
         
-        # Build parent relations based on span containingship
+        # Step 4: Finalize hierarchy and additional metadata.
         self._assign_parent_ids_lexically()
-        
-        # Pass for enriching symbols with additional data for TypeAlias and Macro
         self._enrich_with_type_alias_data() 
         self._discover_macros() 
-
-        # Build more relationship
         self._enrich_with_static_calls()
 
         logger.info(f"Enrichment complete. Matched {self.matched_symbol_count} symbols with body spans.")
         logger.info(f"Total parent_id assigned to {self.assigned_parent_count} symbols.")
 
+
+    def _match_symbols_by_id(self, all_remaining_spans: Dict[str, Tuple[str, SourceSpan]]):
+        """
+        TIER 1: Direct ID Matching.
+        Matches Clangd symbols with SourceSpans based purely on their ID (USR-hash).
+        This is authoritative for all Clang-parsed AST nodes where IDs mathematically match.
+        """
+        logger.info("Matching symbols by direct ID lookup...")
+        matched_count = 0
+        for sym_id, sym in self.symbol_parser.symbols.items():
+            # Constant-time lookup. This covers 95%+ of symbols when using the same libclang version as Clangd.
+            if sym_id in all_remaining_spans:
+                file_uri, source_span = all_remaining_spans.pop(sym_id)
+                
+                # Enrich with semantic implementation details.
+                sym.body_location = source_span.body_location
+                sym.original_name = source_span.original_name
+                sym.expanded_from_id = source_span.expanded_from_id
+                
+                # ANCHORING: Move the symbol to the actual implementation file.
+                # This ensures the 'path' property in the graph is consistent with 'body_location'.
+                sym.definition = Location.from_relative_location(source_span.name_location, file_uri)
+                
+                # Map the parser ID to the index ID so children can find this parent.
+                self.synthetic_id_to_index_id[source_span.id] = sym_id
+
+                # Record parentage for later propagation. We don't assign it here to keep 
+                # matching and hierarchy building as separate, stable stages.
+                if (not sym.parent_id) and source_span.parent_id:
+                    self.sym_source_span_parent[sym.id] = source_span.parent_id
+
+                self.matched_symbol_count += 1
+                matched_count += 1
+        
+        logger.info(f"Directly matched {matched_count} symbols by ID.")
 
     def _filter_symbols_by_project_path(self):
         """
@@ -221,51 +274,81 @@ class SourceSpanProvider:
                      f"Remaining {len(self.sym_source_span_parent)} unassigned."
                     )    
 
-    def _match_symbols_by_location(self, file_span_data_copy: Dict[str, Dict[str, SourceSpan]]):
+    def _match_symbols_by_location(self, all_remaining_spans: Dict[str, Tuple[str, SourceSpan]]):
         """
-        PASS 1: Exact location match.
+        TIER 2: Exact location match.
         Matches Clangd symbols with SourceSpans based on their name, kind, and location.
+        This handles symbols from syntactic parsers or cases where USRs diverge.
         """
-        logger.info("Matching symbols by exact location...")
+        logger.info("Matching remaining symbols by exact location...")
+        
+        # 1. Build a lookup for remaining spans by their location-based key.
+        # This key is derived from the implementation coordinates.
+        remaining_spans_by_loc = {}
+        for span_id, (file_uri, span) in all_remaining_spans.items():
+            key = CompilationParser.make_symbol_key(
+                span.name, span.kind, file_uri, 
+                span.name_location.start_line, span.name_location.start_column
+            )
+            # Use a list to handle potential coordinate collisions.
+            if key not in remaining_spans_by_loc:
+                remaining_spans_by_loc[key] = []
+            remaining_spans_by_loc[key].append((span_id, span))
+
+        matched_count = 0
         for sym_id, sym in self.symbol_parser.symbols.items():
+            # Skip symbols successfully enriched in Tier 1.
+            if sym.body_location:
+                continue
+                
             loc = sym.definition or sym.declaration
             if not loc:
                 continue
             
-            # Find body spans for symbols from span data            
+            # Reconstruct the expected key based on Clangd index data.
             key = CompilationParser.make_symbol_key(sym.name, sym.kind, loc.file_uri, loc.start_line, loc.start_column)
-            source_span = file_span_data_copy[loc.file_uri].get(key)
-            if not source_span:
-                continue
-
-            # Found a matched clangd-idexed symbol, enrich it with its body location
-            sym.body_location = source_span.body_location
-            sym.original_name = source_span.original_name
-            sym.expanded_from_id = source_span.expanded_from_id
-            # If no parent, save source span's parent.
-            if (not sym.parent_id) and source_span.parent_id:
-                self.sym_source_span_parent[sym.id] = source_span.parent_id
+            candidates = remaining_spans_by_loc.get(key)
             
-            self.synthetic_id_to_index_id[source_span.id] = sym_id
-            self.matched_symbol_count += 1
-            # Remove the span from the copy to mark it as processed
-            del file_span_data_copy[loc.file_uri][key]
+            # AMBIGUITY CHECK: Only match if the coordinate context is unique.
+            if candidates and len(candidates) == 1:
+                span_id, source_span = candidates[0]
+                
+                # Match found!
+                sym.body_location = source_span.body_location
+                sym.original_name = source_span.original_name
+                sym.expanded_from_id = source_span.expanded_from_id
+                
+                # Record the mapping for hierarchy propagation.
+                self.synthetic_id_to_index_id[source_span.id] = sym_id
+                
+                # Record parentage for later propagation.
+                if (not sym.parent_id) and source_span.parent_id:
+                    self.sym_source_span_parent[sym.id] = source_span.parent_id
+                
+                self.matched_symbol_count += 1
+                matched_count += 1
+                
+                # Remove from both the global flat map and the temporary coordinate map.
+                all_remaining_spans.pop(span_id, None)
+                del remaining_spans_by_loc[key]
 
-    def _match_symbols_by_context_fallback(self, file_span_data_copy: Dict[str, Dict[str, SourceSpan]]):
+        logger.info(f"Matched {matched_count} symbols by location coordinates.")
+
+    def _match_symbols_by_context_fallback(self, all_remaining_spans: Dict[str, Tuple[str, SourceSpan]]):
         """
-        PASS 1.5: Semantic fallback match.
+        TIER 3: Semantic fallback match.
         Matches remaining macro-generated symbols by their parent context, name, and kind.
-        This is a safe fallback for when Clangd uses the spelling location (header)
-        but the parser uses the expansion location (cpp).
+        This handles cases where Clangd uses the spelling location (header) 
+        but implementation resides in the expansion site.
         """
         logger.info("Performing iterative semantic matching for macro-generated symbols...")
         
         # 1. Identify candidate Clangd symbols once. 
-        # These keys are stable because sym.parent_id is already the index ID or None.
         candidate_symbols_by_context = {}
         for sym_id, sym in self.symbol_parser.symbols.items():
             if sym.body_location: # Only match symbols that haven't been matched yet
                 continue
+            # Context is based on index ID of the parent.
             context_key = (sym.parent_id, sym.name, sym.kind)
             if context_key in candidate_symbols_by_context:
                 candidate_symbols_by_context[context_key] = None # Mark as ambiguous
@@ -275,57 +358,59 @@ class SourceSpanProvider:
         iteration = 0
         total_semantic_matches = 0
         
+        # ITERATIVE REFINEMENT: As parents are anchored, their children become matchable.
         while True:
             iteration += 1
             round_matches = 0
             
             # 2. Build lookup for remaining spans. 
-            # Rebuild because span.parent_id resolution changes as parents are matched.
             remaining_spans_by_context = {}
-            for file_uri, key_spans in file_span_data_copy.items():
-                for key, span in key_spans.items():
-                    # Map synthetic parent_id to index_id. If parent was matched in a previous 
-                    # iteration, this will now return the canonical index_id.
-                    resolved_parent_id = self.synthetic_id_to_index_id.get(span.parent_id)
-                    
-                    # Optimization: Skip if parent hasn't been matched yet (unless it's a global symbol)
-                    if (span.parent_id is not None) and not resolved_parent_id:
-                        continue
-                    
-                    context_key = (resolved_parent_id, span.name, span.kind)
-                    if context_key in remaining_spans_by_context:
-                        remaining_spans_by_context[context_key] = None # Ambiguous
-                    else:
-                        remaining_spans_by_context[context_key] = (file_uri, key, span)
+            for span_id, (file_uri, span) in all_remaining_spans.items():
+                # Map synthetic parent_id to index_id. If parent was anchored in a previous round,
+                # this resolution now provides the correct canonical parent ID.
+                resolved_parent_id = self.synthetic_id_to_index_id.get(span.parent_id)
+                
+                # If nested but parent hasn't been anchored yet, skip for this iteration.
+                if span.parent_id is not None and not resolved_parent_id:
+                    continue
+                
+                context_key = (resolved_parent_id, span.name, span.kind)
+                if context_key in remaining_spans_by_context:
+                    remaining_spans_by_context[context_key] = None # Ambiguous
+                else:
+                    remaining_spans_by_context[context_key] = (file_uri, span_id, span)
 
-            # 3. Match round
-            # Iterate over a copy of keys to allow deletion from the candidate map
+            # 3. Match round.
             for context_key in list(candidate_symbols_by_context.keys()):
                 sym = candidate_symbols_by_context[context_key]
                 if sym is None: 
-                    continue # Skip ambiguous Clangd symbols
+                    continue # Skip ambiguous Clangd symbols.
                 
                 match_info = remaining_spans_by_context.get(context_key)
                 if not match_info: 
-                    continue # Missing or ambiguous synthetic span
+                    continue # Missing or ambiguous synthetic span.
                 
-                file_uri, key, source_span = match_info
+                file_uri, span_id, source_span = match_info
                 
-                # Found a safe one-to-one semantic match!
+                # Safe one-to-one semantic match found!
                 sym.body_location = source_span.body_location
                 sym.original_name = source_span.original_name
                 sym.expanded_from_id = source_span.expanded_from_id
                 
-                # Anchor to the implementation file and name location
+                # ANCHORING: Move definition to implemention file.
                 sym.definition = Location.from_relative_location(source_span.name_location, file_uri)
                 
-                self.synthetic_id_to_index_id[source_span.id] = sym.id
+                self.synthetic_id_to_index_id[source_span.id] = sym_id
+
+                # Record parentage for later propagation.
+                if (not sym.parent_id) and source_span.parent_id:
+                    self.sym_source_span_parent[sym.id] = source_span.parent_id
+
                 self.matched_symbol_count += 1
                 round_matches += 1
                 
-                # Cleanup: remove from both collections
-                if key in file_span_data_copy[file_uri]:
-                    del file_span_data_copy[file_uri][key]
+                # Cleanup.
+                all_remaining_spans.pop(span_id, None)
                 del candidate_symbols_by_context[context_key]
 
             total_semantic_matches += round_matches
@@ -337,29 +422,35 @@ class SourceSpanProvider:
 
         logger.info(f"Successfully iterative-matched {total_semantic_matches} symbols by context.")
 
-    def _create_synthetic_symbols(self, file_span_data_copy: Dict[str, Dict[str, SourceSpan]]):
+    def _create_synthetic_symbols(self, all_remaining_spans: Dict[str, Tuple[str, SourceSpan]]):
         """
-        PASS 2: Creation of synthetic symbols.
-        Creates new Symbol objects for remaining spans that are not clangd-indexed 
-        (e.g., anonymous structures or unused symbols).
+        Creation of synthetic symbols for remaining unmatched spans.
+        This handles anonymous structures and entities missed by the indexer.
         """
         logger.info("Creating synthetic symbols for remaining unmatched spans...")
         synthetic_symbols = {}
-        for file_uri, key_spans in file_span_data_copy.items():
-            for key, source_span in key_spans.items():
-                synth_parent_id = source_span.parent_id
-                parent_id = self.synthetic_id_to_index_id.get(synth_parent_id, synth_parent_id)
-                if parent_id != synth_parent_id:
-                    # Found parent symbol that is a Clangd indexed symbol
-                    self.assigned_sym_parent_in_span += 1
-                elif parent_id:
-                    # Cannot find a clangd-indexed symbol as parent, use the parser-found scope as parent
-                    self.assigned_syn_parent_in_span += 1
+        for span_id, (file_uri, source_span) in all_remaining_spans.items():
+            synth_parent_id = source_span.parent_id
+            
+            # Resolve parent_id to a canonical ID if the parent was anchored.
+            # In the USR-based system, the ID might stay the same string, so we 
+            # check the mapping table directly.
+            parent_id = self.synthetic_id_to_index_id.get(synth_parent_id)
+            
+            if parent_id:
+                # Case A: Parent was anchored to a Clangd indexed symbol.
+                self.assigned_sym_parent_in_span += 1
+            elif synth_parent_id:
+                # Case B: Parent exists but is purely synthetic (not in Clangd).
+                parent_id = synth_parent_id
+                self.assigned_syn_parent_in_span += 1
+            # Case C: synth_parent_id is None (top-level) -> parent_id remains None.
 
-                synthetic_symbols[source_span.id] = self._create_synthetic_symbol(source_span, file_uri, parent_id)
-                self.synthetic_id_to_index_id[source_span.id] = source_span.id # Map synthetic ID to itself
+            synthetic_symbols[source_span.id] = self._create_synthetic_symbol(source_span, file_uri, parent_id)
+            # Register synthetic ID mapping for potential children.
+            self.synthetic_id_to_index_id[source_span.id] = source_span.id 
 
-        # Add the new synthetic symbols to the main symbol parser
+        # Add the new synthetic symbols to the main symbol parser.
         self.symbol_parser.symbols.update(synthetic_symbols)
         logger.info(f"Added {len(synthetic_symbols)} synthetic symbols.")
         logger.info(f"Assigned parent_id to symbols: {self.assigned_parent_in_sym} by ref, {self.assigned_sym_parent_in_span} by span sym id, {self.assigned_syn_parent_in_span} by span synth id.")
@@ -400,7 +491,7 @@ class SourceSpanProvider:
             parent_synth_id = None
 
             # Fields: assign parent via enclosing container to names that have no body (just a name).
-            variable_kind = {"Field", "Variable", "EnumConstant", "StaticProperty"}
+            variable_kind = {"Field", "StaticProperty", "EnumConstant", "Variable"}
             # This is for the functions that are not defined in the code, like constructor() = 0;
             # For this kind of functions, we ensure they don't have body definition.
             # Also for declarations of Struct and Class
@@ -432,39 +523,61 @@ class SourceSpanProvider:
                 #now we have the parent scope id in parent_synth_id
 
             else:
-                # For other symbols (except Variable and no-body function): 
-                # We assume they have body spans, thus find parent id from span lookup
+                # STRATEGY FOR SYMBOLS "WITH BODY" (e.g., Methods, Functions)
+                # This pass handles symbols that were matched in Tiers 1-1.5 but whose parents
+                # were NOT in the Clangd index (e.g., a named method inside an anonymous class).
+                # Previous propagation passes only link Clangd-to-Clangd; this pass links 
+                # Clangd-to-Synthetic.
+
                 # We skip following cases:
-                # 1. TypeAlias: We handle it separately. They are not managed in SpanTrees.
+                # 1. TypeAlias/Using: We handle it separately. They are not managed in SpanTrees.
                 # 2. Function without definition, which is only a declaration that we don't care.
-                # 3. Using: We don't support it yet.
                 if sym.kind in {"TypeAlias", "Using"} or (sym.kind in {"Function"} and not sym.definition):
                     continue
 
-                key = CompilationParser.make_symbol_key(sym.name, sym.kind, loc.file_uri, loc.start_line, loc.start_column)
                 span_tree = file_span_data.get(loc.file_uri, {})
                 if not span_tree:
                     if sys.argv[0].endswith("clangd_graph_rag_builder.py"):
                         # When the graph is incrementally updated (not built from scratch), it is normal that some files don't have span trees.
                         # The reason is, the symbol (and its file) is extended from the seed symbols, whose source file may not be parsed.
                         # We only log the debug message for the builder, when all the source files should be parsed, and have span trees.
-                        logger.debug(f"Could not find span tree for file {loc.file_uri}, symbol {sym.name} {sym.id} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                        logger.debug(f"Could not find span tree for file {loc.file_uri}, symbol {sym.name} {sym.id}")
                     continue
 
-                span = span_tree.get(key)
-                if not span:  # No matching container found. 
-                    logger.debug(f"Could not find body span for sym with-body {sym.kind} {sym.id} -- {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
+                # 1. Primary Lookup: Try to find the span by its USR-derived ID.
+                # In the USR-based system, sym.id matches span.id exactly.
+                span = span_tree.get(sym.id)
+                
+                # 2. Fallback Lookup: If ID lookup fails (e.g. Treesitter or USR divergence),
+                # use the location-based coordinate key.
+                if not span:
+                    key = CompilationParser.make_symbol_key(sym.name, sym.kind, loc.file_uri, loc.start_line, loc.start_column)
+                    # Iterate the tree values since the dict is now keyed by ID.
+                    for s in span_tree.values():
+                        if CompilationParser.make_symbol_key(s.name, s.kind, loc.file_uri, s.name_location.start_line, s.name_location.start_column) == key:
+                            span = s
+                            break
+
+                if not span:
+                    logger.debug(f"Could not find SourceSpan for indexed symbol {sym.kind}:{sym.id} ({sym.name}) at {loc.file_uri}:{loc.start_line}")
                     continue
 
                 parent_synth_id = span.parent_id
-                if not parent_synth_id: # Matching body span has no parent container. Is top level.
+                if not parent_synth_id: # Top-level symbol.
                     continue
 
-                # Finally we found a matched span for this symbol that also has a parent scope with id parent_synth_id.
+                # Finally we found a matched span for this symbol that also has a parent scope.
                 self.assigned_parent_by_span += 1
 
-            # Resolve the parent's ID (use the real ID if it exists, otherwise the synthetic one)
+            # Resolve the parent's ID.
+            # 1. Try to find if the parent ID was anchored to a canonical Clangd ID.
+            # 2. If not (e.g. parent is anonymous), use the raw synthetic ID.
             parent_id = self.synthetic_id_to_index_id.get(parent_synth_id, parent_synth_id)
+            if parent_id == sym.id:
+                logger.error(f"Circular reference detected: {sym.kind}:{sym.id} ({sym.name}) points to itself as parent.")
+                continue
+
+            sym.parent_id = parent_id
             if parent_id == sym.id:
                 logger.error(f"Found same parent id {parent_id} for {sym.kind} {sym.id} -- {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
                 continue

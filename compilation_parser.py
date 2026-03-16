@@ -37,6 +37,7 @@ logger.setLevel(logging.DEBUG)
 # ============================================================
 @dataclass(frozen=True, slots=True)
 class SourceSpan:
+    """Represents a lexically defined entity in the source code."""
     name: str
     kind: str
     lang: str
@@ -66,6 +67,7 @@ class SourceSpan:
 
 @dataclass(frozen=True, slots=True)
 class MacroSpan:
+    """Represents a preprocessor #define directive."""
     id: str # Synthetic: hash(name + file_uri + name_location)
     name: str
     lang: str
@@ -77,6 +79,7 @@ class MacroSpan:
 
 @dataclass(frozen=True, slots=True)
 class TypeAliasSpan:
+    """Represents a typedef or using alias."""
     id: str # USR-derived ID for the aliaser
     file_uri: str # File URI where this TypeAliasSpan was found
     lang: str
@@ -115,13 +118,13 @@ class _ClangWorkerImpl:
         self.index = clang.cindex.Index.create()
         self.entry = None
         # Data strucutures to return: 
-        #   - {(file_uri, tu_hash) → {key → SourceSpan}}
+        #   - {(file_uri, tu_hash) → {id → SourceSpan}}
         self.span_results: Dict[Tuple[str, str], Dict[str, SourceSpan]] = None
         #   - {(including_file, included_file)}
         self.include_relations: Set[IncludeRelation] = None
         #   - {(caller_id, callee_id)}
         self.static_call_relations: Set[Tuple[str, str]] = None
-        #   - {file_uri → {key → TypeAliasSpan}}
+        #   - {file_uri → {id → TypeAliasSpan}}
         self.type_alias_spans: Dict[str, TypeAliasSpan] = {}
         #   - {id → MacroSpan}
         self.macro_spans: Dict[str, MacroSpan] = {}
@@ -321,7 +324,7 @@ class _ClangWorkerImpl:
         self.macro_spans[synthetic_id] = span
 
     def _process_generic_node(self, node, file_name):
-
+        """Processes generic AST nodes like Functions, Classes, and Structs."""
         name_start_line, name_start_col = self._get_symbol_name_location(node)
         body_start_line, body_start_col = node.extent.start.line - 1, node.extent.start.column - 1
         body_end_line, body_end_col = node.extent.end.line - 1, node.extent.end.column - 1
@@ -329,29 +332,26 @@ class _ClangWorkerImpl:
 
         kind = self._convert_node_kind_to_index_kind(node)
         
-        # Determine if this is an anonymous composite type (Enum, Struct, Union, Class)
-        # libclang often uses pattern like "(unnamed enum at ...)" for spelling
-        is_anonymous = node.spelling.startswith("(unnamed") or not node.spelling
-        if is_anonymous and node.kind.name in ClangParser.NODE_KIND_FOR_COMPOSITE_TYPES:
-            usr = node.get_usr()
-            # Use USR as name for debug info and hash USR for ID to match Clangd's Type bridge
-            node_name = usr
-            synthetic_id = CompilationParser.hash_usr_to_id(usr) 
-            node_key = synthetic_id
+        # IDENTITY STRATEGY: Primary identity via USR-hash
+        # This hash matches the Clangd index ID, enabling O(1) matching in Tier 1.
+        usr = node.get_usr()
+        if usr:
+            synthetic_id = CompilationParser.hash_usr_to_id(usr)
         else:
-            node_name = node.spelling
-            node_key = CompilationParser.make_symbol_key(node_name, kind, file_uri, name_start_line, name_start_col)
+            # Fallback for nodes without USR (extremely rare for definitions).
+            # These will naturally fail Tier 1 ID matching and use Tier 2 Location matching.
+            node_key = CompilationParser.make_symbol_key(node.spelling, kind, file_uri, name_start_line, name_start_col)
             synthetic_id = CompilationParser.make_synthetic_id(node_key)
 
-        if node_key in self.span_results[(file_uri, self._tu_hash)]: 
-            # Same node can be defined in same header file of multiple TUs that have different TU hash, but we only want to keep one copy - for our purpose.
-            # In the same TU, it is also possible to meet same node more than once, e.g., typedef struct { ... } A;
-            #logger.warning(f"Duplicate node key: {node_key} for span {self.key_to_span[node_key]} when parsing {node.translation_unit.spelling}")
-            #pass
+        # ANONYMITY HANDLING: Use USR as name for debug info when no spelling is available.
+        is_anonymous = not node.spelling or node.spelling.contains("(unnamed") or node.spelling.startswith("(anonymous")
+        node_name = usr if (is_anonymous and usr) else node.spelling
+
+        # Deduplication check using the final ID.
+        if synthetic_id in self.span_results[(file_uri, self._tu_hash)]: 
             return  
 
         parent_id = self._get_parent_id(node)
-
         original_name, expanded_from_id = self._get_macro_causality(node, file_uri)
 
         span = SourceSpan(
@@ -365,14 +365,14 @@ class _ClangWorkerImpl:
             original_name=original_name,
             expanded_from_id=expanded_from_id
         )
-        self.span_results[(sys.intern(file_uri), self._tu_hash)][node_key] = span
+        # Result dictionary is now keyed by ID.
+        self.span_results[(sys.intern(file_uri), self._tu_hash)][synthetic_id] = span
 
     def _process_type_alias_node(self, node, file_name):
+        """Processes typedef and using declarations."""
         # Scope Filtering: Only process aliases at global, namespace, or class/struct scopes.
         semantic_parent = node.semantic_parent
         if semantic_parent and semantic_parent.kind.name in ClangParser.NODE_KIND_CALLERS:
-            #logger.debug(f"Skipping TypeAlias at {file_name}:{node.location.line}:{node.location.column} in function {semantic_parent.spelling}.")
-            # Ignore function-local aliases. It does not provide much value.
             return
 
         # Extract Aliaser Info
@@ -383,12 +383,11 @@ class _ClangWorkerImpl:
         file_uri = f"file://{file_name}"
         aliaser_id = CompilationParser.hash_usr_to_id(node.get_usr())
         scope = self._get_fully_qualified_scope(semantic_parent)
-        parent_id = self._get_parent_id(node) # Use existing helper for parent_id
+        parent_id = self._get_parent_id(node)
 
         # Next, resolve Aliasee Info. 
-        # We only care about those aliases that have a node in the graph.
         underlying_type = node.underlying_typedef_type
-        aliased_canonical_spelling = underlying_type.get_canonical().spelling  #can be empty ''
+        aliased_canonical_spelling = underlying_type.get_canonical().spelling
         aliased_type_id = None
         aliased_type_kind = None
         is_aliasee_definition = False
@@ -396,61 +395,32 @@ class _ClangWorkerImpl:
         aliasee_decl_cursor = underlying_type.get_declaration()
 
         if aliasee_decl_cursor.kind.name not in  {"NO_DECL_FOUND", "TEMPLATE_TEMPLATE_PARAMETER"}:
-            # is_aliasee_definition is used for alias declaration reconciliation. An aliasee having definition will override the same aliasee without definition.
-            # The latter can be only a forward declaration of an alias, rather than a real alias definition.
             is_aliasee_definition = aliasee_decl_cursor.is_definition()
             aliased_type_kind = self._convert_node_kind_to_index_kind(aliasee_decl_cursor)
 
-            # If the target aliasee definition is out of the project, set aliased_type_id to None, so that we don't create a relationship to it
-            # Or if it has no location file (like a primitive, or for unknown reason), we don't need to create a relationship to it
             if aliasee_decl_cursor.location.file is None:
                 aliased_type_id = None
-
             else:
-                # If it has a location, let's get its id if it is defined in the project
-                # We should use USR-derived id for all declarations, but since we use synthetic key for SourceSpans, 
-                # we will keep it for now for data_structure/class_structure types, in order to be mapped in graph enrichment.
-                # (We use synthetic id in order to support anonymous structures. 
-                # TODO: we should consider to use USR-derived id as much as possible.
-                if aliasee_decl_cursor.kind.name in ClangParser.NODE_KIND_FOR_COMPOSITE_TYPES:
-                    # Aliasee is a named user-defined composite type (struct, class, enum, union)
-                    # Use synthetic ID for consistency with SourceSpan handling (temporarily)
-                    is_anonymous = aliasee_decl_cursor.spelling.startswith("(unnamed") or not aliasee_decl_cursor.spelling
-                    if is_anonymous:
-                        usr = node.get_usr()
-                        aliased_type_id = CompilationParser.hash_usr_to_id(usr) 
-                    else:
-                        aliasee_name_line, aliasee_name_col = self._get_symbol_name_location(aliasee_decl_cursor)
-                        aliased_type_id = CompilationParser.make_synthetic_id(
-                            CompilationParser.make_symbol_key(
-                                aliasee_decl_cursor.spelling,
-                                aliased_type_kind,
-                                f"file://{os.path.abspath(aliasee_decl_cursor.location.file.name)}",
-                                aliasee_name_line,
-                                aliasee_name_col
-                            )
-                        )
+                aliased_usr = aliasee_decl_cursor.get_usr()
+                if aliased_usr:
+                    aliased_type_id = CompilationParser.hash_usr_to_id(aliased_usr)
                 else:
-                    # Other aliasees are like ClangParser.NODE_KIND_FOR_TYPE_ALIAS
-                    # We don't use synthetic id for them, since we directly use USR-derived id for them in parsing.
-                    aliased_type_id = CompilationParser.hash_usr_to_id(aliasee_decl_cursor.get_usr())
+                    # Fallback for aliasee without USR (e.g., anonymous entities in some contexts)
+                    aliasee_name_line, aliasee_name_col = self._get_symbol_name_location(aliasee_decl_cursor)
+                    aliased_type_id = CompilationParser.make_synthetic_id(
+                        CompilationParser.make_symbol_key(
+                            aliasee_decl_cursor.spelling,
+                            aliased_type_kind,
+                            f"file://{os.path.abspath(aliasee_decl_cursor.location.file.name)}",
+                            aliasee_name_line,
+                            aliasee_name_col
+                        )
+                    )
 
-                # If it is not defined in the project, set aliased_type_id to None. 
-                # We don't want to create a relationship to a type that is out of the project.
+                # Project path filtering
                 file_path = os.path.abspath(aliasee_decl_cursor.location.file.name)
                 if not file_path.startswith(self.project_path): 
                     aliased_type_id = None
-
-        else: 
-        # 1) NO_DECL_FOUND cases:
-        #    Aliasee is a primitive type expression (e.g., int*, int) or a dependent type (e.g., typename MyClass<T>::nested_alias)
-        #    For case of dependent type, the aliased_canonical_spelling is empty "" since it is not yet instantiated. 
-        # 2) TEMPLATE_TEMPLATE_PARAMETER:
-        #    Aliasee is a template template parameter 
-        #    template<template<class> class Op>
-        #    struct X { using type = Op<int>; };
-        # In any case of the above, we don't try to extract aliasee's info.
-            pass
 
         # Store TypeAliasSpan
         original_name, expanded_from_id = self._get_macro_causality(node, file_uri)
@@ -471,29 +441,20 @@ class _ClangWorkerImpl:
             expanded_from_id=expanded_from_id
         )
         
-        # Reconciliation logic: keep the span whose aliasee is a definition
+        # Reconciliation logic: prioritize the span whose aliasee is a definition.
         existing_span = self.type_alias_spans.get(aliaser_id)
         if existing_span:
             if new_type_alias_span.is_aliasee_definition and not existing_span.is_aliasee_definition:
                 self.type_alias_spans[aliaser_id] = new_type_alias_span
-            # If both are definitions or neither are, randomly choose one (keep existing)
         else:
             self.type_alias_spans[aliaser_id] = new_type_alias_span
 
     def _should_process_node(self, node, file_name) -> bool:
-        """
-        Avoid redundant node processing across identical TU contexts using TU hash and exact header file path.
-        """
-        #return True
-        # Don't skip main file, the rest are headers
+        """Avoid redundant node processing across identical TU contexts."""
         if file_name != self.entry['file']:              
             if self._processed_global_headers and file_name in self._processed_global_headers:
                 return False
-
-            # For this TU, we record the header that is not in the global header cache. 
-            # We don't use local header cache to avoid redundant processing, since this header has not been processed yet.
             self._local_header_cache.add(file_name)
-
         return True
 
     # --------------------------------------------------------
@@ -501,15 +462,7 @@ class _ClangWorkerImpl:
     # --------------------------------------------------------
     
     def _get_parent_id(self, node) -> Optional[str]:
-        """
-        Get parent_id based on semantic parent.
-        Uses the same span-key system so that parent IDs match real SourceSpan IDs.
-        
-        Examples:
-        - CXX_METHOD   → class
-        - FIELD_DECL   → class/struct
-        - FUNCTION_DECL outside class → TU → no parent_id
-        """
+        """Get parent_id based on semantic parent using USR hashing."""
         parent = node.semantic_parent
         if not parent or parent.kind == clang.cindex.CursorKind.TRANSLATION_UNIT or parent.kind == clang.cindex.CursorKind.LINKAGE_SPEC:
             return None
@@ -518,32 +471,22 @@ class _ClangWorkerImpl:
         if not file_name:
             return None
         
-        # We don't catch Namespace nodes for the moment...
         if parent.kind.name not in ClangParser.NODE_KIND_FOR_BODY_SPANS:
             if parent.kind.name not in "ClangParser.NODE_KIND_NAMESPACE": 
                 logger.error(f"Parent {parent.kind.name} {parent.spelling} at {parent.location}) of node {node.spelling} at {node.location} is not in NODE_KIND_FOR_BODY_SPANS")
                 return None
 
+        # Resolve parent ID via USR hashing. This ensures children link to the semantic parent ID.
+        usr = parent.get_usr()
+        if usr:
+            return CompilationParser.hash_usr_to_id(usr)
+            
+        # Fallback for parent without USR
         file_uri = f"file://{os.path.abspath(file_name)}"
         line, col = self._get_symbol_name_location(parent)
         parent_kind = self._convert_node_kind_to_index_kind(parent)
-        
-        is_anonymous = not parent.spelling or parent.spelling.startswith("(unnamed") 
-        if is_anonymous and parent.kind.name in ClangParser.NODE_KIND_FOR_COMPOSITE_TYPES:
-            usr = parent.get_usr()
-            synthetic_id = CompilationParser.hash_usr_to_id(usr) 
-            parent_key = synthetic_id
-        else:
-            parent_key = CompilationParser.make_symbol_key(parent.spelling, parent_kind, file_uri, line, col)
-
-        # Parent span should be created earlier. Return existing ID to its semantic children as parent id. Otherwise, return None.
-        if (file_uri, self._tu_hash) not in self.span_results:
-            return None
-        parent_span = self.span_results[(file_uri, self._tu_hash)].get(parent_key)
-        if not parent_span:
-            return None
-        return parent_span.id
-        
+        parent_key = CompilationParser.make_symbol_key(parent.spelling, parent_kind, file_uri, line, col)
+        return CompilationParser.make_synthetic_id(parent_key)
 
     def _get_symbol_name_location(self, node):
         """Return zero-based (line, column) for symbol's name."""
@@ -553,7 +496,6 @@ class _ClangWorkerImpl:
                 try:
                     file, line, col, _ = loc.get_expansion_location()
                 except AttributeError:
-                    # older/newer libclang variations
                     continue
                 if file and file.name.startswith(self.project_path):
                     return (line - 1, col - 1)
@@ -565,10 +507,7 @@ class _ClangWorkerImpl:
             return (node.location.line - 1, node.location.column - 1)
 
     def _get_macro_causality(self, node, file_uri: str) -> Tuple[Optional[str], Optional[str]]:
-        """
-        Determines if a symbol node was generated by a macro.
-        Returns (original_name, expanded_from_id).
-        """
+        """Determines if a symbol node was generated by a macro."""
         instantiations = self.instantiations.get(file_uri, [])
         if not instantiations:
             return None, None
@@ -576,19 +515,12 @@ class _ClangWorkerImpl:
         node_extent = node.extent
 
         def extent_contains(outer, inner):
-            # Check if inner extent is fully contained within outer extent
-            if inner.start.line < outer.start.line:
-                return False
-            if inner.end.line > outer.end.line:
-                return False
-            if inner.start.line == outer.start.line and inner.start.column < outer.start.column:
-                return False
-            if inner.end.line == outer.end.line and inner.end.column > outer.end.column:
-                return False
+            if inner.start.line < outer.start.line: return False
+            if inner.end.line > outer.end.line: return False
+            if inner.start.line == outer.start.line and inner.start.column < outer.start.column: return False
+            if inner.end.line == outer.end.line and inner.end.column > outer.end.column: return False
             return True
 
-        # Find the outermost macro instantiation that encloses the node.
-        # This aligns with the "top-level" expansion rule.
         enclosing_inst = None
         for inst in instantiations:
             if extent_contains(inst.extent, node_extent):
@@ -610,8 +542,6 @@ class _ClangWorkerImpl:
         if not def_file.startswith(self.project_path):
             return None, None
 
-        # Only mark symbols that are DEFINITIONS.
-        # This avoids marking every reference inside a macro as expanded from it.
         if not node.is_definition():
             return None, None
 
@@ -653,46 +583,25 @@ class _ClangWorkerImpl:
             return ""
 
     def _get_fully_qualified_scope(self, node: clang.cindex.Cursor) -> str:
-        """
-        Recursively builds the fully qualified scope string for a given cursor.
-        e.g., "MyNamespace::MyClass::"
-        """
+        """Builds the fully qualified scope string for a given cursor."""
         scope_parts = []
-        # Use semantic_parent to follow the logical scope (where it's defined)
-        # rather than the lexical parent (where it's written).
         current = node.semantic_parent
 
         while current and current.kind != clang.cindex.CursorKind.TRANSLATION_UNIT:
-            # 1. Check if the current node is a scope-defining construct. 
-            # It includes NAMESPACE, CLASS, STRUCT, UNION, ENUM. Does not include FUNCTION/METHOD.
-            # Note: We compare against the CursorKind objects directly. 
             if current.kind.name in ClangParser.NODE_KIND_FOR_SCOPES:
-                
-                # 2. Handle anonymous scopes (like anonymous structs/unions)
                 name = current.spelling
                 if name:
                     scope_parts.append(name)
                 else:  
-                    # Clang.cindex actually crafts a spelling name for anonymous entities. 
-                    # This branch may not be taken, but just in case, still keep it here.
                     scope_parts.append(f"(anonymous {current.kind.name})")
-                    
             current = current.semantic_parent
 
         if not scope_parts:
             return ""
-            
-        # Reverse to get [Namespace, Class] and join with ::
-        # We add a trailing :: at the very end
         return "::".join(reversed(scope_parts)) + "::"
 
     def _identify_template_type(self, node) -> str:
-        """
-        Distinguishes between 'Class', 'Struct', and 'Union' for templates by
-        inspecting tokens after the template parameter list.
-        """
-        # TODO: This is only a perf heuristic, may miss some very long template header
-        # Limit tokenization to avoid overhead on large classes
+        """Distinguishes between 'Class', 'Struct', and 'Union' for templates."""
         tokens = islice(node.get_tokens(), 100)
         bracket_depth = 0
         found_params = False
@@ -708,16 +617,13 @@ class _ClangWorkerImpl:
                 tag = s.lower()
                 if tag in ('struct', 'class', 'union'):
                     return tag.capitalize()
-
-        return "Class" # Default fallback
+        return "Class"
 
     def _convert_node_kind_to_index_kind(self, node):
         """Converts a Clang parser kind to a Clangd index kind."""
-
         kind_name = node.kind.name
 
         if kind_name in ClangParser.NODE_KIND_FUNCTIONS:
-            # Check if it's actually a method (inside a class/struct/template)
             parent = node.semantic_parent
             if parent and parent.kind.name in ClangParser.NODE_KIND_FOR_COMPOSITE_TYPES:
                 if node.is_static_method():
@@ -741,7 +647,6 @@ class _ClangWorkerImpl:
         elif kind_name in ClangParser.NODE_KIND_ENUM:
             return "Enum"
         elif kind_name in ClangParser.NODE_KIND_CLASSES:
-            #Clang.cindex treats all templated structures as templated class, has to figure out the right type.
             if kind_name != clang.cindex.CursorKind.CLASS_DECL.name:
                 return self._identify_template_type(node)
             return "Class"
@@ -754,127 +659,59 @@ class _ClangWorkerImpl:
             return "Unknown"
 
     def _sanitize_args(self, args: List[str], file_path: str) -> List[str]:
-            """
-            Remove irrelevant flags from compilation arguments.
-            Assumes the compiler executable path (args[0]) has already been removed by the caller.
-            """
             sanitized = []
             skip_next = False
-            # Loop over all arguments since the executable has been removed.
             for a in args:
                 if skip_next:
                     skip_next = False
                     continue
-                # 1. Skip the command-line separator
-                if a == '--':
-                    continue
-                # 2. Skip Warning and Optimization flags
-                # These control compiler output/behavior but do not change the AST structure.
-                if a.startswith(('-W', '-O')):
-                    continue
-                # 3. Skip build-specific flags
-                # These flags are NOT relevant for parsing, and their values must be skipped
+                if a == '--': continue
+                if a.startswith(('-W', '-O')): continue
                 if a in {'-c', '-o', '-MMD', '-MF', '-MT', '-MQ', '-fcolor-diagnostics', '-fdiagnostics-color'}:
-                    # If it's a two-part flag like -o, we skip the next argument (the output filename)
                     if a in {'-o', '-MF', '-MT', '-MQ'}:
                         skip_next = True
                     continue
-
-                # 4. Skip the main source file path itself
-                # We skip this because we pass the file path explicitly as the first argument to index.parse()
                 if a == file_path or os.path.basename(a) == os.path.basename(file_path):
                     continue
                 sanitized.append(a)
-
             return sanitized
 
     def _get_tu_hash(self, args: List[str]) -> str:
-        """
-        Computes a deterministic hash by bucketing flags into categories.
-        
-        Strategy:
-        1. Group 1: Language Standards (-std, --driver-mode)
-        2. Group 2: Macros (-D, -U)
-        3. Group 3: Features (-f, -m, --target)
-        4. Group 4: Includes (-I, -isystem, -include)
-        5. Group 5: Other (Catch-all for --sysroot, -stdlib, etc.)
-        
-        Within each group, we PRESERVE relative order (crucial for -I and overrides).
-        By enforcing a fixed order BETWEEN groups, we solve the issue where 
-        "-std" and "-fPIC" flip positions but mean the same thing.
-        """
-        
-        # Buckets
-        bucket_lang = []
-        bucket_macros = []
-        bucket_features = []
-        bucket_includes = []
-        bucket_other = []  # <--- CRITICAL: Safety net for all other flags
-        
+        bucket_lang, bucket_macros, bucket_features, bucket_includes, bucket_other = [], [], [], [], []
         i = 0
         while i < len(args):
             a = args[i]
-            
-            # --- 1. Language Dialect ---
-            if a.startswith(("-std=", "-x", "--driver-mode")):
-                bucket_lang.append(a)
-
-            # --- 2. Macros ---
-            elif a.startswith(("-D", "-U")):
-                bucket_macros.append(a)
-                
-            # --- 3. Features / Codegen ---
-            elif a.startswith(("-f", "-m", "--target=")):
-                bucket_features.append(a)
-
-            # --- 4. Includes (Handling two-part flags) ---
+            if a.startswith(("-std=", "-x", "--driver-mode")): bucket_lang.append(a)
+            elif a.startswith(("-D", "-U")): bucket_macros.append(a)
+            elif a.startswith(("-f", "-m", "--target=")): bucket_features.append(a)
             elif a in ('-I', '-isystem', '-iquote', '-include'):
                 bucket_includes.append(a)
                 if i + 1 < len(args):
                     bucket_includes.append(args[i + 1])
                     i += 1 
-            
-            # --- 4. Includes (Handling one-part flags) ---
-            elif a.startswith(("-I", "-isystem", "-iquote")):
-                bucket_includes.append(a)
-            
-            # --- 5. CATCH-ALL ---
-            # Capture flags like --sysroot, -stdlib, -resource-dir, -v
-            # If we miss this, these flags are ignored, causing cache collisions
-            # between different system environments.
-            else:
-                bucket_other.append(a)
-            
+            elif a.startswith(("-I", "-isystem", "-iquote")): bucket_includes.append(a)
+            else: bucket_other.append(a)
             i += 1
-        
-        # Canonical Order: Lang -> Macros -> Features -> Includes -> Others
-        canonical_order = bucket_lang + bucket_macros + bucket_features + bucket_includes + bucket_other
-        
-        hash_input = " ".join(canonical_order)
-        
-        h = hashlib.md5(hash_input.encode("utf-8")).hexdigest()
-        return h
-
-
+        hash_input = " ".join(bucket_lang + bucket_macros + bucket_features + bucket_includes + bucket_other)
+        return hashlib.md5(hash_input.encode("utf-8")).hexdigest()
 
 class _TreesitterWorkerImpl:
-    """Contains the logic to parse one file using tree-sitter."""
+    """Syntactic parser implementation (Location-based identity)."""
     def __init__(self):
         if not tsc or not TreeSitterParser: raise ImportError("tree-sitter not installed.")
         self.language = Language(tsc.language())
         self.parser = TreeSitterParser(self.language)
 
-    def run(self, file_path: str) -> Tuple[Optional[Dict[str, Set[SourceSpan]]], Set]:
-        # Note: Tree-sitter parsing is not hierarchical and does not build a tree.
-        # This implementation is kept for basic compatibility but does not support nesting.
+    def run(self, file_path: str) -> Tuple[Optional[Dict[str, SourceSpan]], Set]:
         try:
             with open(file_path, "rb") as f:
                 source = f.read()
             tree = self.parser.parse(source)
             source_lines = source.decode("utf-8", errors="ignore").splitlines()
             
-            spans = set()
+            spans = {}
             stack = [tree.root_node]
+            file_uri = f"file://{os.path.abspath(file_path)}"
             while stack:
                 node = stack.pop()
                 if node.type == "function_definition":
@@ -891,478 +728,230 @@ class _TreesitterWorkerImpl:
                         start_line=node.start_point[0], start_column=node.start_point[1],
                         end_line=node.end_point[0], end_column=node.end_point[1]
                     )
-                    spans.add(SourceSpan(name=name, kind="Function", lang="C", name_span=name_span, body_span=body_span))
+                    
+                    # Syntactic fallback: use location-based identity. 
+                    # Tree-sitter has no USR, so these spans will always match in Tier 2 (Location).
+                    node_key = CompilationParser.make_symbol_key(name, "Function", file_uri, name_span.start_line, name_span.start_column)
+                    synth_id = CompilationParser.make_synthetic_id(node_key)
+                    spans[synth_id] = SourceSpan(name=name, kind="Function", lang="C", name_location=name_span, body_location=body_span, id=synth_id, parent_id=None)
                 stack.extend(node.children)
             
             if not spans: return None, set()
-            
-            result = (f"file://{os.path.abspath(file_path)}", spans)
-            return result, set()
+            return (file_uri, spans), set()
         except Exception as e:
             logger.error(f"Treesitter worker failed to parse {file_path}: {e}")
             return None, set()
 
-
-# --- Process-local worker and initializer ---
+# --- Worker Orchestration ---
 _worker_impl_instance = None
-
-# Total number of processed TUs so far
 _count_processed_tus = 0
 
 def _worker_initializer(parser_type: str, init_args: Dict[str, Any]):
-    """Initializes a worker implementation object for each process."""
     global _worker_impl_instance
-    # Increase recursion limit for this worker process to handle deep ASTs
     sys.setrecursionlimit(3000)
-
-    if parser_type == 'clang':
-        _worker_impl_instance = _ClangWorkerImpl(**init_args)
-    elif parser_type == 'treesitter':
-        _worker_impl_instance = _TreesitterWorkerImpl(**init_args)
-    else:
-        raise ValueError(f"Unknown parser type: {parser_type}")
+    if parser_type == 'clang': _worker_impl_instance = _ClangWorkerImpl(**init_args)
+    elif parser_type == 'treesitter': _worker_impl_instance = _TreesitterWorkerImpl()
+    else: raise ValueError(f"Unknown parser type: {parser_type}")
 
 def _parallel_worker(data: Any) -> Dict[str, Any]:
-    """Generic top-level worker function that uses the process-local worker object.
-
-    Accepts a list of entry dicts (batch).
-    When given a list, it locally merges per-entry results into one result.
-    """
     global _worker_impl_instance
     global _count_processed_tus
+    if _worker_impl_instance is None: raise RuntimeError("Worker not initialized.")
 
-    if _worker_impl_instance is None:
-        raise RuntimeError("Worker implementation has not been initialized in this process.")
-
-    # Fast path: we have a single entry so we avoid the overhead of local merging
     if len(data) == 1:
         entry = data[0]
         _count_processed_tus += 1
         if _count_processed_tus % 1000 == 0: gc.collect()
-
         try:
             result_dict = _worker_impl_instance.run(entry)
         except Exception:
-            file_path = entry if isinstance(entry, str) else entry.get('file', 'unknown')
-            logger.exception(f"Worker failed on {file_path}")
-            return {
-                "span_results": defaultdict(dict),
-                "include_relations": set(),
-                "static_call_relations": set(),
-                "type_alias_spans": defaultdict(dict),
-                "macro_spans": {}
-            }
+            logger.exception(f"Worker failed on {entry}")
+            return {"span_results": defaultdict(dict), "include_relations": set(), "static_call_relations": set(), "type_alias_spans": {}, "macro_spans": {}}
         return result_dict
 
-    # Otherwise, we have a list of entries that need local merging    
-    merged_span_results: Dict[Tuple[str, str], Dict[str, SourceSpan]] = defaultdict(dict)
-    merged_include_relations: Set[IncludeRelation] = set()
-    merged_static_call_relations: Set[Tuple[str, str]] = set()
-    merged_type_alias_spans: Dict[str, TypeAliasSpan] = {}
-    merged_macro_spans: Dict[str, MacroSpan] = {}
-
+    merged_span_results, merged_include_relations, merged_static_call_relations, merged_type_alias_spans, merged_macro_spans = defaultdict(dict), set(), set(), {}, {}
     for entry in data:
         _count_processed_tus += 1
         if _count_processed_tus % 1000 == 0: gc.collect()
-
         try:
             result_dict = _worker_impl_instance.run(entry)
         except Exception:
-            file_path = entry if isinstance(entry, str) else entry.get('file', 'unknown')
-            logger.exception(f"Worker failed on {file_path}")
             continue
-
         merged_span_results.update(result_dict["span_results"])
         merged_include_relations.update(result_dict["include_relations"])
         merged_static_call_relations.update(result_dict["static_call_relations"])
-        if result_dict["type_alias_spans"]:
-            for alias_id, new_span in result_dict["type_alias_spans"].items():
-                existing_span = merged_type_alias_spans.get(alias_id)
-                if existing_span:
-                    if new_span.is_aliasee_definition and not existing_span.is_aliasee_definition:
-                        merged_type_alias_spans[alias_id] = new_span
-                else:
-                    merged_type_alias_spans[alias_id] = new_span
-        
-        if result_dict.get("macro_spans"):
-            merged_macro_spans.update(result_dict["macro_spans"])
+        for alias_id, new_span in result_dict["type_alias_spans"].items():
+            existing = merged_type_alias_spans.get(alias_id)
+            if not existing or (new_span.is_aliasee_definition and not existing.is_aliasee_definition):
+                merged_type_alias_spans[alias_id] = new_span
+        merged_macro_spans.update(result_dict.get("macro_spans", {}))
 
-    return {
-        "span_results": merged_span_results,
-        "include_relations": merged_include_relations,
-        "static_call_relations": merged_static_call_relations,
-        "type_alias_spans": merged_type_alias_spans,
-        "macro_spans": merged_macro_spans
-    }
+    return {"span_results": merged_span_results, "include_relations": merged_include_relations, "static_call_relations": merged_static_call_relations, "type_alias_spans": merged_type_alias_spans, "macro_spans": merged_macro_spans}
 
-# --- Abstract Base Class ---
-
+# --- Base Class ---
 class CompilationParser:
-    """An abstract base class for source code parsers."""
-
+    """Abstract base class for source code parsers."""
     C_SOURCE_EXTENSIONS = ('.c',)
     CPP_SOURCE_EXTENSIONS = ('.cpp', '.cc', '.cxx')
     CPP20_MODULE_EXTENSIONS = ('.cppm', '.ccm', '.cxxm', '.c++m')
     C_HEADER_EXTENSIONS = ('.h',)
     CPP_HEADER_EXTENSIONS = ('.hpp', '.hh', '.hxx', '.h++', '.inc')
-
     ALL_SOURCE_EXTENSIONS = C_SOURCE_EXTENSIONS + CPP_SOURCE_EXTENSIONS + CPP20_MODULE_EXTENSIONS
     ALL_HEADER_EXTENSIONS = C_HEADER_EXTENSIONS + CPP_HEADER_EXTENSIONS
     ALL_C_CPP_EXTENSIONS = ALL_SOURCE_EXTENSIONS + ALL_HEADER_EXTENSIONS
     ALL_CPP_SOURCE_EXTENSIONS = CPP_SOURCE_EXTENSIONS + CPP20_MODULE_EXTENSIONS
 
     def __init__(self, project_path: str):
-        self.project_path = project_path
-        self.source_spans: Dict[str, Dict[str, SourceSpan]] = defaultdict(dict) # Changed to Dict[FileURI, Dict[Key, SourceSpan]]
-        self.include_relations: Set[IncludeRelation] = set()
-        self.static_call_relations: Set[Tuple[str, str]] = set()
-        self.type_alias_spans: Dict[str, TypeAliasSpan] = {}
-        self.macro_spans: Dict[str, MacroSpan] = {}
+        self.project_path, self.source_spans, self.include_relations, self.static_call_relations, self.type_alias_spans, self.macro_spans = project_path, defaultdict(dict), set(), set(), {}, {}
 
-    def parse(self, files_to_parse: List[str], num_workers: int = 1):
-        raise NotImplementedError
-
-    def get_source_spans(self) -> Dict[str, Dict[str, SourceSpan]]:
-        return self.source_spans
-
-    def get_include_relations(self) -> Set[IncludeRelation]:
-        return self.include_relations
-
-    def get_static_call_relations(self) -> Set[Tuple[str, str]]:
-        return self.static_call_relations
-
-    def get_type_alias_spans(self) -> Dict[str, TypeAliasSpan]:
-        return self.type_alias_spans
-
-    def get_macro_spans(self) -> Dict[str, MacroSpan]:
-        return self.macro_spans
-
+    def parse(self, files_to_parse: List[str], num_workers: int = 1): raise NotImplementedError
+    def get_source_spans(self): return self.source_spans
+    def get_include_relations(self): return self.include_relations
+    def get_static_call_relations(self): return self.static_call_relations
+    def get_type_alias_spans(self): return self.type_alias_spans
+    def get_macro_spans(self): return self.macro_spans
+    
     def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
+        """Converts a parser's native node kind string into a Clangd-compatible string."""
         raise NotImplementedError
 
     @staticmethod
     def hash_usr_to_id(usr: str) -> str:
-        """
-        Replicates clangd's ID generation by taking the first 8 bytes of
-        the SHA1 hash of the USR.
-        """
-        sha1_hash = hashlib.sha1(usr.encode()).digest()
-        return sha1_hash[:8].hex().upper()
+        """Replicates clangd's ID generation (8 bytes SHA1 hex)."""
+        return hashlib.sha1(usr.encode()).digest()[:8].hex().upper()
 
     @classmethod
     def make_symbol_key(cls, name: str, kind: str, file_uri: str, line: int, col: int) -> str:
-        """
-        Deterministic symbol key.
-        Format: kind::symbol name::file URI:line:col
-
-        NOTE: We added kind to the make_symbol_key (and subsequently the synthetic ID) specifically to prevent
-        collisions between different entity types at the same source location, particularly in the context of macros and
-        anonymous structures.
-
-        1. Anonymous Struct + Typedef Collision: In C, it's common to see typedef struct { ... } MyType;. Both the anonymous
-            struct and the typedef (TypeAlias) start at the same line and column. Without kind in the key, they would generate
-            the same synthetic ID, causing one to overwrite the other in the graph or cache.
-        2. Macro Identity: When a macro generates multiple entities (e.g., a struct and a using alias) at the exact same
-            expansion point, the kind ensures they remain distinct nodes.
-        3. Clangd Alignment: Clangd's own USRs (Unified Symbol Resolutions) are kind-aware. By including kind in our
-            synthetic key (kind::name::file:line:col), we make our identification logic more robust and closer to how the
-            compiler distinguishes symbols that share a location.
-        """
-        key = f"{kind}::{name}::{file_uri}:{line}:{col}"
-        return key
+        """Fallback location-based key for identity pluralism."""
+        return f"{kind}::{name}::{file_uri}:{line}:{col}"
 
     @classmethod
     def make_synthetic_id(cls, key: str) -> str:
-        """
-        Deterministic synthetic ID. 
-        Key: normally kind::symbol name::file URI:line:col
-        """
+        """Fallback location-based ID for identity pluralism."""
         return hashlib.md5(key.encode()).hexdigest()
 
     @classmethod
     def get_language(cls, file_name: str) -> str:
         ext = os.path.splitext(file_name)[1].lower()
-        if ext in cls.CPP_SOURCE_EXTENSIONS or ext in cls.CPP_HEADER_EXTENSIONS or ext in cls.CPP20_MODULE_EXTENSIONS:
-            return "Cpp"
-        if ext in cls.C_SOURCE_EXTENSIONS or ext in cls.C_HEADER_EXTENSIONS:
-            return "C"
+        if ext in cls.CPP_SOURCE_EXTENSIONS or ext in cls.CPP_HEADER_EXTENSIONS or ext in cls.CPP20_MODULE_EXTENSIONS: return "Cpp"
+        if ext in cls.C_SOURCE_EXTENSIONS or ext in cls.C_HEADER_EXTENSIONS: return "C"
         return "Unknown"
 
     def _parallel_parse(self, items_to_process: List, parser_type: str, num_workers: int, desc: str, worker_init_args: Dict[str, Any] = None, batch_size: int = 1):
-        """Generic parallel processing with task batching so workers do local merging.
-
-        batch_size: Number of TUs to send to a worker in one task submission.
-        """
-        all_spans: Dict[Tuple[str, str], Dict[str, SourceSpan]] = defaultdict(dict)
-        all_includes: Set[IncludeRelation] = set()
-        all_static_calls: Set[Tuple[str, str]] = set()
-        all_type_alias_spans: Dict[str, TypeAliasSpan] = {}
-        all_macro_spans: Dict[str, MacroSpan] = {}
-        file_tu_hash_map: Dict[str, Set[str]] = defaultdict(set)
-
+        all_spans, all_includes, all_static_calls, all_type_alias_spans, all_macro_spans, file_tu_hash_map = defaultdict(dict), set(), set(), {}, {}, defaultdict(set)
         initargs = (parser_type, worker_init_args or {})
-
-        # Create an iterator so we can pull items one by one
-        items_iterator = iter(items_to_process)
-
-        # Define buffer size (limit "in-flight" tasks to 5x workers)
-        max_pending = num_workers * 2
-        futures: Dict[Any, Any] = {}
-
+        items_iterator, max_pending, futures = iter(items_to_process), num_workers * 2, {}
         ctx = get_context("spawn")
-        with ProcessPoolExecutor(
-            max_workers=num_workers,
-            mp_context=ctx,
-            initializer=_worker_initializer,
-            initargs=initargs
-        ) as executor:
-
-            # Helper to fetch the next batch (list). Returns empty list if exhausted.
-            def _next_batch():
-                return list(islice(items_iterator, batch_size))
-
-            # Prime the pump: Submit the initial batch tasks
+        with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx, initializer=_worker_initializer, initargs=initargs) as executor:
+            def _next_batch(): return list(islice(items_iterator, batch_size))
             for _ in range(max_pending):
                 batch = _next_batch()
-                if not batch:
-                    break
+                if not batch: break
                 future = executor.submit(_parallel_worker, batch)
-                futures[future] = len(batch)  # store batch size for progress accounting
-
+                futures[future] = len(batch)
             total_tus = len(items_to_process)
             with tqdm(total=total_tus, desc=desc) as pbar:
                 while futures:
                     done, _ = wait(futures, return_when=FIRST_COMPLETED)
-
                     for future in done:
-                        # Pop finished future and get how many TUs this future represented
                         batch_count = futures.pop(future)
-                        # Update progress bar by number of TUs processed in this batch
                         pbar.update(batch_count)
-
-                        # Replenish the queue immediately
                         next_batch = _next_batch()
                         if next_batch:
                             nf = executor.submit(_parallel_worker, next_batch)
                             futures[nf] = len(next_batch)
-
-                        # Merge results from this future
                         try:
                             result_dict = future.result()
-                            if result_dict["include_relations"]:
-                                all_includes.update(result_dict["include_relations"])
-                            if result_dict["static_call_relations"]:
-                                all_static_calls.update(result_dict["static_call_relations"])
-                            if result_dict["type_alias_spans"]:
-                                for alias_id, new_span in result_dict["type_alias_spans"].items():
-                                    existing_span = all_type_alias_spans.get(alias_id)
-                                    if existing_span:
-                                        if new_span.is_aliasee_definition and not existing_span.is_aliasee_definition:
-                                            all_type_alias_spans[alias_id] = new_span
-                                    else:
-                                        all_type_alias_spans[alias_id] = new_span
-
-                            if result_dict.get("macro_spans"):
-                                all_macro_spans.update(result_dict["macro_spans"])
-
-                            if result_dict["span_results"]:
-                                # Merge using same dedupe rule: only add spans from (file_uri, tu_hash)
-                                # when tu_hash hasn't been seen for the file.
-                                #logger.debug(f"Merging spans for {len(span_result)} TUs")
-                                for (file_uri, tu_hash), key_to_span_dict in result_dict["span_results"].items():
-                                    if tu_hash not in file_tu_hash_map[file_uri]:
-                                        file_tu_hash_map[file_uri].add(tu_hash)
-                                        all_spans[file_uri].update(key_to_span_dict)
-                                #logger.debug(f"Merged spans for {len(span_result)} TUs")
-
+                            if result_dict["include_relations"]: all_includes.update(result_dict["include_relations"])
+                            if result_dict["static_call_relations"]: all_static_calls.update(result_dict["static_call_relations"])
+                            for alias_id, new_span in result_dict["type_alias_spans"].items():
+                                existing = all_type_alias_spans.get(alias_id)
+                                if not existing or (new_span.is_aliasee_definition and not existing.is_aliasee_definition):
+                                    all_type_alias_spans[alias_id] = new_span
+                            all_macro_spans.update(result_dict.get("macro_spans", {}))
+                            for (file_uri, tu_hash), id_to_span_dict in result_dict["span_results"].items():
+                                if tu_hash not in file_tu_hash_map[file_uri]:
+                                    file_tu_hash_map[file_uri].add(tu_hash)
+                                    all_spans[file_uri].update(id_to_span_dict)
                         except Exception as e:
-                            # Error handling preserves your original logic
-                            logger.error(f"A worker failed while processing a batch: {e}", exc_info=True)
-
-        self.source_spans = all_spans
-        self.include_relations = all_includes
-        self.static_call_relations = all_static_calls
-        self.type_alias_spans = all_type_alias_spans
-        self.macro_spans = all_macro_spans
+                            logger.error(f"Worker failure: {e}", exc_info=True)
+        self.source_spans, self.include_relations, self.static_call_relations, self.type_alias_spans, self.macro_spans = all_spans, all_includes, all_static_calls, all_type_alias_spans, all_macro_spans
         gc.collect()
 
-# --- Concrete Implementations ---
-
+# --- Concrete Parsers ---
 class ClangParser(CompilationParser):
-    """A parser that uses clang.cindex for semantic analysis."""
-
-    NODE_KIND_FUNCTIONS = {
-        clang.cindex.CursorKind.FUNCTION_DECL.name,
-        clang.cindex.CursorKind.FUNCTION_TEMPLATE.name,
-    }
-
-    NODE_KIND_CONSTRUCTOR = {
-        clang.cindex.CursorKind.CONSTRUCTOR.name,
-    }
-    NODE_KIND_DESTRUCTOR = {
-        clang.cindex.CursorKind.DESTRUCTOR.name,
-    }
-    NODE_KIND_CONVERSION_FUNCTION = {
-        clang.cindex.CursorKind.CONVERSION_FUNCTION.name,
-    }
-
-    NODE_KIND_CXX_METHOD = {
-        clang.cindex.CursorKind.CXX_METHOD.name,
-    }
-    
+    """Semantic parser implementation (USR-based identity)."""
+    NODE_KIND_FUNCTIONS = {clang.cindex.CursorKind.FUNCTION_DECL.name, clang.cindex.CursorKind.FUNCTION_TEMPLATE.name}
+    NODE_KIND_CONSTRUCTOR = {clang.cindex.CursorKind.CONSTRUCTOR.name}
+    NODE_KIND_DESTRUCTOR = {clang.cindex.CursorKind.DESTRUCTOR.name}
+    NODE_KIND_CONVERSION_FUNCTION = {clang.cindex.CursorKind.CONVERSION_FUNCTION.name}
+    NODE_KIND_CXX_METHOD = {clang.cindex.CursorKind.CXX_METHOD.name}
     NODE_KIND_METHODS = NODE_KIND_CXX_METHOD | NODE_KIND_CONSTRUCTOR | NODE_KIND_DESTRUCTOR | NODE_KIND_CONVERSION_FUNCTION
-
     NODE_KIND_CALLERS = NODE_KIND_FUNCTIONS | NODE_KIND_METHODS
-
-    NODE_KIND_UNION = {
-        clang.cindex.CursorKind.UNION_DECL.name,
-    }
-
-    NODE_KIND_ENUM = {
-        clang.cindex.CursorKind.ENUM_DECL.name,
-    }
-
-    NODE_KIND_STRUCT = {
-        clang.cindex.CursorKind.STRUCT_DECL.name,
-    }
-
-    NODE_KIND_CLASSES = {
-        clang.cindex.CursorKind.CLASS_DECL.name,
-        clang.cindex.CursorKind.CLASS_TEMPLATE.name,
-        clang.cindex.CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION.name,
-    }
-    
+    NODE_KIND_UNION = {clang.cindex.CursorKind.UNION_DECL.name}
+    NODE_KIND_ENUM = {clang.cindex.CursorKind.ENUM_DECL.name}
+    NODE_KIND_STRUCT = {clang.cindex.CursorKind.STRUCT_DECL.name}
+    NODE_KIND_CLASSES = {clang.cindex.CursorKind.CLASS_DECL.name, clang.cindex.CursorKind.CLASS_TEMPLATE.name, clang.cindex.CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION.name}
     NODE_KIND_FOR_COMPOSITE_TYPES = NODE_KIND_UNION | NODE_KIND_ENUM | NODE_KIND_STRUCT | NODE_KIND_CLASSES
-
     NODE_KIND_FOR_BODY_SPANS = NODE_KIND_FUNCTIONS | NODE_KIND_METHODS | NODE_KIND_FOR_COMPOSITE_TYPES
-    
-    # NOTE: We don't include NAMESPACE spans although they have body spans. 
-    # The reason is, same namespaces are declared in multiple sites with different name_locations hence the synthetic ids, which are considered as different symbols
-    # So for namespaces, we should only use their name literals as the identifier, not locations. 
-    # For simplicity, we just use the Namespace symbol in clangd index.
-    # TODO: Check if we need create parent (or scope) relation from a structure to a namespace literal.
-    NODE_KIND_NAMESPACE = { clang.cindex.CursorKind.NAMESPACE.name }
-
+    NODE_KIND_NAMESPACE = {clang.cindex.CursorKind.NAMESPACE.name}
     NODE_KIND_FOR_SCOPES =  NODE_KIND_NAMESPACE | NODE_KIND_FOR_COMPOSITE_TYPES
-
-    NODE_KIND_TYPE_ALIASES = {
-        clang.cindex.CursorKind.TYPE_ALIAS_TEMPLATE_DECL.name,
-        clang.cindex.CursorKind.TYPE_ALIAS_DECL.name,
-        clang.cindex.CursorKind.TYPEDEF_DECL.name,
-    }
-
+    NODE_KIND_TYPE_ALIASES = {clang.cindex.CursorKind.TYPE_ALIAS_TEMPLATE_DECL.name, clang.cindex.CursorKind.TYPE_ALIAS_DECL.name, clang.cindex.CursorKind.TYPEDEF_DECL.name}
     NODE_KIND_FOR_USER_DEFINED_TYPES = NODE_KIND_FOR_COMPOSITE_TYPES | NODE_KIND_TYPE_ALIASES
+
+    def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
+        if kind in ClangParser.NODE_KIND_FUNCTIONS: return "Function"
+        elif kind in ClangParser.NODE_KIND_CONSTRUCTOR: return "Constructor"
+        elif kind in ClangParser.NODE_KIND_DESTRUCTOR: return "Destructor"
+        elif kind in ClangParser.NODE_KIND_CONVERSION_FUNCTION: return "ConversionFunction"
+        elif kind in ClangParser.NODE_KIND_CXX_METHOD: return "InstanceMethod"
+        elif kind in ClangParser.NODE_KIND_STRUCT: return "Struct"
+        elif kind in ClangParser.NODE_KIND_UNION: return "Union"
+        elif kind in ClangParser.NODE_KIND_ENUM: return "Enum"
+        elif kind in ClangParser.NODE_KIND_CLASSES: return "Class"
+        elif kind in ClangParser.NODE_KIND_NAMESPACE: return "Namespace"
+        elif kind in ClangParser.NODE_KIND_TYPE_ALIASES: return "TypeAlias"
+        return "Unknown"
 
     def __init__(self, project_path: str, compile_commands_path: str):
         super().__init__(project_path)
-        if not clang: raise ImportError("clang library is not installed.")
-        
         db_dir = self._get_db_dir(compile_commands_path)
-        try: 
-            self.db = clang.cindex.CompilationDatabase.fromDirectory(db_dir)
-        except clang.cindex.CompilationDatabaseError as e: 
-            logger.critical(f"Error loading compilation database from '{db_dir}': {e}"); 
-            raise
-
+        self.db = clang.cindex.CompilationDatabase.fromDirectory(db_dir)
         self.clang_include_path = self._get_clang_resource_dir()
 
-    def _get_db_dir(self, compile_commands_path: str) -> str:
-        path = Path(compile_commands_path).expanduser().resolve()
-        if path.is_dir():
-            if not (path / "compile_commands.json").exists():
-                raise FileNotFoundError(f"No compile_commands.json found in directory {path}. Please put/link it there or use --compile-commands to specify the path.")
-            return str(path)
-        elif path.is_file():
+    def _get_db_dir(self, path):
+        p = Path(path).expanduser().resolve()
+        if p.is_dir(): return str(p)
+        if p.is_file():
             import tempfile, shutil
-            if path.name != "compile_commands.json":
-                tmpdir = tempfile.mkdtemp(prefix="clangdb_")
-                shutil.copy(str(path), os.path.join(tmpdir, "compile_commands.json"))
-                return tmpdir
-            else:
-                return str(path.parent)
-        else:
-            raise FileNotFoundError(f"{compile_commands_path} not found")
+            tmpdir = tempfile.mkdtemp(prefix="clangdb_")
+            shutil.copy(str(p), os.path.join(tmpdir, "compile_commands.json"))
+            return tmpdir
+        raise FileNotFoundError(path)
 
     def _get_clang_resource_dir(self):
-        try:
-            resource_dir = subprocess.check_output(['clang', '-print-resource-dir']).decode('utf-8').strip()
-            return os.path.join(resource_dir, 'include')
-        except (FileNotFoundError, subprocess.CalledProcessError): return None
+        try: return os.path.join(subprocess.check_output(['clang', '-print-resource-dir']).decode('utf-8').strip(), 'include')
+        except: return None
 
     def _get_cmd_file_realpath(self, cmd):
-        file = cmd.filename
-        if not os.path.isabs(file):
-            file = os.path.join(cmd.directory, file)
-        return os.path.realpath(file)
-
+        f = cmd.filename
+        if not os.path.isabs(f): f = os.path.join(cmd.directory, f)
+        return os.path.realpath(f)
 
     def parse(self, files_to_parse: List[str], num_workers: int = 1):
         self.source_spans.clear(); self.include_relations.clear()
-        
         source_files = [f for f in files_to_parse if f.lower().endswith(CompilationParser.ALL_SOURCE_EXTENSIONS)]
-        if not source_files: logger.warning("ClangParser found no source files to parse."); return
-
-        cmd_files = {}
-        for cmd in self.db.getAllCompileCommands():
-            file_key = self._get_cmd_file_realpath(cmd)
-            cmd_files[file_key] = cmd
-
-        compile_entries = []
-        missed_files = []
-        for file_path in source_files:
-            cmd = cmd_files.get(file_path)
-            if not cmd:
-                missed_files.append(file_path)
-                continue
-    
-            compile_entries.append({
-                'file': file_path,
-                'directory': cmd.directory,
-                'arguments': list(cmd.arguments)[1:],
-            })
-
-        logger.info(f"Found {len(source_files)} source files, {len(compile_entries)} compile entries")
-        if missed_files:
-            logger.info(f"No compile commands found for {len(missed_files)} files. Check debug.log for details.")
-            logger.debug(
-                f"No compile commands found for {len(missed_files)} files:\n        "  
-                f"{'\n        '.join(missed_files)}"
-            )
-
-        if num_workers < 1:
-            logger.error(f"Invalid number of num_parse_workers specified: {num_workers}")
-            sys.exit(1)
-       
-        logger.info(f"Parsing {len(compile_entries)} TUs with clang using {num_workers} workers...")
-        init_args = {
-            'project_path': self.project_path,
-            'clang_include_path': self.clang_include_path
-        }
-        self._parallel_parse(compile_entries, 'clang', num_workers, "Parsing TUs (clang)", worker_init_args=init_args)
-    
+        cmd_files = {self._get_cmd_file_realpath(cmd): cmd for cmd in self.db.getAllCompileCommands()}
+        compile_entries = [{'file': f, 'directory': cmd_files[f].directory, 'arguments': list(cmd_files[f].arguments)[1:]} for f in source_files if f in cmd_files]
+        self._parallel_parse(compile_entries, 'clang', num_workers, "Parsing TUs (clang)", worker_init_args={'project_path': self.project_path, 'clang_include_path': self.clang_include_path})
 
 class TreesitterParser(CompilationParser):
-    """A parser that uses Tree-sitter for syntactic analysis."""
-    def __init__(self, project_path: str):
-        super().__init__(project_path)
-        if not tsc or not TreeSitterParser: raise ImportError("tree-sitter not installed.")
-
+    """Syntactic parser implementation (Location-based identity)."""
+    def __init__(self, project_path: str): super().__init__(project_path)
     def parse(self, files_to_parse: List[str], num_workers: int = 1):
         self.source_spans.clear(); self.include_relations.clear()
-
-        valid_files = [f for f in files_to_parse if os.path.isfile(f)]
-
-        if num_workers < 1:
-            logger.error(f"Invalid number of num_parse_workers specified: {num_workers}")
-            sys.exit(1)
-        
-        logger.info(f"Parsing {len(valid_files)} files with tree-sitter using {num_workers} workers...")
-        self._parallel_parse(valid_files, 'treesitter', num_workers, "Parsing spans (treesitter)", worker_init_args={})
-
+        valid = [f for f in files_to_parse if os.path.isfile(f)]
+        self._parallel_parse(valid, 'treesitter', num_workers, "Parsing spans (treesitter)", worker_init_args={})
     def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
-        logger.warning("Node kind conversion is not supported by TreesitterParser.")
-        return kind
-
-    def get_include_relations(self) -> Set[IncludeRelation]:
-        logger.warning("Include relation extraction is not supported by TreesitterParser.")
-        return set()
+        return "Function" if kind == "function_definition" else "Unknown"
+    def get_include_relations(self) -> Set[IncludeRelation]: return set()
