@@ -525,8 +525,15 @@ class SourceSpanProvider:
     def _assign_parent_ids_lexically(self):
         """
         Assigns parent_id to symbols that don't have one, based on lexical scope. 
-        Only for symbols that have no body_location.
-        We still keep the branch for symbols with body_location for debugging purpose.
+        The lexical scope is the source span extracted by compilation parser. 
+        This pass is largely no longer useful, because almost all symbols that have parents should have been assigned parents in preceeding passes.
+        We still keep this pass mainly as sanity checking and debugging purpose.
+        Variable, namespace, are top-level symbols that don't have parents. (They can have namespace scope that we process separately.)
+        We should skip those symbols in this pass. Other symbols without a parent id will pass through the code here.
+        A structure may be top level, and may be contained in another structure. A member entity should always have parent id.
+        This pass has two branches, one for symbols without definition or body_location; the other is for the rest (with body_location) which can match a span.
+        The no-body branch may catch a few symbols as a final safety net. We should always analyze why they had not been assigned parent before.
+        The other branch (for with-body symbols) should not be assigned parent. If anyone is assigned, it must be bug.
         """
         logger.info("Assigning parent IDs based on lexical scope for remaining symbols.")
         # Pass 0: Get span data (again, as it might have been deleted in previous step)
@@ -683,7 +690,7 @@ class SourceSpanProvider:
         for sym_id, sym in self.symbol_parser.symbols.items():
             if sym.kind != 'TypeAlias': continue
 
-            if True:
+            if False:
                 if sym_id == "80451E61B2364407": 
                     pass
 
