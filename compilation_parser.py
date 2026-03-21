@@ -266,10 +266,11 @@ class _ClangWorkerImpl:
             self._process_node(node, file_name, current_caller_cursor)
 
             # 4. Push children to stack
-            # Reversed list maintains identical DFS visit order to the recursive version.
+            # Reverse children nodes to maintain identical DFS visit order to the recursive version.
+            # This does not impact correctness, but helps our debugging in natural AST order.
             try:
                 children = list(node.get_children())
-                for c in reversed(children):
+                for c in reversed(children): 
                     stack.append((c, new_caller_cursor))
             except Exception:
                 # Handle rare libclang cursor failures gracefully
@@ -288,13 +289,28 @@ class _ClangWorkerImpl:
         elif node.kind == clang.cindex.CursorKind.MACRO_INSTANTIATION:
             self.instantiations[f"file://{file_name}"].append(node)
 
-        # 3. Generic Definitions (Functions, Classes, Structs)
+        # 3. Generic Definitions (Functions, Classes, Structs, Variables)
         elif node.is_definition() and node.kind.name in ClangParser.NODE_KIND_FOR_BODY_SPANS:
+            # Filter for non-local variables to avoid graph clutter. 
+            # We only process VAR_DECL if it's NOT inside a function/method.
+            if node.kind.name in ClangParser.NODE_KIND_VARIABLES:
+                #if self._convert_node_kind_to_index_kind(node) != "StaticProperty":
+                ## Only parse field vars, not top level vars.
+                #    return
+                parent = node.semantic_parent
+                if parent and parent.kind.name in ClangParser.NODE_KIND_CALLERS:
+                    return # Skip function-local variables
+
             if self._should_process_node(node, file_name):
                 self._process_generic_node(node, file_name)
 
         # 4. Type Aliases
-        elif node.kind.name in ClangParser.NODE_KIND_TYPE_ALIASES:
+        elif node.kind.name in ClangParser.NODE_KIND_TYPE_ALIASES:            
+            if False:
+                if node.spelling == "DIObjCPropertyInfo":
+                    logger.error(f"Found DIObjCPropertyInfo: {file_name} from TU: {self.entry['file']}")
+                    pass
+            
             if self._should_process_node(node, file_name):
                 self._process_type_alias_node(node, file_name)
 
@@ -375,9 +391,6 @@ class _ClangWorkerImpl:
             # These will naturally fail Tier 1 ID matching and use Tier 2 Location matching.
             node_key = CompilationParser.make_symbol_key(node.spelling, kind, file_uri, name_start_line, name_start_col)
             synthetic_id = CompilationParser.make_synthetic_id(node_key)
-
-        if synthetic_id == "AB049A4929FEAB02":
-            pass
 
         # ANONYMITY HANDLING: Use USR as name for debug info when no spelling is available.
         is_anonymous = not node.spelling or "(unnamed" in node.spelling
@@ -501,7 +514,8 @@ class _ClangWorkerImpl:
 
     def _should_process_node(self, node, file_name) -> bool:
         """Avoid redundant node processing across identical TU contexts."""
-        if file_name != self.entry['file']:              
+        # Don't include .inc, .def header files to cache. They can be included under different local macro definitions.
+        if file_name != self.entry['file'] and not file_name.endswith(CompilationParser.VOLATILE_HEADER_EXTENSIONS):
             if self._processed_global_headers and file_name in self._processed_global_headers:
                 return False
             self._local_header_cache.add(file_name)
@@ -728,6 +742,12 @@ class _ClangWorkerImpl:
             return "Namespace"
         elif kind_name in ClangParser.NODE_KIND_TYPE_ALIASES:
             return "TypeAlias"
+        elif kind_name in ClangParser.NODE_KIND_VARIABLES:
+            # Check if it's a static property (member of a class/struct)
+            parent = node.semantic_parent
+            if parent and parent.kind.name in ClangParser.NODE_KIND_FOR_COMPOSITE_TYPES:
+                return "StaticProperty"
+            return "Variable"
         else:
             logger.error(f"Unknown Clang parser kind: {kind_name}")
             return "Unknown"
@@ -864,17 +884,19 @@ def _parallel_worker(data: Any) -> Dict[str, Any]:
 
 # --- Base Class ---
 class CompilationParser:
-    """Abstract base class for source code parsers."""
+    """Abstract base class for source code parsers. Tuple is needed to use str.endswith(EXTENSIONS)"""
     C_SOURCE_EXTENSIONS = ('.c',)
     CPP_SOURCE_EXTENSIONS = ('.cpp', '.cc', '.cxx')
     CPP20_MODULE_EXTENSIONS = ('.cppm', '.ccm', '.cxxm', '.c++m')
-    C_HEADER_EXTENSIONS = ('.h',)
-    CPP_HEADER_EXTENSIONS = ('.hpp', '.hh', '.hxx', '.h++', '.inc')
-    ALL_SOURCE_EXTENSIONS = C_SOURCE_EXTENSIONS + CPP_SOURCE_EXTENSIONS + CPP20_MODULE_EXTENSIONS
-    ALL_HEADER_EXTENSIONS = C_HEADER_EXTENSIONS + CPP_HEADER_EXTENSIONS
-    ALL_C_CPP_EXTENSIONS = ALL_SOURCE_EXTENSIONS + ALL_HEADER_EXTENSIONS
     ALL_CPP_SOURCE_EXTENSIONS = CPP_SOURCE_EXTENSIONS + CPP20_MODULE_EXTENSIONS
+    ALL_SOURCE_EXTENSIONS = C_SOURCE_EXTENSIONS + ALL_CPP_SOURCE_EXTENSIONS
 
+    VOLATILE_HEADER_EXTENSIONS = ('.inc', '.def')
+    C_HEADER_EXTENSIONS = ('.h',) + VOLATILE_HEADER_EXTENSIONS
+    CPP_HEADER_EXTENSIONS = ('.hpp', '.hh', '.hxx', '.h++') + C_HEADER_EXTENSIONS
+    ALL_HEADER_EXTENSIONS = CPP_HEADER_EXTENSIONS
+    ALL_C_CPP_EXTENSIONS = ALL_SOURCE_EXTENSIONS + ALL_HEADER_EXTENSIONS
+    
     def __init__(self, project_path: str):
         self.project_path, self.source_spans, self.include_relations, self.static_call_relations, self.type_alias_spans, self.macro_spans = project_path, defaultdict(dict), set(), set(), {}, {}
 
@@ -885,10 +907,6 @@ class CompilationParser:
     def get_type_alias_spans(self): return self.type_alias_spans
     def get_macro_spans(self): return self.macro_spans
     
-    def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
-        """Converts a parser's native node kind string into a Clangd-compatible string."""
-        raise NotImplementedError
-
     @staticmethod
     def hash_usr_to_id(usr: str) -> str:
         """Replicates clangd's ID generation (8 bytes SHA1 hex)."""
@@ -946,8 +964,8 @@ class CompilationParser:
                             for (file_uri, tu_hash), id_to_span_dict in result_dict["span_results"].items():
                                 # TODO: We don't use file_tu_hash_map now, because a phony parent node span may be created after the header already being parsed. 
                                 # In this case, since the already-parsed header file's hash is already in the map, the phony parent node cannot be added.
-                                # Phony parent node is created when parsing a specialized member function, who does not have explicit partial specialized class defined.
-                                # That leads to orphan members in the graph and finally be cleaned. 
+                                # Phony parent node is created when parsing a specialized member function, who does not have explicit specialized class defined.
+                                # That leads to orphan class member nodes in the graph (without phony parents) and finally be cleaned. 
                                 if True: #tu_hash not in file_tu_hash_map[file_uri]:  
                                     file_tu_hash_map[file_uri].add(tu_hash)
                                     all_spans[file_uri].update(id_to_span_dict)
@@ -959,6 +977,7 @@ class CompilationParser:
 # --- Concrete Parsers ---
 class ClangParser(CompilationParser):
     """Semantic parser implementation (USR-based identity)."""
+    NODE_KIND_VARIABLES = {clang.cindex.CursorKind.VAR_DECL.name}
     NODE_KIND_FUNCTIONS = {clang.cindex.CursorKind.FUNCTION_DECL.name, clang.cindex.CursorKind.FUNCTION_TEMPLATE.name}
     NODE_KIND_CONSTRUCTOR = {clang.cindex.CursorKind.CONSTRUCTOR.name}
     NODE_KIND_DESTRUCTOR = {clang.cindex.CursorKind.DESTRUCTOR.name}
@@ -971,7 +990,7 @@ class ClangParser(CompilationParser):
     NODE_KIND_STRUCT = {clang.cindex.CursorKind.STRUCT_DECL.name}
     NODE_KIND_CLASSES = {clang.cindex.CursorKind.CLASS_DECL.name, clang.cindex.CursorKind.CLASS_TEMPLATE.name, clang.cindex.CursorKind.CLASS_TEMPLATE_PARTIAL_SPECIALIZATION.name}
     NODE_KIND_FOR_COMPOSITE_TYPES = NODE_KIND_UNION | NODE_KIND_ENUM | NODE_KIND_STRUCT | NODE_KIND_CLASSES
-    NODE_KIND_FOR_BODY_SPANS = NODE_KIND_FUNCTIONS | NODE_KIND_METHODS | NODE_KIND_FOR_COMPOSITE_TYPES
+    NODE_KIND_FOR_BODY_SPANS = NODE_KIND_FUNCTIONS | NODE_KIND_METHODS | NODE_KIND_FOR_COMPOSITE_TYPES | NODE_KIND_VARIABLES
     NODE_KIND_NAMESPACE = {clang.cindex.CursorKind.NAMESPACE.name}
     NODE_KIND_FOR_SCOPES =  NODE_KIND_NAMESPACE | NODE_KIND_FOR_COMPOSITE_TYPES
     NODE_KIND_TYPE_ALIASES = {clang.cindex.CursorKind.TYPE_ALIAS_TEMPLATE_DECL.name, clang.cindex.CursorKind.TYPE_ALIAS_DECL.name, clang.cindex.CursorKind.TYPEDEF_DECL.name}
@@ -983,20 +1002,6 @@ class ClangParser(CompilationParser):
         clang.cindex.CursorKind.ENUM_CONSTANT_DECL.name,
         clang.cindex.CursorKind.VAR_DECL.name, # For static members
     } | NODE_KIND_FOR_USER_DEFINED_TYPES # For nested types
-
-    def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
-        if kind in ClangParser.NODE_KIND_FUNCTIONS: return "Function"
-        elif kind in ClangParser.NODE_KIND_CONSTRUCTOR: return "Constructor"
-        elif kind in ClangParser.NODE_KIND_DESTRUCTOR: return "Destructor"
-        elif kind in ClangParser.NODE_KIND_CONVERSION_FUNCTION: return "ConversionFunction"
-        elif kind in ClangParser.NODE_KIND_CXX_METHOD: return "InstanceMethod"
-        elif kind in ClangParser.NODE_KIND_STRUCT: return "Struct"
-        elif kind in ClangParser.NODE_KIND_UNION: return "Union"
-        elif kind in ClangParser.NODE_KIND_ENUM: return "Enum"
-        elif kind in ClangParser.NODE_KIND_CLASSES: return "Class"
-        elif kind in ClangParser.NODE_KIND_NAMESPACE: return "Namespace"
-        elif kind in ClangParser.NODE_KIND_TYPE_ALIASES: return "TypeAlias"
-        return "Unknown"
 
     def __init__(self, project_path: str, compile_commands_path: str):
         super().__init__(project_path)
@@ -1037,6 +1042,4 @@ class TreesitterParser(CompilationParser):
         self.source_spans.clear(); self.include_relations.clear()
         valid = [f for f in files_to_parse if os.path.isfile(f)]
         self._parallel_parse(valid, 'treesitter', num_workers, "Parsing spans (treesitter)", worker_init_args={})
-    def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
-        return "Function" if kind == "function_definition" else "Unknown"
     def get_include_relations(self) -> Set[IncludeRelation]: return set()

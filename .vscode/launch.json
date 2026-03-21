@@ -5,6 +5,13 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "Python Debugger: llvm (var)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "clangd_graph_rag_builder.py",
+            "args": ["~/Public/llvm/llvm-project/var_index.yaml", "~/Public/llvm/", "--compile-commands", "~/Public/llvm/llvm-project/var_compile_commands.json", "--num-parse-workers=1"]
+        },
+        {
             "name": "Python Debugger: clang-debug",
             "type": "debugpy",
             "request": "launch",
@@ -23,7 +30,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "clangd_graph_rag_builder.py",
-            "args": ["~/Public/llvm/build-21.1.2/llvm-21.1.2-index-with-partial-specialization.yaml", "~/Public/llvm/llvm-project/", "--compile-commands", "~/Public/llvm/llvm-project/macro_compile_commands.json", "--num-parse-workers=1"]
+            "args": ["~/Public/llvm/build-21.1.2/llvm-21.1.2-index-with-partial-specialization.yaml", "~/Public/llvm/", "--compile-commands", "~/Public/llvm/llvm-project/compile_commands.json", "--num-parse-workers=1"]
         },
         {
             "name": "Python Debugger: llvm - with summary",

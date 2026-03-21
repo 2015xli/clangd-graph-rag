@@ -54,6 +54,8 @@ class SourceSpanProvider:
         self.assigned_parent_unmatched_alias = 0
         self.assigned_parent_by_member_list = 0
 
+    VARIABLE_KIND = {"Field", "StaticProperty", "EnumConstant", "Variable"}
+
     def enrich_symbols_with_span(self):
         """
         Orchestrates the enrichment of in-memory Symbol objects with span data.
@@ -555,12 +557,12 @@ class SourceSpanProvider:
             parent_synth_id = None
 
             # Fields: assign parent via enclosing container to names that have no body (just a name).
-            variable_kind = {"Field", "StaticProperty", "EnumConstant", "Variable"}
+            VARIABLE_KIND = {"Field", "StaticProperty", "EnumConstant", "Variable"}
             # This is for the functions that are not defined in the code, like constructor() = 0;
             # For this kind of functions, we ensure they don't have body definition.
             # Also for declarations of Struct and Class
-            special_kinds = {"Constructor", "Destructor", "InstanceMethod", "ConversionFunction", "Struct"}
-            if sym.kind in variable_kind or (sym.kind in special_kinds and not sym.body_location):
+            special_kinds = {"Constructor", "Destructor", "InstanceMethod", "ConversionFunction", "Struct", "Class"}
+            if sym.kind in VARIABLE_KIND or (sym.kind in special_kinds and not sym.body_location):
                 field_name = RelativeLocation(loc.start_line, loc.start_column, loc.end_line, loc.end_column)
                 field_span = SourceSpan(sym.name, "Variable", sym.language, field_name, field_name, '', '')
                 span_tree = file_span_data.get(loc.file_uri, {}) 
@@ -580,10 +582,10 @@ class SourceSpanProvider:
                             self.assigned_parent_no_span += 1
                     
                     if not parent_synth_id:
-                        # Variables and no-body Structs defined at top level have no parent scope
-                        if not sym.kind in {"Variable", "Struct"}:
+                        # Variables and no-body Structs/Classes defined at top level have no parent scope
+                        if not sym.kind in {"Variable", "Struct", "Class"}:
                             logger.debug(f"Could not find container for no-body {sym.kind}:{sym.id} - {sym.scope} - {sym.name} at {loc.file_uri}:{loc.start_line}:{loc.start_column}")
-                
+                        continue   
                 #now we have the parent scope id in parent_synth_id
 
             else:
@@ -681,10 +683,14 @@ class SourceSpanProvider:
         for sym_id, sym in self.symbol_parser.symbols.items():
             if sym.kind != 'TypeAlias': continue
 
+            if True:
+                if sym_id == "80451E61B2364407": 
+                    pass
+
             # Use sym.id (USR-derived) to look up a matching TypeAliasSpan
             matched_tas = unmatched_type_alias_spans.get(sym_id)
             if not matched_tas:
-                logger.warning(f"Could not find matching TypeAliasSpan for TypeAlias symbol {sym.name} at {sym.definition.file_uri}:{sym.definition.start_line}:{sym.definition.start_column}")
+                logger.debug(f"Could not find matching TypeAliasSpan for TypeAlias symbol {sym_id} {sym.name} at {sym.definition.file_uri}:{sym.definition.start_line}:{sym.definition.start_column}")
                 continue
             
             # Enrich existing Symbol
@@ -717,7 +723,7 @@ class SourceSpanProvider:
             self.synthetic_id_to_index_id[unmatched_tas.id] = new_sym.id 
 
         self.symbol_parser.symbols.update(synthetic_type_alias_symbols)
-        logger.info(f"Processed {len(type_alias_spans)} TypeAlias.")
+        logger.info(f"Processed {len(type_alias_spans)} TypeAlias spans.")
         logger.info(f"Matched {self.matched_typealias_count} symbols ({self.assigned_parent_matched_alias} newly assigned parent)."
                     f"Added {len(synthetic_type_alias_symbols)} synthetic symbols ({self.assigned_parent_unmatched_alias} with parent)."
                    )
@@ -863,7 +869,7 @@ class SourceSpanProvider:
         """Find the smallest enclosing SourceSpan node for a given position."""
         candidates = []
         for node in span_tree.values():
-            if self._span_is_within(span, node):
+            if node.kind not in self.VARIABLE_KIND and self._span_is_within(span, node):
                 candidates.append(node)
         if not candidates:
             return None
