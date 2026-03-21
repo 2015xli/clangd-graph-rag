@@ -9,7 +9,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "clangd_graph_rag_builder.py",
-            "args": ["~/NAS/home/bin/clang_anonymous_nested/anonymous_nested.idx.yaml", "~/NAS/home/bin/clang_anonymous_nested/", "--compile-commands", "~/NAS/home/bin/clang_anonymous_nested/compile_commands.json", "--num-parse-workers", "1", "--llm-api", "fake", "--num-local-workers", "10", "--llm-cache-reset", "--llm-cache-shards", "20"]
+            "args": ["~/NAS/home/bin/clang_anonymous_nested/anonymous_nested.idx_filtered.yaml", "~/NAS/home/bin/clang_anonymous_nested/", "--compile-commands", "~/NAS/home/bin/clang_anonymous_nested/compile_commands.json", "--num-parse-workers", "1", "--llm-api", "fake", "--num-local-workers", "10", "--llm-cache-reset", "--llm-cache-shards", "20"]
         },
         {
             "name": "Python Debugger: minijivm rag generator",
@@ -23,7 +23,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "clangd_graph_rag_builder.py",
-            "args": ["~/Public/llvm/build-21.1.2/llvm-21.1.2-index.yaml", "~/Public/llvm/llvm-project/", "--compile-commands", "~/Public/llvm/build-21.1.2/compile_commands.json"]
+            "args": ["~/Public/llvm/build-21.1.2/llvm-21.1.2-index-with-partial-specialization.yaml", "~/Public/llvm/llvm-project/", "--compile-commands", "~/Public/llvm/llvm-project/macro_compile_commands.json", "--num-parse-workers=1"]
         },
         {
             "name": "Python Debugger: llvm - with summary",

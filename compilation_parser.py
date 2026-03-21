@@ -50,6 +50,8 @@ class SourceSpan:
     original_name: Optional[str] = None
     # this field stores the ID of the macro that generates it
     expanded_from_id: Optional[str] = None
+    # List of USR-derived IDs of immediate semantic children (members)
+    member_ids: List[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict) -> 'SourceSpan':
@@ -62,7 +64,8 @@ class SourceSpan:
             id=data['Id'],
             parent_id=data['ParentId'],
             original_name=data.get('OriginalName'),
-            expanded_from_id=data.get('ExpandedFromId')
+            expanded_from_id=data.get('ExpandedFromId'),
+            member_ids=data.get('MemberIds', [])
         )
 
 @dataclass(frozen=True, slots=True)
@@ -227,7 +230,7 @@ class _ClangWorkerImpl:
     # --------------------------------------------------------
     # AST walking
     # --------------------------------------------------------
-    def _walk_ast(self, node, current_caller_cursor=None):
+    def _walk_ast(self, node, current_caller_cursor=None):        
         # Determine the current file and check if it's part of the project
         loc_file = node.location.file
         if loc_file:
@@ -290,7 +293,7 @@ class _ClangWorkerImpl:
         # file_name passed here was verified in _walk_ast
         name = node.spelling
         file_uri = f"file://{file_name}"
-        
+
         # Use location directly for macro name
         loc = node.location
         name_line, name_col = loc.line - 1, loc.column - 1
@@ -298,8 +301,14 @@ class _ClangWorkerImpl:
         body_start_line, body_start_col = node.extent.start.line - 1, node.extent.start.column - 1
         body_end_line, body_end_col = node.extent.end.line - 1, node.extent.end.column - 1
         
-        node_key = CompilationParser.make_symbol_key(name, "Macro", file_uri, name_line, name_col)
-        synthetic_id = CompilationParser.make_synthetic_id(node_key)
+        usr = node.get_usr()
+        if usr:
+            synthetic_id = CompilationParser.hash_usr_to_id(usr)
+        else:
+            # Fallback for nodes without USR (extremely rare for definitions).
+            # These will naturally fail Tier 1 ID matching and use Tier 2 Location matching.
+            node_key = CompilationParser.make_symbol_key(name, "Macro", file_uri, name_line, name_col)
+            synthetic_id = CompilationParser.make_synthetic_id(node_key)
         
         # Check if function-like
         try:
@@ -343,8 +352,11 @@ class _ClangWorkerImpl:
             node_key = CompilationParser.make_symbol_key(node.spelling, kind, file_uri, name_start_line, name_start_col)
             synthetic_id = CompilationParser.make_synthetic_id(node_key)
 
+        if synthetic_id == "AB049A4929FEAB02":
+            pass
+
         # ANONYMITY HANDLING: Use USR as name for debug info when no spelling is available.
-        is_anonymous = not node.spelling or node.spelling.contains("(unnamed") or node.spelling.startswith("(anonymous")
+        is_anonymous = not node.spelling or "(unnamed" in node.spelling
         node_name = usr if (is_anonymous and usr) else node.spelling
 
         # Deduplication check using the final ID.
@@ -352,7 +364,20 @@ class _ClangWorkerImpl:
             return  
 
         parent_id = self._get_parent_id(node)
+        # TODO: When the structure's name is expanded from macro, but body is not, the logic cannot find its expanded_from relation.
         original_name, expanded_from_id = self._get_macro_causality(node, file_uri)
+
+        # COLLECT MEMBER IDs for composite types
+        # This allows bridging macro-generated members back to their semantic parents.
+        member_ids = []
+        if node.kind.name in ClangParser.NODE_KIND_FOR_COMPOSITE_TYPES:
+            # Only iterate immediate children
+            for child in node.get_children():
+                # Filter for actual members (not access specifiers, attributes, etc.)
+                if child.kind.name in ClangParser.NODE_KIND_MEMBERS:
+                    child_usr = child.get_usr()
+                    if child_usr:
+                        member_ids.append(CompilationParser.hash_usr_to_id(child_usr))
 
         span = SourceSpan(
             name=sys.intern(node_name),
@@ -363,7 +388,8 @@ class _ClangWorkerImpl:
             id=synthetic_id,
             parent_id=parent_id,
             original_name=original_name,
-            expanded_from_id=expanded_from_id
+            expanded_from_id=expanded_from_id,
+            member_ids=member_ids
         )
         # Result dictionary is now keyed by ID.
         self.span_results[(sys.intern(file_uri), self._tu_hash)][synthetic_id] = span
@@ -462,8 +488,22 @@ class _ClangWorkerImpl:
     # --------------------------------------------------------
     
     def _get_parent_id(self, node) -> Optional[str]:
-        """Get parent_id based on semantic parent using USR hashing."""
+        """
+        Retrieves the parent_id for a node based on its semantic parent using USR hashing.
+        
+        This method also implements 'Parent Anchoring': if the parent is a composite type 
+        (Class, Struct, Enum, Union) that hasn't been processed yet, it proactively
+        triggers processing for that parent. This is essential for handling implicit
+        template specializations of member functions (e.g., template <> void Box<int>::open(){...}).
+        In this case the partial specialized class Box<int> does not explicitly exist. 
+        We have to create a phony parent structure span for the class. 
+        Note, the phony class does have correct USR and corresponding id (that can match clangd index id).
+        In clangd yaml index, the member function has a symbol and also a reference container id (equal to this phony parent id).
+        But clangd yaml does not have a symbol for that id. 
+        """
         parent = node.semantic_parent
+        
+        # Base case: top-level or linkage specs (like extern "C") have no parent_id in our graph.
         if not parent or parent.kind == clang.cindex.CursorKind.TRANSLATION_UNIT or parent.kind == clang.cindex.CursorKind.LINKAGE_SPEC:
             return None
             
@@ -471,17 +511,29 @@ class _ClangWorkerImpl:
         if not file_name:
             return None
         
+        # Verify if the parent is a kind we track as a body span.
         if parent.kind.name not in ClangParser.NODE_KIND_FOR_BODY_SPANS:
+            # Namespaces are scope containers but currently don't have SourceSpans.
             if parent.kind.name not in "ClangParser.NODE_KIND_NAMESPACE": 
-                logger.error(f"Parent {parent.kind.name} {parent.spelling} at {parent.location}) of node {node.spelling} at {node.location} is not in NODE_KIND_FOR_BODY_SPANS")
+                logger.error(f"Parent {parent.kind.name} ({parent.spelling}) of node {node.spelling} is not in NODE_KIND_FOR_BODY_SPANS")
                 return None
 
-        # Resolve parent ID via USR hashing. This ensures children link to the semantic parent ID.
+        # Determine the parent's semantic identity via USR.
         usr = parent.get_usr()
         if usr:
-            return CompilationParser.hash_usr_to_id(usr)
+            parent_id = CompilationParser.hash_usr_to_id(usr)
             
-        # Fallback for parent without USR
+            # PARENT ANCHORING: Ensure the parent has a SourceSpan record.
+            # If it's a composite type and hasn't been processed in this TU context, process it now.
+            if parent.kind.name in ClangParser.NODE_KIND_FOR_COMPOSITE_TYPES:
+                parent_uri = f"file://{os.path.abspath(file_name)}"
+                if parent_id not in self.span_results[(parent_uri, self._tu_hash)]:
+                    # Recursive call ensures the phony parent is anchored first.
+                    self._process_generic_node(parent, file_name)
+            
+            return parent_id
+            
+        # Fallback for parent without USR (extremely rare for definitions).
         file_uri = f"file://{os.path.abspath(file_name)}"
         line, col = self._get_symbol_name_location(parent)
         parent_kind = self._convert_node_kind_to_index_kind(parent)
@@ -545,14 +597,12 @@ class _ClangWorkerImpl:
         if not node.is_definition():
             return None, None
 
-        node_key = CompilationParser.make_symbol_key(
-            macro_def_cursor.spelling,
-            "Macro",
-            f"file://{def_file}",
-            def_loc.line - 1,
-            def_loc.column - 1
-        )
-        expanded_from_id = CompilationParser.make_synthetic_id(node_key)
+        usr = macro_def_cursor.get_usr()
+        if usr: 
+            expanded_from_id = CompilationParser.hash_usr_to_id(usr)
+        else:
+            node_key = CompilationParser.make_symbol_key(macro_def_cursor.spelling, "Macro", f"file://{def_file}", def_loc.line - 1, def_loc.column - 1)
+            expanded_from_id = CompilationParser.make_synthetic_id(node_key)
 
         file_path = unquote(urlparse(file_uri).path)
         original_name = self._get_source_text_for_extent(enclosing_inst.extent, file_path)
@@ -870,7 +920,11 @@ class CompilationParser:
                                     all_type_alias_spans[alias_id] = new_span
                             all_macro_spans.update(result_dict.get("macro_spans", {}))
                             for (file_uri, tu_hash), id_to_span_dict in result_dict["span_results"].items():
-                                if tu_hash not in file_tu_hash_map[file_uri]:
+                                # TODO: We don't use file_tu_hash_map now, because a phony parent node span may be created after the header already being parsed. 
+                                # In this case, since the already-parsed header file's hash is already in the map, the phony parent node cannot be added.
+                                # Phony parent node is created when parsing a specialized member function, who does not have explicit partial specialized class defined.
+                                # That leads to orphan members in the graph and finally be cleaned. 
+                                if True: #tu_hash not in file_tu_hash_map[file_uri]:  
                                     file_tu_hash_map[file_uri].add(tu_hash)
                                     all_spans[file_uri].update(id_to_span_dict)
                         except Exception as e:
@@ -898,6 +952,13 @@ class ClangParser(CompilationParser):
     NODE_KIND_FOR_SCOPES =  NODE_KIND_NAMESPACE | NODE_KIND_FOR_COMPOSITE_TYPES
     NODE_KIND_TYPE_ALIASES = {clang.cindex.CursorKind.TYPE_ALIAS_TEMPLATE_DECL.name, clang.cindex.CursorKind.TYPE_ALIAS_DECL.name, clang.cindex.CursorKind.TYPEDEF_DECL.name}
     NODE_KIND_FOR_USER_DEFINED_TYPES = NODE_KIND_FOR_COMPOSITE_TYPES | NODE_KIND_TYPE_ALIASES
+
+    # Kinds that represent semantic members of a composite type
+    NODE_KIND_MEMBERS = NODE_KIND_CALLERS | {
+        clang.cindex.CursorKind.FIELD_DECL.name,
+        clang.cindex.CursorKind.ENUM_CONSTANT_DECL.name,
+        clang.cindex.CursorKind.VAR_DECL.name, # For static members
+    } | NODE_KIND_FOR_USER_DEFINED_TYPES # For nested types
 
     def parser_kind_to_index_kind(self, kind: str, lang: str) -> str:
         if kind in ClangParser.NODE_KIND_FUNCTIONS: return "Function"
