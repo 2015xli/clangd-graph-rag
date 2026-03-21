@@ -230,50 +230,78 @@ class _ClangWorkerImpl:
     # --------------------------------------------------------
     # AST walking
     # --------------------------------------------------------
-    def _walk_ast(self, node, current_caller_cursor=None):        
-        # Determine the current file and check if it's part of the project
-        loc_file = node.location.file
-        if loc_file:
-            file_name = os.path.abspath(loc_file.name)
-        elif node.kind == clang.cindex.CursorKind.TRANSLATION_UNIT:
-            file_name = os.path.abspath(node.spelling)
-        else:
-            # Skip nodes without a valid file (e.g., predefined macros, built-ins)
-            return
+    def _walk_ast(self, root_node):
+        """
+        Iteratively walks the AST using an explicit stack to avoid recursion depth 
+        limits. File llvm/build/tools/clang/include/clang/Basic/arm_sve_streaming_attrs.inc that
+        is included by llvm/llvm-project/clang/lib/Sema/SemaARM.cpp TU has >7000 nested nodes 
+        that causes stack overflow with recursion (default 4000).
+        Manages caller context propagation while delegating node analysis to _process_node.
+        """
+        # Stack stores tuples of (node, current_caller_cursor)
+        stack = [(root_node, None)]
+        
+        while stack:
+            node, current_caller_cursor = stack.pop()
 
-        if not file_name.startswith(self.project_path):
-            return
+            # 1. Determine the current file and filter for project path
+            loc_file = node.location.file
+            if loc_file:
+                file_name = os.path.abspath(loc_file.name)
+            elif node.kind == clang.cindex.CursorKind.TRANSLATION_UNIT:
+                file_name = os.path.abspath(node.spelling)
+            else:
+                continue # Skip built-ins/predefined nodes
 
-        # --- Update Caller Context ---
-        # If this node is a function/method definition, it becomes the new caller context for its children.
-        new_caller_cursor = current_caller_cursor
-        if node.kind.name in ClangParser.NODE_KIND_CALLERS:
-            new_caller_cursor = node
+            if not file_name.startswith(self.project_path):
+                continue
 
-        # --- Process this node ---
-        # 1. If it's a macro definition, process its span
+            # 2. Update Caller Context
+            # Functions/methods define the context for any child CALL_EXPR nodes.
+            new_caller_cursor = current_caller_cursor
+            if node.kind.name in ClangParser.NODE_KIND_CALLERS:
+                new_caller_cursor = node
+
+            # 3. Analyze the Node
+            self._process_node(node, file_name, current_caller_cursor)
+
+            # 4. Push children to stack
+            # Reversed list maintains identical DFS visit order to the recursive version.
+            try:
+                children = list(node.get_children())
+                for c in reversed(children):
+                    stack.append((c, new_caller_cursor))
+            except Exception:
+                # Handle rare libclang cursor failures gracefully
+                continue
+
+    def _process_node(self, node, file_name, current_caller_cursor):
+        """
+        Encapsulates the logic for identifying and extracting data from a specific AST node.
+        """
+        # 1. Macro Definitions (Spans)
         if node.kind == clang.cindex.CursorKind.MACRO_DEFINITION:
             if self._should_process_node(node, file_name):
                 self._process_macro_definition(node, file_name)
 
-        # 2. If it's a macro instantiation, record it for causality tracking
+        # 2. Macro Instantiations (Causality)
         elif node.kind == clang.cindex.CursorKind.MACRO_INSTANTIATION:
             self.instantiations[f"file://{file_name}"].append(node)
 
-        # 3. If it's a definition, process its span
+        # 3. Generic Definitions (Functions, Classes, Structs)
         elif node.is_definition() and node.kind.name in ClangParser.NODE_KIND_FOR_BODY_SPANS:
             if self._should_process_node(node, file_name):
                 self._process_generic_node(node, file_name)
 
-        # 4. If it's a TypeAlias declaration, process it
+        # 4. Type Aliases
         elif node.kind.name in ClangParser.NODE_KIND_TYPE_ALIASES:
             if self._should_process_node(node, file_name):
                 self._process_type_alias_node(node, file_name)
 
-        # 5. If it's a call expression inside a function, process the static call
+        # 5. Call Expressions (Static Call Relations)
         elif node.kind == clang.cindex.CursorKind.CALL_EXPR and current_caller_cursor:
             callee_cursor = node.referenced
-            # Check if the callee is a static function (internal linkage)
+            # Only record internal-linkage calls (Static/Local functions)
             if callee_cursor and callee_cursor.linkage == clang.cindex.LinkageKind.INTERNAL:
                 caller_usr = current_caller_cursor.get_usr()
                 callee_usr = callee_cursor.get_usr()
@@ -281,10 +309,6 @@ class _ClangWorkerImpl:
                     caller_id = CompilationParser.hash_usr_to_id(caller_usr)
                     callee_id = CompilationParser.hash_usr_to_id(callee_usr)
                     self.static_call_relations.add((caller_id, callee_id))
-
-        # --- Recurse to children ---
-        for c in node.get_children():
-            self._walk_ast(c, new_caller_cursor)
 
     # --------------------------------------------------------
     # Span processing
@@ -523,7 +547,7 @@ class _ClangWorkerImpl:
         if usr:
             parent_id = CompilationParser.hash_usr_to_id(usr)
             
-            # PARENT ANCHORING: Ensure the parent has a SourceSpan record.
+            # PHONY PARENT ANCHORING: Ensure the parent has a SourceSpan record.
             # If it's a composite type and hasn't been processed in this TU context, process it now.
             if parent.kind.name in ClangParser.NODE_KIND_FOR_COMPOSITE_TYPES:
                 parent_uri = f"file://{os.path.abspath(file_name)}"
