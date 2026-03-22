@@ -214,7 +214,9 @@ class SymbolProcessor:
         self._ingest_grouped_parental_relationships(grouped_scope_relations, "SCOPE_CONTAINS", neo4j_mgr)
         self._ingest_grouped_parental_relationships(grouped_nested_relations, "HAS_NESTED", neo4j_mgr)
         
-        # ingest relationships for (SCOPE)-[:DEFINES_TYPE_ALIAS]->(:TYPE_ALIAS)
+        # Ingest relationships for (SCOPE)-[:DEFINES_TYPE_ALIAS]->(:TYPE_ALIAS)
+        # NOTE: This relationship is used for all parents (Class, Struct, Namespace).
+        # For Namespaces, this serves as the semantic equivalent of SCOPE_CONTAINS for TypeAliases.
         grouped_defines_type_alias_relations = defaultdict(list)
         type_alias_symbols = processed_symbols.get('TYPE_ALIAS', [])
         for symbol_data in type_alias_symbols:

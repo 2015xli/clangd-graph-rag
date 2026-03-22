@@ -1,0 +1,198 @@
+2026-03-22 10:48:22,933 - INFO - Fetching graph schema...
+## Schema Notes:
+- All nodes have an 'ENTITY' label (besides their specific semantic labels) and a globally unique 'id' property.
+- For all other graph traversals, prefer using the specific semantic labels shown below.
+
+## Relationships:
+  (CLASS_STRUCTURE) -[:DEFINES_TYPE_ALIAS]-> (TYPE_ALIAS)
+  (CLASS_STRUCTURE) -[:EXPANDED_FROM]-> (MACRO)
+  (CLASS_STRUCTURE) -[:HAS_FIELD]-> (FIELD)
+  (CLASS_STRUCTURE) -[:HAS_METHOD]-> (METHOD)
+  (CLASS_STRUCTURE) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE)
+  (CLASS_STRUCTURE) -[:INHERITS]-> (CLASS_STRUCTURE)
+  (DATA_STRUCTURE) -[:EXPANDED_FROM]-> (MACRO)
+  (DATA_STRUCTURE) -[:HAS_FIELD]-> (FIELD)
+  (DATA_STRUCTURE) -[:HAS_METHOD]-> (METHOD)
+  (DATA_STRUCTURE) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE)
+  (FIELD) -[:EXPANDED_FROM]-> (MACRO)
+  (FILE) -[:DECLARES]-> (CLASS_STRUCTURE|FUNCTION|NAMESPACE)
+  (FILE) -[:DEFINES]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|MACRO|TYPE_ALIAS|VARIABLE)
+  (FILE) -[:INCLUDES]-> (FILE)
+  (FOLDER) -[:CONTAINS]-> (FILE|FOLDER)
+  (FUNCTION) -[:CALLS]-> (FUNCTION|METHOD)
+  (FUNCTION) -[:EXPANDED_FROM]-> (MACRO)
+  (FUNCTION) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE)
+  (METHOD) -[:CALLS]-> (FUNCTION|METHOD)
+  (METHOD) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE)
+  (METHOD) -[:OVERRIDDEN_BY]-> (METHOD)
+  (NAMESPACE) -[:DEFINES_TYPE_ALIAS]-> (TYPE_ALIAS)
+  (NAMESPACE) -[:SCOPE_CONTAINS]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|NAMESPACE|VARIABLE)
+  (PROJECT) -[:CONTAINS]-> (FOLDER)
+  (TYPE_ALIAS) -[:ALIAS_OF]-> (CLASS_STRUCTURE|DATA_STRUCTURE|TYPE_ALIAS)
+  (TYPE_ALIAS) -[:EXPANDED_FROM]-> (MACRO)
+
+## Node Properties:
+  (CLASS_STRUCTURE)
+    body_location: LIST
+    has_definition: BOOLEAN
+    id: STRING
+    kind: STRING
+    language: STRING
+    name: STRING
+    name_location: LIST
+    original_name: STRING
+    path: STRING
+    scope: STRING
+    summary: STRING
+    summaryEmbedding: LIST
+  (DATA_STRUCTURE)
+    body_location: LIST
+    has_definition: BOOLEAN
+    id: STRING
+    kind: STRING
+    language: STRING
+    name: STRING
+    name_location: LIST
+    original_name: STRING
+    path: STRING
+    scope: STRING
+  (FIELD)
+    body_location: LIST
+    has_definition: BOOLEAN
+    id: STRING
+    is_static: BOOLEAN
+    kind: STRING
+    language: STRING
+    name: STRING
+    name_location: LIST
+    path: STRING
+    scope: STRING
+    type: STRING
+  (FILE)
+    id: STRING
+    name: STRING
+    path: STRING (INDEXED) (UNIQUE)
+    summary: STRING
+    summaryEmbedding: LIST
+  (FOLDER)
+    id: STRING
+    name: STRING
+    path: STRING (INDEXED) (UNIQUE)
+    summary: STRING
+    summaryEmbedding: LIST
+  (FUNCTION)
+    body_location: LIST
+    code_analysis: STRING
+    code_hash: STRING
+    has_definition: BOOLEAN
+    id: STRING
+    kind: STRING
+    language: STRING
+    name: STRING
+    name_location: LIST
+    original_name: STRING
+    path: STRING
+    return_type: STRING
+    scope: STRING
+    signature: STRING
+    summary: STRING
+    summaryEmbedding: LIST
+    type: STRING
+  (MACRO)
+    body_location: LIST
+    has_definition: BOOLEAN
+    id: STRING
+    is_function_like: BOOLEAN
+    kind: STRING
+    language: STRING
+    macro_definition: STRING
+    name: STRING
+    name_location: LIST
+    path: STRING
+    scope: STRING
+  (METHOD)
+    body_location: LIST
+    code_analysis: STRING
+    code_hash: STRING
+    has_definition: BOOLEAN
+    id: STRING
+    kind: STRING
+    language: STRING
+    name: STRING
+    name_location: LIST
+    path: STRING
+    return_type: STRING
+    scope: STRING
+    signature: STRING
+    summary: STRING
+    summaryEmbedding: LIST
+    type: STRING
+  (NAMESPACE)
+    has_definition: BOOLEAN
+    id: STRING
+    kind: STRING
+    language: STRING
+    name: STRING
+    name_location: LIST
+    path: STRING
+    qualified_name: STRING
+    scope: STRING
+    summary: STRING
+    summaryEmbedding: LIST
+  (PROJECT)
+    commit_hash: STRING
+    id: STRING
+    name: STRING
+    path: STRING
+    summary: STRING
+    summaryEmbedding: LIST
+  (TYPE_ALIAS)
+    aliased_canonical_spelling: STRING
+    aliased_type_kind: STRING
+    body_location: LIST
+    expanded_from_id: STRING
+    file_path: STRING
+    has_definition: BOOLEAN
+    id: STRING
+    kind: STRING
+    language: STRING
+    name: STRING
+    name_location: LIST
+    namespace_id: STRING
+    original_name: STRING
+    path: STRING
+    qualified_name: STRING
+    scope: STRING
+  (VARIABLE)
+    body_location: LIST
+    has_definition: BOOLEAN
+    id: STRING
+    kind: STRING
+    language: STRING
+    name: STRING
+    name_location: LIST
+    path: STRING
+    scope: STRING
+    type: STRING
+
+
+## Property Explanations:
+  id: Unique identifier for the node.
+  name: Name of the entity (e.g., function name, file name).
+  original_name: The original source text that generated this symbol (e.g., a macro invocation like DECLARE_MODULE(FS)).
+  path: Relative path to the project root if it is within the project folder. The PROJECT node has the absolute path of the project root.
+  name_location: Entity's name location in the file, showing the start position: [line, column].
+  body_location: Entity's body location in the file, showing the range: [start_line, start_column, end_line, end_column].
+  code_hash: MD5 hashing value of entity's original source code body. Used to detect changed code.
+  kind: Type of symbol (e.g., Function, Struct, Variable).
+  scope: Visibility scope (e.g., global, static).
+  language: Programming language of the source code.
+  type: Data type of the symbol (e.g., int, void*).
+  return_type: Return type of a function/method.
+  signature: Full signature of a function/method.
+  has_definition: Boolean indicating if a symbol has a definition/implementation, not just a declaration.
+  macro_definition: The full source code text of a macro definition (e.g., #define MAX 100).
+  code_analysis: Analysis of the entity's code literal functionality.
+  summary: Context-aware summary of the node entity's purpose.
+  summaryEmbedding: Vector embedding of the 'summary' for semantic similarity search.
+

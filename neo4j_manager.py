@@ -405,7 +405,7 @@ class Neo4jManager:
     def purge_symbols_defined_in_files(self, file_paths: List[str]) -> int:
         """
         Finds and deletes all symbols defined in the given file paths, including
-        all their owned descendant symbols (methods, fields, nested types, etc.).
+        Functions, Methods, Classes, Structs, Variables, Macros, and TypeAliases.
         """
         if not file_paths:
             return 0
@@ -452,7 +452,10 @@ class Neo4jManager:
             return deleted_symbols
 
     def purge_symbols_declared_in_files(self, file_paths: List[str]) -> int:
-        """Finds and deletes all symbols declared in the given file paths."""
+        """
+        Finds and deletes all symbols declared in the given file paths,
+        including Namespaces and TypeAliases (if declared separately).
+        """
         if not file_paths:
             return 0
         

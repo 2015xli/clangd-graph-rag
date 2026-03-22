@@ -1,45 +1,71 @@
-# `graph_update_scope_builder.py`
+# Algorithm Summary: `graph_update_scope_builder.py`
 
-## 1. Purpose
+## 1. Purpose: The "Sufficient Subset" Strategy
 
-This module provides the `GraphUpdateScopeBuilder` class, a specialized component responsible for executing the most complex phase of an incremental graph update: **building the "sufficient subset" of symbols** needed to correctly patch the graph.
+The `GraphUpdateScopeBuilder` is the architectural "brain" of the incremental update process. In a complex C++ project, symbols are highly interdependent; a change in one file (e.g., adding a macro or a virtual method) can cascade across the graph. A naive update that only re-ingests modified files would result in "broken" or missing relationships.
 
-When files in a project are changed, the `clangd_graph_rag_updater` determines the set of "dirty files". It then delegates the task of figuring out the precise scope of the update to this module. The `GraphUpdateScopeBuilder` identifies all symbols directly affected by the changes and expands that set to include their direct dependencies (parents, children, base classes, etc.). The result is a small, self-contained `SymbolParser` object ("mini-parser") that is passed back to the updater to perform the actual graph ingestion.
+The purpose of this module is to construct a **Sufficient Subset** of symbols—a self-contained "mini-index" that includes:
+1.  **Seed Symbols**: Every symbol directly defined or declared in the "dirty" files.
+2.  **Structural Neighbors**: All symbols required to correctly reconstruct every relationship (Calls, Inheritance, Macros, etc.) involving those seed symbols, even if the neighbors themselves reside in unchanged files.
 
-This encapsulation improves the project architecture by separating the high-level orchestration of the update process from the complex, low-level logic of dependency scope determination.
+By building this mini-parser, the system can surgically "patch" the Neo4j graph, ensuring perfect integrity without the multi-hour cost of a full rebuild.
 
-## 2. Key Components & Logic
+---
 
-### `GraphUpdateScopeBuilder` Class
+## 2. Orchestration: The Build Pipeline
 
-This is the main class that orchestrates the scope-building process.
+The class manages the transition from raw source changes to an enriched, dependency-aware symbol set through two primary public methods.
 
-#### `build_miniparser_for_dirty_scope()` Method
+### 2.1. `build_miniparser_for_dirty_scope()`
+This method identifies the set of symbols that need to be re-ingested. It follows a deterministic 4-pass sequence:
 
-This is the primary public method and contains the core logic for determining the update scope. It receives the set of "dirty files" and the full, up-to-date `SymbolParser` object. It performs the following critical steps in order:
+1.  **Local Source Parsing**: It invokes the `CompilationManager` to parse **only the dirty files**. 
+    *   **Rationale**: This gathers fresh "ground truth" (function body spans, macro expansions, and include directives) for the changed files with minimal CPU overhead.
+2.  **Full-Index Enrichment**: It uses `SourceSpanProvider` to enrich the **entire `full_symbol_parser`** using the fresh spans.
+    *   **Rationale**: **This is the most critical step for correctness.** A change in a dirty file (like a specialized member function) might provide the identity for a "phony" parent or a macro-generated symbol that resides in a non-dirty header. By enriching the full set, we ensure dependency expansion uses the most accurate semantic view of the entire codebase.
+3.  **Seed Identification**: It identifies all symbols whose `definition` or `declaration` coordinates reside within the dirty file URIs.
+4.  **Subset Expansion**: It delegates to `_create_sufficient_subset()` to perform the 1-hop dependency expansion.
 
-1.  **Parse Dirty Files**: It first calls the `CompilationManager` to parse the source code of *only* the dirty files. This provides the most up-to-date source code information (function body spans, lexical parent/child relationships, and include directives) for the changed parts of the codebase.
+### 2.2. `rebuild_mini_scope()`
+This method is called after the updater has purged stale data from the graph. Its role is to run the standard ingestion processors (`PathProcessor`, `SymbolProcessor`, `CallGraphBuilder`) on the mini-parser.
+*   **Rationale**: Because the mini-parser is a valid `SymbolParser` object, we can reuse 100% of the high-fidelity ingestion logic from the full builder, ensuring the incremental update produces a graph identical in quality to a full build.
 
-2.  **Enrich Full Symbol Set**: **This is a critical step for correctness.** It then uses the `SourceSpanProvider` to enrich the **entire `full_symbol_parser` object** with the fresh information gathered in the previous step. By updating the full set of symbols, it ensures that any changes to lexical structure (e.g., a function moving into a class, a class gaining a new parent) are reflected *before* dependency analysis occurs.
+---
 
-3.  **Identify Seed Symbols**: With the full symbol set now accurately reflecting the new state of the code, it identifies the initial "seed symbols"—those directly defined within the dirty files.
+## 3. The Expansion Algorithm: `_create_sufficient_subset`
 
-4.  **Create Sufficient Subset**: It calls the internal `_create_sufficient_subset()` method to expand this seed set into a complete, self-contained group of symbols and returns the resulting "mini-parser".
+This internal method implements the logic for identifying the "Sufficient Subset." It is designed around the principle of **Bi-directional 1-Hop Expansion**.
 
-#### `rebuild_mini_scope()` Method
+### 3.1. Phase 1: Pre-computation (Registry Building)
+Before expanding, the algorithm performs a single pass over the **full symbol set** to build high-performance reverse-lookup maps. This turns complex graph traversals into O(1) dictionary lookups.
+*   **Containment Map**: `parent_id` -> `Set[child_id]`.
+*   **Namespace Map**: `qualified_name` -> `Set[child_id]`.
+*   **Macro Map**: `expanded_from_id` -> `Set[symbol_id]`.
+*   **TypeAlias Map**: `aliased_type_id` -> `Set[aliaser_id]`.
+*   **Bi-directional Relations**: Inheritance, Overrides, and Call Graphs are indexed in both directions.
 
-This method is called by the updater *after* the old data has been purged from the graph. Its role is to take the `mini_symbol_parser` created by the previous method and run the actual ingestion processors (`PathProcessor`, `SymbolProcessor`, `IncludeRelationProvider`, `ClangdCallGraphExtractor`) on it to surgically patch the graph with the new and updated information.
+### 3.2. Phase 2: Bi-directional Expansion
+The algorithm iterates through every seed symbol and pulls its "neighbors" into the subset. To maintain graph integrity, every relationship type is expanded in both directions:
 
-#### `_create_sufficient_subset()` Method
+| Relationship | Upward Expansion (Child -> Parent) | Downward Expansion (Parent -> Child) |
+| :--- | :--- | :--- |
+| **Lexical** | Pull in `parent_id` symbol. | Pull in all children via `containment_graph`. |
+| **Namespace** | Pull in parent Namespace via `scope`. | Pull in all children via `scope_to_children_ids`. |
+| **Calls** | Pull in all `callers`. | Pull in all `callees`. |
+| **Inheritance** | Pull in all `base_classes`. | Pull in all `derived_classes`. |
+| **Overrides** | Pull in `overridden_methods`. | Pull in `overriding_methods`. |
+| **Macros** | Pull in source `MACRO` via `expanded_from_id`. | Pull in all `expanded_symbols` (Redundant but safe). |
+| **TypeAlias** | Pull in `aliaser_ids` (Up to the aliaser). | Pull in `aliased_type_id` (Down to the target). |
 
-This is the core intellectual property of the incremental update feature. Its goal is to expand the small set of seed symbols to include every other symbol required to correctly reconstruct all relationships, even if those other symbols reside in unchanged files.
+---
 
-**Algorithm:**
+## 4. Design Rationales
 
-1.  **Pre-computation:** For performance, it first scans the full (and now fully enriched) symbol list to build several temporary, in-memory lookup tables for all possible relationships:
-    *   A `parent_id` to children map for lexical containment.
-    *   A `scope` name to ID map for namespace containment.
-    *   Bi-directional graphs for inheritance (`:INHERITS`) and method overrides (`:OVERRIDDEN_BY`).
-    *   Bi-directional call graph maps (callers and callees).
+### 4.1. Rationale: Bi-directionality
+If a seed symbol (e.g., a Class) is re-ingested, we must pull in its neighbors from *both* directions. If we only pulled in its parent, we would lose the connections to its children (Methods) that reside in unchanged files. Bi-directional expansion ensures that no matter which "end" of a relationship changes, the link is correctly re-materialized in Neo4j.
 
-2.  **Single-Level Dependency Expansion:** The algorithm performs a **1-hop expansion** from the initial seed set. It iterates through each seed symbol and uses the lookup tables to find all directly related symbols (its callers, callees, parent class, base classes, derived classes, children, etc.). All newly discovered symbols are added to a final set. This ensures the subset is self-contained for rebuilding all direct relationships of the changed symbols.
+### 4.2. Rationale: Redundancy in Macro Expansion
+While downward expansion from a Macro to its expanded symbols is technically redundant (any change to a macro expansion would naturally mark the expanded symbol's file as "dirty"), the logic is included for **architectural completeness**. It ensures the subset is mathematically "sufficient" to describe the Macro's role in the system, even in edge cases involving complex header inclusions.
+
+### 4.3. Rationale: One-Hop Limit
+Expansion is strictly limited to **1-hop**. While dependencies can be deeper (e.g., a call chain A->B->C), a 1-hop expansion is sufficient because the `SymbolProcessor` and `CallGraphBuilder` only operate on direct relationships. By capturing the immediate neighbors of every changed entity, we provide enough context to reconstruct every "edge" that could have been affected by the change.
