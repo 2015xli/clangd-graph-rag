@@ -91,14 +91,18 @@ class GraphUpdateScopeBuilder:
 
         # 3. Find the seed symbols
         dirty_file_uris = {f"file://{os.path.abspath(f)}" for f in dirty_files}
-        seed_symbol_ids = {
-            s.id for s in full_symbol_parser.symbols.values()
-            if s.definition and s.definition.file_uri in dirty_file_uris \
-                or s.declaration and s.declaration.file_uri in dirty_file_uris
+        self.seed_symbol_to_label = {
+            s.id: Symbol.get_node_label(s)
+            for s in full_symbol_parser.symbols.values()
+            if (s.definition and s.definition.file_uri in dirty_file_uris) \
+                or (s.declaration and s.declaration.file_uri in dirty_file_uris)
         }
+        # Filter out nodes without a valid label (structural nodes are handled elsewhere)
+        self.seed_symbol_to_label = {sid: label for sid, label in self.seed_symbol_to_label.items() if label}
+        self.seed_symbol_ids = set(self.seed_symbol_to_label.keys())
 
         # 4. Create the "sufficient subset" of symbols        
-        self.mini_symbol_parser = self._create_sufficient_subset(full_symbol_parser, seed_symbol_ids)
+        self.mini_symbol_parser = self._create_sufficient_subset(full_symbol_parser, self.seed_symbol_ids)
 
         return self.mini_symbol_parser
 

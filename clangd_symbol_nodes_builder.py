@@ -91,43 +91,30 @@ class SymbolProcessor:
             symbol_data["expanded_from_id"] = sym.expanded_from_id
 
         # --- Symbol Kind to Node Label Mapping ---
-        if sym.kind == "Namespace":
-            symbol_data["node_label"] = "NAMESPACE"
+        node_label = Symbol.get_node_label(sym)
+        if not node_label:
+            return None
+        
+        symbol_data["node_label"] = node_label
+
+        if node_label == "NAMESPACE":
             symbol_data["qualified_name"] = sym.scope + sym.name + '::'
-        elif sym.kind == "Macro":
-            symbol_data["node_label"] = "MACRO"
+        elif node_label == "MACRO":
             symbol_data["is_function_like"] = sym.is_macro_function_like
             symbol_data["macro_definition"] = sym.macro_definition
-        elif sym.kind == "Function":
-            symbol_data["node_label"] = "FUNCTION"
+        elif node_label in ("FUNCTION", "METHOD"):
             symbol_data.update({"signature": sym.signature, "return_type": sym.return_type, "type": sym.type})
-        elif sym.kind in ("InstanceMethod", "StaticMethod", "Constructor", "Destructor", "ConversionFunction"):
-            symbol_data["node_label"] = "METHOD"
-            symbol_data.update({"signature": sym.signature, "return_type": sym.return_type, "type": sym.type})
-        elif sym.kind == "Class":
-            symbol_data["node_label"] = "CLASS_STRUCTURE"
-        elif sym.kind == "Struct":
-            symbol_data["node_label"] = "CLASS_STRUCTURE" if sym.language and sym.language.lower() == "cpp" else "DATA_STRUCTURE"
-        elif sym.kind in ("Union", "Enum"):
-            symbol_data["node_label"] = "DATA_STRUCTURE"
-        elif sym.kind == "Field":
-            symbol_data["node_label"] = "FIELD"
-            symbol_data.update({"type": sym.type, "is_static": False})
-        elif sym.kind in ("StaticProperty", "EnumConstant"):
-            symbol_data["node_label"] = "FIELD"
-            symbol_data.update({"type": sym.type, "is_static": True})
-        elif sym.kind == "Variable":
-            symbol_data["node_label"] = "VARIABLE"
+        elif node_label == "FIELD":
+            is_static = (sym.kind in ("StaticProperty", "EnumConstant"))
+            symbol_data.update({"type": sym.type, "is_static": is_static})
+        elif node_label == "VARIABLE":
             symbol_data.update({"type": sym.type})
-        elif sym.kind == "TypeAlias":
-            symbol_data["node_label"] = "TYPE_ALIAS"
+        elif node_label == "TYPE_ALIAS":
             symbol_data["aliased_canonical_spelling"] = sym.aliased_canonical_spelling
             symbol_data["aliased_type_id"] = sym.aliased_type_id
             symbol_data["aliased_type_kind"] = sym.aliased_type_kind
             symbol_data["scope"] = sym.scope
             symbol_data["qualified_name"] = sym.scope + sym.name
-        else:
-            return None
 
         if sym.definition:
             abs_file_path = unquote(urlparse(sym.definition.file_uri).path)

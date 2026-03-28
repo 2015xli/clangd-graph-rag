@@ -41,7 +41,7 @@ The update process is divided into a sequence of high-level phases orchestrated 
 
 *   **Component**: `neo4j_manager.Neo4jManager`
 *   **Purpose**: To remove all outdated information from the graph, creating a clean slate for the new data.
-*   **Mechanism**: It purges all symbols, relationships, and file nodes associated with the "dirty" and "deleted" files. This now includes a call to `cleanup_orphaned_namespaces()` to correctly handle C++ namespaces that may become empty.
+*   **Mechanism**: It purges all symbols, relationships, and file nodes associated with the "dirty" and "deleted" files.
 *   **Design Note**: This purge is intentionally performed *after* the sufficient subset has been built. This allows a developer to more easily debug the scope-building logic by comparing the in-memory "mini-parser" against the existing, un-purged data in the graph.
 
 ### Phase 5: Rebuild Dirty Scope (Ingestion)

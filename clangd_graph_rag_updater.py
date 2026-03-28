@@ -19,6 +19,7 @@ from rag_updater import RagUpdater
 from include_relation_provider import IncludeRelationProvider
 from compilation_parser import CompilationParser # Import CompilationParser
 from graph_update_scope_builder import GraphUpdateScopeBuilder
+from graph_debug_manager import GraphDebugManager
 
 from log_manager import init_logging
 init_logging()
@@ -46,6 +47,7 @@ class GraphUpdater:
             if not neo4j_mgr.check_connection():
                 return 1
             self.neo4j_mgr = neo4j_mgr
+            debug_mgr = GraphDebugManager(self.neo4j_mgr)
 
             # Pre-update: Remove agent-facing schema to ensure a clean slate for the build logic
             self.neo4j_mgr.remove_agent_facing_schema()
@@ -96,10 +98,38 @@ class GraphUpdater:
             # If we purge before the mini_symbol_parser building, we lose lots of nodes in the graph that can be useful for the mini_symbol_parser debugging.
             dirty_files_rel = {os.path.relpath(f, self.project_path) for f in dirty_files}
             deleted_files_rel = [os.path.relpath(f, self.project_path) for f in git_changes['deleted']]
+            
+            # --- DEBUGGING: Pre-Purge Dump ---
+            if self.args.debug_incremental:
+                debug_mgr.remove_updated_property() # Clean up from previous potential failed runs
+                debug_mgr.dump_purged_scope(
+                    list(dirty_files_rel | set(deleted_files_rel)), 
+                    deleted_files_rel, 
+                    scope_builder.seed_symbol_ids
+                )
+            
             self._purge_stale_graph_data(dirty_files_rel, deleted_files_rel)
+            
+            # --- FIX: Purge by ID to handle USR collisions and identity migration ---
+            if scope_builder.seed_symbol_to_label:
+                self.neo4j_mgr.purge_nodes_by_id(
+                    scope_builder.seed_symbol_to_label, 
+                    dirty_files_rel, 
+                    self.args.debug_incremental
+                )
 
             # Phase 5: Rebuild the dirty scope. 
+            # --- DEBUGGING: Install Trigger ---
+            if self.args.debug_incremental:
+                debug_mgr.install_update_trigger(new_commit)
+            
             scope_builder.rebuild_mini_scope()
+            
+            # --- DEBUGGING: Post-Update Dump and Cleanup ---
+            if self.args.debug_incremental:
+                debug_mgr.dump_updated_scope(new_commit)
+                debug_mgr.remove_update_trigger()
+                debug_mgr.remove_updated_property()
 
             # Phase 6: Clean up orphan nodes
             self._cleanup_graph()
@@ -148,22 +178,23 @@ class GraphUpdater:
         return impacted_files
 
     def _purge_stale_graph_data(self, dirty_files_rel: Set[str], deleted_files_rel: List[str]):
-        """ Purge all the nodes of deleted files, and 
-        all the nodes defined/declared by either deleted or dirty files (and relationships to/from the nodes).
-        NOTE: We don't prune empty NAMESPACE and PATH nodes recursively after files and symbols are purged
-        because if the parent's parent namespace node is deleted, 
-        the seed symbol nodes will not be able to find a namespace node to attach to.
-        This may lead to some nodes becoming orphans and getting deleted finally.
-        So we only prune the empty NAMESPACE and PATH nodes in the final cleanup phase.
+        """ Purge all the nodes anchored to deleted or dirty files, and 
+        handle declaration cleanup for symbols defined elsewhere.
         """
         logger.info("\n--- Phase 3: Purging Stale Graph Data ---")
-        files_to_purge_symbols_from = list(dirty_files_rel | set(deleted_files_rel))
+        files_to_purge = list(dirty_files_rel | set(deleted_files_rel))
 
-        if files_to_purge_symbols_from:
-            logger.info(f"Purging symbols and includes from {len(files_to_purge_symbols_from)} files.")
-            self.neo4j_mgr.purge_symbols_defined_in_files(files_to_purge_symbols_from)
-            self.neo4j_mgr.purge_symbols_declared_in_files(files_to_purge_symbols_from)
-            self.neo4j_mgr.purge_include_relations_from_files(files_to_purge_symbols_from)
+        if files_to_purge:
+            logger.info(f"Purging nodes and includes from {len(files_to_purge)} files.")
+            # 1. Purge everything that identifies as being from these files (Definitions + Own Declares)
+            self.neo4j_mgr.purge_nodes_by_path(files_to_purge)
+            
+            # 2. Remove 'guest' declarations (where these files declare symbols defined elsewhere)
+            # This preserves the symbol node while removing the stale link.
+            self.neo4j_mgr.purge_guest_declarations(files_to_purge)
+            
+            # 3. Purge outgoing include relations
+            self.neo4j_mgr.purge_include_relations_from_files(files_to_purge)
 
         if deleted_files_rel:
             logger.info(f"Deleting {len(deleted_files_rel)} FILE nodes.")

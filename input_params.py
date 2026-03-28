@@ -72,6 +72,7 @@ def add_git_update_args(parser: argparse.ArgumentParser):
     """Adds arguments specific to the incremental git-based updater."""
     parser.add_argument('--old-commit', default=None, help='The old commit hash or reference. Defaults to graph commit_hash')
     parser.add_argument('--new-commit', default=None, help='The new commit hash or reference. Defaults to repo HEAD')
+    parser.add_argument('--debug-incremental', action='store_true', help='Enable incremental update debugging (triggers, audit logs).')
 
 
 def add_logistic_args(parser: argparse.ArgumentParser):

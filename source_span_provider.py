@@ -296,6 +296,8 @@ class SourceSpanProvider:
                 
                 # ANCHORING: Move the symbol to the actual implementation file.
                 # This ensures the 'path' property in the graph is consistent with 'body_location'.
+                # It can be inconsistent if a symbol is defined in a macro, when its name literal is defined in macro.
+                # We now use the macro's expansion site as the definition site for all the symbols expanded from this macro.
                 sym.definition = Location.from_relative_location(source_span.name_location, file_uri)
                 
                 # Map the parser ID to the index ID so children can find this parent.

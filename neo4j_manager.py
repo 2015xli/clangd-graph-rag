@@ -4,7 +4,7 @@ import threading
 import logging
 import argparse
 import json
-from typing import List, Dict, Tuple, Optional, Any
+from typing import List, Dict, Tuple, Optional, Any, Set
 from collections import defaultdict
 from tqdm import tqdm
 
@@ -410,12 +410,6 @@ class Neo4jManager:
         if not file_paths:
             return 0
 
-        # Currently,  the graph schema is (FILE) -[:DEFINES]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE), 
-        # meaning all the nodes in the other end of DEFINES relationship are ensured to be (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE). 
-        # If we use  (FILE) -[:DEFINES]-> (s), I guess it can avoid a match for the label of the other end node, 
-        # compared to  (FILE) -[:DEFINES]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|VARIABLE). 
-        # Of course, this optimization is very marginal.
-
         # NOTE: 1. Originally, this query uses APOC to find the entire subgraph of "owned" symbols
         # starting from the top-level symbols defined in a file.
         # The ">" in the relationship filter ensures we only traverse outwards
@@ -462,7 +456,6 @@ class Neo4jManager:
         query = """
         UNWIND $paths AS path
         MATCH (file:FILE {path: path})-[:DECLARES]->(s)
-        //WHERE (s:FUNCTION|CLASS_STRUCTURE|DATA_STRUCTURE|NAMESPACE|VARIABLE)
         DETACH DELETE s
         """
         with self.driver.session() as session:
@@ -791,6 +784,105 @@ class Neo4jManager:
                 session.run(constraint)
         
         logger.info("Shifted per-label id to global ENTITY id.")
+
+    def purge_nodes_by_path(self, file_paths: List[str], batch_size: int = 1000) -> int:
+        """
+        Deletes all nodes (symbols, macros, aliases, etc.) that identify as 
+        belonging to the given file paths via their 'path' property.
+        """
+        if not file_paths:
+            return 0
+
+        logger.info(f"Purging all nodes anchored to {len(file_paths)} files...")
+        query = """
+        UNWIND $paths AS p
+        MATCH (n {path: p})
+        WHERE NOT n:FILE AND NOT n:FOLDER
+        DETACH DELETE n
+        """
+        total_deleted = 0
+        for i in tqdm(range(0, len(file_paths), batch_size), desc=align_string("Purging nodes by path")):
+            batch = file_paths[i:i + batch_size]
+            counters = self.execute_autocommit_query(query, {"paths": batch})
+            total_deleted += counters.nodes_deleted
+        
+        logger.info(f"  Total nodes purged by path: {total_deleted}")
+        return total_deleted
+
+    def purge_guest_declarations(self, file_paths: List[str], batch_size: int = 1000) -> int:
+        """
+        Removes outgoing DECLARES relationships from the given files to symbols
+        that are defined elsewhere. Does not delete the symbol nodes.
+        """
+        if not file_paths:
+            return 0
+
+        logger.info(f"Purging guest declarations from {len(file_paths)} files...")
+        query = """
+        UNWIND $paths AS p
+        MATCH (f:FILE {path: p})-[r:DECLARES]->(s)
+        DELETE r
+        """
+        total_purged = 0
+        for i in tqdm(range(0, len(file_paths), batch_size), desc=align_string("Purging guest decls")):
+            batch = file_paths[i:i + batch_size]
+            counters = self.execute_autocommit_query(query, {"paths": batch})
+            total_purged += counters.relationships_deleted
+        
+        logger.info(f"  Total guest declaration relationships purged: {total_purged}")
+        return total_purged
+
+    def purge_nodes_by_id(self, symbol_to_label: Dict[str, str], dirty_files: Set[str], debug_mode: bool, batch_size: int = 1000):
+        """
+        Resolves identity collisions for seed symbols during an incremental update.
+        
+        Args:
+            symbol_to_label: Mapping of seed symbol IDs to their Neo4j labels.
+            dirty_files: Set of relative paths being re-ingested.
+            debug_mode: If True, DETACH DELETE colliding nodes (Isolation).
+                       If False, only remove ownership relationships (Aggregation).
+        """
+        if not symbol_to_label:
+            return
+
+        mode_str = "Isolation (DETACH DELETE)" if debug_mode else "Aggregation (Relationship Purge)"
+        logger.info(f"Resolving {len(symbol_to_label)} seed identities using {mode_str}...")
+        
+        ids_by_label = defaultdict(list)
+        for sid, label in symbol_to_label.items():
+            ids_by_label[label].append(sid)
+
+        total_affected = 0
+        for label, ids in ids_by_label.items():
+            # Query Logic:
+            # 1. MATCH the node by ID and Label.
+            # 2. WHERE NOT n.path IN $dirty_files ensures we only target 'True Collisions' 
+            #    (nodes that survived the path-based purge because they claim to be in clean files).
+            if debug_mode:
+                query = f"""
+                UNWIND $ids AS sid
+                MATCH (n:{label} {{id: sid}})
+                WHERE NOT n.path IN $dirty_files
+                DETACH DELETE n
+                """
+            else:
+                # Surgical Aggregation: Keep the node and its behavioral relationships (like CALLS),
+                # but cut the 'exclusive' ownership and origin links.
+                query = f"""
+                UNWIND $ids AS sid
+                MATCH (n:{label} {{id: sid}})
+                WHERE NOT n.path IN $dirty_files
+                OPTIONAL MATCH (f:FILE)-[r:DEFINES|DECLARES]->(n)
+                OPTIONAL MATCH (n)-[r2:EXPANDED_FROM|ALIAS_OF]->()
+                DELETE r, r2
+                """
+            
+            for i in range(0, len(ids), batch_size):
+                batch = ids[i:i + batch_size]
+                counters = self.execute_autocommit_query(query, {"ids": batch, "dirty_files": list(dirty_files)})
+                total_affected += (counters.nodes_deleted if debug_mode else counters.relationships_deleted)
+            
+        logger.info(f"  Total {('nodes purged' if debug_mode else 'relationships purged')}: {total_affected}")
 
     def delete_property(self, label: Optional[str], property_key: str, all_labels: bool = False) -> int:
         """

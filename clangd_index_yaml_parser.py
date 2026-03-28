@@ -124,6 +124,34 @@ class Symbol:
     def is_function(self) -> bool:
         return self.kind in ('Function', 'InstanceMethod', 'StaticMethod', 'Constructor', 'Destructor', 'ConversionFunction')
 
+    @staticmethod
+    def get_node_label(sym: 'Symbol') -> Optional[str]:
+        """Maps a Clangd symbol kind to its corresponding Neo4j node label."""
+        if not sym.kind:
+            return None
+
+        if sym.kind == "Namespace":
+            return "NAMESPACE"
+        elif sym.kind == "Macro":
+            return "MACRO"
+        elif sym.kind == "Function":
+            return "FUNCTION"
+        elif sym.kind in ("InstanceMethod", "StaticMethod", "Constructor", "Destructor", "ConversionFunction"):
+            return "METHOD"
+        elif sym.kind == "Class":
+            return "CLASS_STRUCTURE"
+        elif sym.kind == "Struct":
+            return "CLASS_STRUCTURE" if sym.language and sym.language.lower() == "cpp" else "DATA_STRUCTURE"
+        elif sym.kind in ("Union", "Enum"):
+            return "DATA_STRUCTURE"
+        elif sym.kind in ("Field", "StaticProperty", "EnumConstant"):
+            return "FIELD"
+        elif sym.kind == "Variable":
+            return "VARIABLE"
+        elif sym.kind == "TypeAlias":
+            return "TYPE_ALIAS"
+        return None
+
 @dataclass
 class CallRelation:
     caller_id: str

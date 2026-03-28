@@ -304,5 +304,4 @@ if __name__ == "__main__":
     
     # FastMCP exposes its underlying FastAPI app as mcp.app
     mcp.run(transport="streamable-http", host="0.0.0.0", port=8800)
-    #uvicorn.run(mcp, host="0.0.0.0", port=8800)
     neo4j_mgr.close()
