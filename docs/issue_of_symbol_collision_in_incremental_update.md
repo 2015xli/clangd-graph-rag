@@ -84,5 +84,56 @@ This turns a full-graph scan into an **O(1) index lookup**, enabling high-speed 
 
 ---
 
-## 5. Conclusion
+## 5. Post-Debug Findings & The "Aggregation Conflict"
+
+In projects that violate the One Definition Rule (ODR), such as those with multiple `main()` functions, incremental updates face a conflict between **Isolation** and **Aggregation**.
+
+### 5.1. Symbol Aggregation (Full Build Behavior)
+In a full build, symbols with colliding IDs (like `main`) act as **accumulators**. The final graph node represents the union of all definitions.
+*   Example: `main` in `file_A` calls 112 functions; `main` in `file_B` calls 335.
+*   Full Build Total: **447** `[:CALLS]` relationships.
+
+### 5.2. Incremental Parity through Surgical Aggregation
+By implementing the "Surgical Aggregation" strategy, the incremental updater now:
+1.  **Purges Non-Sharable Links**: Removes stale `[:DEFINES]`, `[:DECLARES]`, `[:EXPANDED_FROM]`, and `[:ALIAS_OF]` links.
+2.  **Retains Sharable Links**: Keeps `[:CALLS]`, `[:INHERITS]`, etc.
+3.  **Updates Properties**: Forces the node's `path` and `body_location` to match the latest dirty file.
+
+The Result: The incremental update now achieves **100% parity** with a full build regarding both property accuracy and relationship aggregation.
+
+---
+
+## 6. Debugging Methodology
+
+To validate the incremental update, the system provides a specialized auditing suite enabled via the `--debug-incremental` flag.
+
+### 6.1. The Audit Logs
+*   **`updater_purged_scope.log`**: Standard symbols removed because they were anchored to a dirty file.
+*   **`updater_colliding_symbols.log`**: Symbols physically found in dirty files but logically claiming to be in clean files (the "Migration Report").
+*   **`combined_purged_scope.log`**: A deduplicated union of the above, representing the total "Wipe" before ingestion.
+*   **`updater_updated_scope.log`**: All nodes and relationships actually created/tagged during the rebuild.
+
+### 6.2. Case Study: Resolving the Llama Discrepancy
+When we observed 6 extra relationships in the Llama project, we followed this workflow:
+
+1.  **Diff the Combined Logs**:
+    `diff combined_purged_scope.log updater_updated_scope.log`
+2.  **Observation (Ownership)**: 
+    The diff showed 6 `[:DEFINES]` relationships being removed from their old files and 6 new ones added to `test-backend-ops.cpp`. Since the diff was balanced (6 out, 6 in), the discrepancy wasn't in total ownership count.
+3.  **Observation (Collisions)**:
+    Inspecting `updater_colliding_symbols.log` revealed 9 symbols, including `main()` and 3 methods like `print_footer`.
+4.  **The "Smoking Gun" (Behavioral Discrepancy)**:
+    The diff also showed **112 lost CALLS** (when using the previous Isolation-mode solution).
+    *   `combined_purged_scope.log` had 447 calls for `main`.
+    *   `updater_updated_scope.log` had 335 calls for `main`.
+    *   *Conclusion*: This confirmed that `main()` was acting as an accumulator in the full build, and the isolation mode was discarding the "clean" calls.
+
+### 6.3. Interpreting Results
+*   **Balanced Diff**: Perfect parity for that relationship type.
+*   **Unbalanced Diff (Losses)**: Correctly shedding stale local relationships if in Isolation mode, or a sign of missing data in Aggregation mode.
+*   **Unbalanced Diff (Gains)**: New relationships introduced by fresh logic in the dirty files.
+
+---
+
+## 7. Conclusion
 The "Ghost Relationship" mystery was a masterclass in the difference between lexical and semantic identity. By implementing **Surgical Aggregation**, the incremental updater now produces a graph that is structurally identical to a full build while ensuring that symbol properties and ownership always reflect the most recent implementation ground truth.
