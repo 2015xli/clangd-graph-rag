@@ -18,7 +18,8 @@ from tqdm import tqdm
 import input_params
 from clangd_index_yaml_parser import SymbolParser, Symbol
 from compilation_manager import CompilationManager
-from neo4j_manager import Neo4jManager, align_string
+from neo4j_manager import Neo4jManager
+from utils import align_string
 from path_processor import PathProcessor, PathManager
 
 logger = logging.getLogger(__name__)

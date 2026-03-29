@@ -7,7 +7,8 @@ instrumentation and auditing logic for the code graph.
 import logging
 from typing import List, Dict, Set, Optional
 from tqdm import tqdm
-from neo4j_manager import Neo4jManager, align_string
+from neo4j_manager import Neo4jManager
+from utils import align_string
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)

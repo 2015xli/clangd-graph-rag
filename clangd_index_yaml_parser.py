@@ -18,7 +18,7 @@ from multiprocessing import get_context
 from tqdm import tqdm
 
 from memory_debugger import Debugger
-from neo4j_manager import align_string # Import Debugger
+from utils import align_string # Import Debugger
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)

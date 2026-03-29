@@ -575,6 +575,14 @@ class SourceSpanProvider:
                 field_name = RelativeLocation(loc.start_line, loc.start_column, loc.end_line, loc.end_column)
                 field_span = SourceSpan(sym.name, "Variable", sym.language, field_name, field_name, '', '')
                 span_tree = file_span_data.get(loc.file_uri, {}) 
+                if not span_tree:
+                    if sys.argv[0].endswith("clangd_graph_rag_builder.py"):
+                        # When the graph is incrementally updated with clangd_graph_rag_updater.py (not built from scratch), it is normal that some files don't have span trees.
+                        # The reason is, the symbol (and its file) is extended from the seed symbols, whose source file may not be parsed.
+                        # We only log the debug message for the builder, when all the source files should be parsed, and have span trees.
+                        logger.debug(f"Could not find span tree for file {loc.file_uri}, no-body symbol {sym.name} {sym.id}")
+                    continue
+
                 container = self._find_innermost_container(span_tree, field_span)
                 if container:
                     parent_synth_id = container.id
@@ -613,10 +621,7 @@ class SourceSpanProvider:
                 span_tree = file_span_data.get(loc.file_uri, {})
                 if not span_tree:
                     if sys.argv[0].endswith("clangd_graph_rag_builder.py"):
-                        # When the graph is incrementally updated with clangd_graph_rag_updater.py (not built from scratch), it is normal that some files don't have span trees.
-                        # The reason is, the symbol (and its file) is extended from the seed symbols, whose source file may not be parsed.
-                        # We only log the debug message for the builder, when all the source files should be parsed, and have span trees.
-                        logger.debug(f"Could not find span tree for file {loc.file_uri}, symbol {sym.name} {sym.id}")
+                        logger.debug(f"Could not find span tree for file {loc.file_uri}, with-body symbol {sym.name} {sym.id}")
                     continue
 
                 # 1. Primary Lookup: Try to find the span by its USR-derived ID.
@@ -699,7 +704,9 @@ class SourceSpanProvider:
             # Use sym.id (USR-derived) to look up a matching TypeAliasSpan
             matched_tas = unmatched_type_alias_spans.get(sym_id)
             if not matched_tas:
-                logger.debug(f"Could not find matching TypeAliasSpan for TypeAlias symbol {sym_id} {sym.name} at {sym.definition.file_uri}:{sym.definition.start_line}:{sym.definition.start_column}")
+                # TODO: currently only log for builder, not updater. Need refactor to handle both cases
+                if sys.argv[0].endswith("clangd_graph_rag_builder.py"):
+                    logger.debug(f"Could not find matching TypeAliasSpan for TypeAlias symbol {sym_id} {sym.name} at {sym.definition.file_uri}:{sym.definition.start_line}:{sym.definition.start_column}")
                 continue
             
             # Enrich existing Symbol

@@ -17,7 +17,8 @@ from compilation_manager import CompilationManager
 from clangd_index_yaml_parser import (
     SymbolParser, Symbol, Location, Reference, RelativeLocation, CallRelation
 )
-from neo4j_manager import Neo4jManager, align_string
+from neo4j_manager import Neo4jManager
+from utils import align_string
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)

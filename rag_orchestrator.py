@@ -10,7 +10,8 @@ from typing import Iterable, Callable, List, Optional, Set, Dict
 from collections import defaultdict
 from tqdm import tqdm
 
-from neo4j_manager import Neo4jManager, align_string
+from neo4j_manager import Neo4jManager
+from utils import align_string
 from llm_client import get_llm_client, get_embedding_client, LlmCacheManager
 from rag_generation_prompts import RagGenerationPromptManager
 from summary_cache_manager import SummaryCacheManager
