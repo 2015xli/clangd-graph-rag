@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Caching logic for compilation results.
+Cache management for the compilation engine.
 """
-
 import os
+import logging
 import pickle
 import hashlib
-import logging
 from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 class CacheManager:
     """Handles finding, validating, loading, and saving cache files."""
@@ -46,18 +46,12 @@ class CacheManager:
             if (cached_data.get("new_commit") == new_commit and
                 cached_data.get("old_commit") == old_commit):
                 logger.info(f"Found and validated Git-based cache: {filename}")
-                return {
-                    "source_spans": cached_data.get("source_spans", {}),
-                    "include_relations": cached_data.get("include_relations", set()),
-                    "static_call_relations": cached_data.get("static_call_relations", set()),
-                    "type_alias_spans": cached_data.get("type_alias_spans", {}),
-                    "macro_spans": cached_data.get("macro_spans", {})
-                }
+                return cached_data
             else:
                 logger.warning(f"Cache file {filename} has mismatched full commit hashes. Ignoring.")
                 return None
-        except (pickle.UnpicklingError, EOFError, KeyError, AttributeError, ModuleNotFoundError) as e:
-            logger.warning(f"Cache file {cache_path} is incompatible or corrupted: {e}. Ignoring.")
+        except Exception as e:
+            logger.warning(f"Cache file {cache_path} is corrupted or invalid: {e}. Ignoring.")
             return None
 
     def find_and_load_mtime_cache(self, file_list: List[str]) -> Optional[Dict[str, Any]]:
@@ -70,7 +64,7 @@ class CacheManager:
             latest_mtime = max(mtimes)
             oldest_mtime = min(mtimes)
         except FileNotFoundError:
-            return None # One of the files doesn't exist
+            return None
 
         filename = self._construct_mtime_filename(latest_mtime, oldest_mtime)
         cache_path = os.path.join(self.cache_directory, filename)
@@ -82,22 +76,15 @@ class CacheManager:
             with open(cache_path, "rb") as f:
                 cached_data = pickle.load(f)
 
-            # Deep validation: check if the list of files is identical
-            current_file_hash = hashlib.sha256("".join(sorted(file_list)).encode()).hexdigest()
-            if cached_data.get("file_list_hash") == current_file_hash:
+            current_file_list_hash = hashlib.sha256("".join(sorted(file_list)).encode()).hexdigest()
+            if cached_data.get("file_list_hash") == current_file_list_hash:
                 logger.info(f"Found and validated mtime-based cache: {filename}")
-                return {
-                    "source_spans": cached_data.get("source_spans", {}),
-                    "include_relations": cached_data.get("include_relations", set()),
-                    "static_call_relations": cached_data.get("static_call_relations", set()),
-                    "type_alias_spans": cached_data.get("type_alias_spans", {}),
-                    "macro_spans": cached_data.get("macro_spans", {})
-                }
+                return cached_data
             else:
                 logger.warning(f"Cache file {filename} has mismatched file list hash. Ignoring.")
                 return None
-        except (pickle.UnpicklingError, EOFError, KeyError, AttributeError, ModuleNotFoundError) as e:
-            logger.warning(f"Cache file {cache_path} is incompatible or corrupted: {e}. Ignoring.")
+        except Exception as e:
+            logger.warning(f"Cache file {cache_path} is corrupted or invalid: {e}. Ignoring.")
             return None
 
     def save_git_cache(self, data: Dict[str, Any], new_commit: str, old_commit: str = None):
@@ -106,11 +93,7 @@ class CacheManager:
         cache_path = os.path.join(self.cache_directory, filename)
         
         cache_obj = {
-            "source_spans": data["source_spans"],
-            "include_relations": data["include_relations"],
-            "static_call_relations": data["static_call_relations"],
-            "type_alias_spans": data["type_alias_spans"],
-            "macro_spans": data["macro_spans"],
+            **data,
             "new_commit": new_commit,
             "old_commit": old_commit
         }
@@ -127,11 +110,7 @@ class CacheManager:
         file_list_hash = hashlib.sha256("".join(sorted(file_list)).encode()).hexdigest()
         
         cache_obj = {
-            "source_spans": data["source_spans"],
-            "include_relations": data["include_relations"],
-            "static_call_relations": data["static_call_relations"],
-            "type_alias_spans": data["type_alias_spans"],
-            "macro_spans": data["macro_spans"],
+            **data,
             "file_list_hash": file_list_hash
         }
         logger.info(f"Saving mtime-based cache to: {filename}")

@@ -1,16 +1,16 @@
 import logging
-import gc
 from urllib.parse import urlparse, unquote
 from typing import Optional
 
 from clangd_index_yaml_parser import Symbol, Location
-from compilation_ops import SourceSpan
+from compilation_engine import SourceSpan
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 class UtilsMixin:
     """Provides utility methods for filtering, geometric checks, and symbol creation."""
+    VARIABLE_KIND = {"Field", "StaticProperty", "EnumConstant", "Variable"}
 
     def _filter_symbols_by_project_path(self):
         """

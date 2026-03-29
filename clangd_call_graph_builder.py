@@ -12,7 +12,7 @@ from tqdm import tqdm
 from collections import defaultdict
 
 import input_params
-from compilation_manager import CompilationManager
+from compilation_engine import CompilationManager
 from clangd_index_yaml_parser import (
     SymbolParser, Symbol, Location, Reference, RelativeLocation, CallRelation
 )

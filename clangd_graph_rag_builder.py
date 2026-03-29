@@ -28,7 +28,7 @@ from clangd_index_yaml_parser import SymbolParser
 from neo4j_manager import Neo4jManager
 from memory_debugger import Debugger
 from git_manager import GitManager
-from compilation_manager import CompilationManager
+from compilation_engine import CompilationManager
 from include_relation_provider import IncludeRelationProvider
 
 from log_manager import init_logging

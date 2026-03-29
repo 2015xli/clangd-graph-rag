@@ -2,7 +2,8 @@ import logging
 from typing import Dict, Tuple
 
 from clangd_index_yaml_parser import Location
-from compilation_ops import SourceSpan, CompilationParser
+from compilation_engine import SourceSpan
+from utils import make_symbol_key
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -61,7 +62,7 @@ class MatcherMixin:
         # This key is derived from the implementation coordinates.
         remaining_spans_by_loc = {}
         for span_id, (file_uri, span) in all_remaining_spans.items():
-            key = CompilationParser.make_symbol_key(
+            key = make_symbol_key(
                 span.name, span.kind, file_uri, 
                 span.name_location.start_line, span.name_location.start_column
             )
@@ -81,7 +82,7 @@ class MatcherMixin:
                 continue
             
             # Reconstruct the expected key based on Clangd index data.
-            key = CompilationParser.make_symbol_key(sym.name, sym.kind, loc.file_uri, loc.start_line, loc.start_column)
+            key = make_symbol_key(sym.name, sym.kind, loc.file_uri, loc.start_line, loc.start_column)
             candidates = remaining_spans_by_loc.get(key)
             
             # AMBIGUITY CHECK: Only match if the coordinate context is unique.

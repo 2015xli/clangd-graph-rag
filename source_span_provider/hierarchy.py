@@ -4,7 +4,8 @@ from typing import Dict, Set
 from urllib.parse import urlparse, unquote
 
 from clangd_index_yaml_parser import Location, RelativeLocation
-from compilation_ops import SourceSpan, CompilationParser
+from compilation_engine import SourceSpan
+from utils import hash_usr_to_id, make_symbol_key
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -245,7 +246,7 @@ class HierarchyMixin:
                     if sym.kind == "EnumConstant" and sym.type:
                         # Clean USR (strip extra '$')
                         cleaned_usr = sym.type.replace('$', '')
-                        usr_parent_id = CompilationParser.hash_usr_to_id(cleaned_usr)
+                        usr_parent_id = hash_usr_to_id(cleaned_usr)
                         if usr_parent_id in self.symbol_parser.symbols:
                             parent_synth_id = usr_parent_id # Direct match to indexed/synthetic ID
                             self.assigned_parent_no_span += 1
@@ -283,10 +284,10 @@ class HierarchyMixin:
                 # 2. Fallback Lookup: If ID lookup fails (e.g. Treesitter or USR divergence),
                 # use the location-based coordinate key.
                 if not span:
-                    key = CompilationParser.make_symbol_key(sym.name, sym.kind, loc.file_uri, loc.start_line, loc.start_column)
+                    key = make_symbol_key(sym.name, sym.kind, loc.file_uri, loc.start_line, loc.start_column)
                     # Iterate the tree values since the dict is now keyed by ID.
                     for s in span_tree.values():
-                        if CompilationParser.make_symbol_key(s.name, s.kind, loc.file_uri, s.name_location.start_line, s.name_location.start_column) == key:
+                        if make_symbol_key(s.name, s.kind, loc.file_uri, s.name_location.start_line, s.name_location.start_column) == key:
                             span = s
                             break
 

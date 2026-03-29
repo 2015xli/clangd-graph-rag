@@ -12,10 +12,10 @@ from typing import List, Set, Dict, Tuple
 from collections import defaultdict, deque
 
 from neo4j_manager import Neo4jManager
-from compilation_manager import CompilationManager
-from compilation_ops.types import IncludeRelation
+from compilation_engine import CompilationManager, IncludeRelation
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 class IncludeRelationProvider:
     """Manages the `:INCLUDES` relationships in the Neo4j graph."""
