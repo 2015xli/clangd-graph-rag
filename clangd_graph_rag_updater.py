@@ -17,7 +17,7 @@ from neo4j_manager import Neo4jManager
 from clangd_index_yaml_parser import SymbolParser
 from rag_updater import RagUpdater
 from include_relation_provider import IncludeRelationProvider
-from compilation_parser import CompilationParser # Import CompilationParser
+from compilation_ops import CompilationParser
 from graph_update_scope_builder import GraphUpdateScopeBuilder
 from graph_debug_manager import GraphDebugManager
 

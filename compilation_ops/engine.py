@@ -207,7 +207,8 @@ class _ClangWorkerImpl:
             if aliasee_decl_cursor.location.file:
                 aliased_usr = aliasee_decl_cursor.get_usr()
                 aliased_type_id = CompilationParser.hash_usr_to_id(aliased_usr) if aliased_usr else CompilationParser.make_synthetic_id(CompilationParser.make_symbol_key(aliasee_decl_cursor.spelling, aliased_type_kind, f"file://{os.path.abspath(aliasee_decl_cursor.location.file.name)}", *self._get_symbol_name_location(aliasee_decl_cursor)))
-                if not os.path.abspath(aliasee_decl_cursor.location.file.name).startswith(self.project_path): aliased_type_id = None
+                if not os.path.abspath(aliasee_decl_cursor.location.file.name).startswith(self.project_path): 
+                    aliased_type_id = None
         original_name, expanded_from_id = self._get_macro_causality(node, file_uri)
         new_span = TypeAliasSpan(
             id=aliaser_id, file_uri=file_uri, lang=self.lang, name=node.spelling,
