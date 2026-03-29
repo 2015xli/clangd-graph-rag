@@ -8,7 +8,7 @@ import git
 import logging
 from typing import Optional
 
-from compilation_parser import CompilationParser # Import CompilationParser
+from compilation_ops.parser import CompilationParser
 
 logger = logging.getLogger(__name__)
 

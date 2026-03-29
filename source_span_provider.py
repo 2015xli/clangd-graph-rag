@@ -17,7 +17,7 @@ from urllib.parse import urlparse, unquote
 
 from clangd_index_yaml_parser import SymbolParser, Symbol, Reference, Location, RelativeLocation
 from compilation_manager import CompilationManager
-from compilation_parser import SourceSpan, CompilationParser, TypeAliasSpan
+from compilation_ops import SourceSpan, TypeAliasSpan, CompilationParser
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)

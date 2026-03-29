@@ -15,6 +15,7 @@ from tqdm import tqdm
 # Lower-level data structures and utilities
 from clangd_index_yaml_parser import SymbolParser, Symbol
 from compilation_manager import CompilationManager
+from compilation_ops import CompilationParser
 from neo4j_manager import Neo4jManager
 
 # Ingestion components

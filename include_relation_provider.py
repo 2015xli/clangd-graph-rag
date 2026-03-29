@@ -13,7 +13,7 @@ from collections import defaultdict, deque
 
 from neo4j_manager import Neo4jManager
 from compilation_manager import CompilationManager
-from compilation_parser import IncludeRelation
+from compilation_ops.types import IncludeRelation
 
 logger = logging.getLogger(__name__)
 
