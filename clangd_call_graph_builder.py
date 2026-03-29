@@ -235,7 +235,6 @@ def main():
     # --- NEW: Phase 1: Parse Source Code (for spans) ---
     logger.info("\n--- Starting Phase 1: Parsing Source Code for Spans ---")
     compilation_manager = CompilationManager(
-        parser_type=args.source_parser,
         project_path=args.project_path,
         compile_commands_path=args.compile_commands
     )

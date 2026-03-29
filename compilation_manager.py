@@ -13,7 +13,7 @@ import hashlib
 from typing import Optional, List, Tuple, Dict, Set, Any
 import git
 
-from compilation_parser import CompilationParser, ClangParser, TreesitterParser, SourceSpan, IncludeRelation, TypeAliasSpan, MacroSpan
+from compilation_parser import CompilationParser, ClangParser, SourceSpan, IncludeRelation, TypeAliasSpan, MacroSpan
 from git_manager import get_git_repo, resolve_commit_ref_to_hash
 
 logger = logging.getLogger(__name__)
@@ -154,9 +154,7 @@ class CacheManager:
 class CompilationManager:
     """Manages parsing, caching, and strategy selection."""
 
-    def __init__(self, parser_type: str = 'clang', 
-                 project_path: str = '.', compile_commands_path: Optional[str] = None):
-        self.parser_type = parser_type
+    def __init__(self, project_path: str = '.', compile_commands_path: Optional[str] = None):
         self.project_path = os.path.abspath(project_path)
         self.compile_commands_path = compile_commands_path
         self._parser: Optional[CompilationParser] = None
@@ -166,7 +164,7 @@ class CompilationManager:
         project_name = os.path.basename(self.project_path)
         self.cache_manager = CacheManager(cache_dir, project_name)
 
-        if self.parser_type == 'clang' and not self.compile_commands_path:
+        if not self.compile_commands_path:
             inferred_path = os.path.join(project_path, 'compile_commands.json')
             if not os.path.exists(inferred_path):
                 raise ValueError("Clang parser requires a path to compile_commands.json via --compile-commands")
@@ -177,10 +175,7 @@ class CompilationManager:
         if self._parser is not None:
             return self._parser
 
-        if self.parser_type == 'clang':
-            self._parser = ClangParser(self.project_path, self.compile_commands_path)
-        else: # 'treesitter'
-            self._parser = TreesitterParser(self.project_path)
+        self._parser = ClangParser(self.project_path, self.compile_commands_path)
         return self._parser
 
     def _perform_parsing(self, files_to_parse: List[str], num_workers: int) -> Dict[str, Any]:
@@ -356,9 +351,7 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, help="Output YAML file path (default: stdout).")
 
     input_params.add_worker_args(parser)
-    
-    parser_group = parser.add_argument_group('Parser Configuration')
-    input_params.add_source_parser_args(parser_group)
+    input_params.add_source_parser_args(parser)
 
     analysis_group = parser.add_argument_group('Analysis Mode')
     analysis_group.add_argument("--impacting-header", 
@@ -394,7 +387,6 @@ if __name__ == "__main__":
 
     try:
         manager = CompilationManager(
-            parser_type=args.source_parser,
             project_path=project_path_for_init,
             compile_commands_path=args.compile_commands
         )

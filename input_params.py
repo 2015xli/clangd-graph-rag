@@ -83,7 +83,5 @@ def add_logistic_args(parser: argparse.ArgumentParser):
     parser.add_argument('--debug-memory', action='store_true', help='Enable memory profiling with tracemalloc.')
 
 def add_source_parser_args(parser: argparse.ArgumentParser):
-    """Adds arguments for selecting and configuring the source code parser."""
-    parser.add_argument('--source-parser', choices=['clang', 'treesitter'], default='clang',
-                        help='The source code parser to use for spans and includes. (default: clang)')
-    parser.add_argument('--compile-commands', help='Path to the compile_commands.json file (or its directory). Required for the `clang` parser. (Default: the project path)')
+    """Adds arguments for configuring the Clang-based source code parser."""
+    parser.add_argument('--compile-commands', help='Path to the compile_commands.json file (or its directory). (Default: the project path)')

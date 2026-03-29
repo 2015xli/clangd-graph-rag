@@ -74,7 +74,6 @@ class GraphUpdateScopeBuilder:
 
         # 1. Parse only the dirty source files to get up-to-date span/include info
         self.comp_manager = CompilationManager(
-            parser_type=self.args.source_parser,
             project_path=self.project_path,
             compile_commands_path=self.args.compile_commands
         )
@@ -224,71 +223,76 @@ class GraphUpdateScopeBuilder:
                 logger.error(f"Could not find symbol {symbol_id} of seed set in full symbol parser.")
                 continue
 
-            def add_symbol(direct_dependencies, symbol_id):
-                if symbol_id not in full_symbol_parser.symbols:
-                    # full_symbol_parser may include some IDs (e.g., the phony symbol id in !Relations, !References) that have no corresponding symbols.
-                    # Phony symbols are those that are referenced but not defined in the code, such as the parent class of a template specialized member.
-                    logger.debug(f"Could not find symbol {symbol_id} of seed set in full symbol parser.")
+            def add_symbol(direct_dependencies, depend_id, relation:str):
+                if depend_id not in full_symbol_parser.symbols:
+                    # full_symbol_parser may include some IDs (e.g., the ghost id in !Relations, !References) that have no corresponding symbols.
+                    # Ghost ids are those that are referenced but not defined in the code, such as the parent class of a template specialized member, 
+                    # or the aliased type of a TypeAlias symbol or an overriden InstanceMethod.
+                    # When we expand a seed symbol to its dependence ids, we may encounter a ghost id.
+                    # In a full build of graph, the parser generates phony symbols for most ghost ids. (But not yet for aliased_type_id.)
+                    # Incremental update may encounter more ghost ids.
+                    logger.debug(f"Could not find dependent id {depend_id} in full symbol parser for seed symbol {symbol_id} relation: {relation}.")
                     return
-                if symbol_id not in final_symbol_ids:
-                    final_symbol_ids.add(symbol_id)
-                    direct_dependencies.add(symbol_id)
+                if depend_id not in final_symbol_ids:
+                    final_symbol_ids.add(depend_id)
+                    direct_dependencies.add(depend_id)
 
             # --- Find all direct dependencies for the current seed symbol ---
 
             # 1. Lexical Parent (Up)
             if symbol.parent_id:
-                add_symbol(direct_dependencies, symbol.parent_id)
+                add_symbol(direct_dependencies, symbol.parent_id, "lexical_parent")
 
             # 2. Containment (Down to members/children. This is the reverse of parent_id)
             if symbol_id in containment_graph:
                 for child_id in containment_graph[symbol_id]['children']:
-                    add_symbol(direct_dependencies, child_id)
+                    add_symbol(direct_dependencies, child_id, "lexical_child")
 
             # 3. Calls (Up and Down)
-            for callee_id in caller_to_callees.get(symbol_id, set()): add_symbol(direct_dependencies, callee_id)
-            for caller_id in callee_to_callers.get(symbol_id, set()): add_symbol(direct_dependencies, caller_id)
+            for callee_id in caller_to_callees.get(symbol_id, set()): add_symbol(direct_dependencies, callee_id, "calls")
+            for caller_id in callee_to_callers.get(symbol_id, set()): add_symbol(direct_dependencies, caller_id, "called_by")
 
             # 4. Semantic Namespace Parent (Up) and Children (Down)
             if symbol.scope:
                 ns_id = qualified_namespace_to_id.get(symbol.scope)
                 if ns_id:
-                    add_symbol(direct_dependencies, ns_id)
+                    add_symbol(direct_dependencies, ns_id, "namespace_parent")
             
             # If seed is a Namespace, pull in its semantic children (Downward)
             if symbol.kind == "Namespace":
                 qualified_name = symbol.scope + symbol.name + '::'
                 for child_id in scope_to_children_ids.get(qualified_name, set()):
-                    add_symbol(direct_dependencies, child_id)
+                    add_symbol(direct_dependencies, child_id, "namespace_child")
 
             # 5. Inheritance (Up and Down)
             if symbol_id in inheritance_graph:
-                for parent_id in inheritance_graph[symbol_id]['parents']: add_symbol(direct_dependencies, parent_id)
-                for child_id in inheritance_graph[symbol_id]['children']: add_symbol(direct_dependencies, child_id)
+                for parent_id in inheritance_graph[symbol_id]['parents']: add_symbol(direct_dependencies, parent_id, "inheritance_parent")
+                for child_id in inheritance_graph[symbol_id]['children']: add_symbol(direct_dependencies, child_id, "inheritance_child")
 
             # 6. Overrides (Up and Down)
             if symbol_id in override_graph:
-                for overridden_id in override_graph[symbol_id]['overridden']: add_symbol(direct_dependencies, overridden_id)
-                for overriding_id in override_graph[symbol_id]['overriding']: add_symbol(direct_dependencies, overriding_id)
+                for overridden_id in override_graph[symbol_id]['overridden']: add_symbol(direct_dependencies, overridden_id, "overridden_by")
+                for overriding_id in override_graph[symbol_id]['overriding']: add_symbol(direct_dependencies, overriding_id, "overrides")
             
             # 7. Macro Expansion (Up to source Macro and Down to expanded symbols)
             if symbol.expanded_from_id:
-                add_symbol(direct_dependencies, symbol.expanded_from_id)
+                add_symbol(direct_dependencies, symbol.expanded_from_id, "from_macro")
             
             # If seed is a Macro, pull in its expanded symbols (Downward)
             # Note: This is technically redundant as these should already be seeds, 
-            # but added for completeness.
+            # because the macro-expanded symbols and the macro definition must both be in dirty files.   
+            # We add them purely for completeness.
             if symbol.kind == "Macro":
                 for expanded_id in macro_to_expanded_ids.get(symbol_id, set()):
-                    add_symbol(direct_dependencies, expanded_id)
+                    add_symbol(direct_dependencies, expanded_id, "expands_to")
 
             # 8. Type Alias (Down to aliasee and Up to aliasers)
             if symbol.aliased_type_id:
-                add_symbol(direct_dependencies, symbol.aliased_type_id)
+                add_symbol(direct_dependencies, symbol.aliased_type_id, "alias_of")
             
             # Pull in aliasers of the seed (Upward)
             for aliaser_id in aliasee_to_aliaser_ids.get(symbol_id, set()):
-                add_symbol(direct_dependencies, aliaser_id)
+                add_symbol(direct_dependencies, aliaser_id, "alias_types")
 
         # Add the collected direct dependencies to the final set
         final_symbol_ids.update(direct_dependencies)

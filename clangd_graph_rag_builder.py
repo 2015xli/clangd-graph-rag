@@ -94,7 +94,6 @@ class GraphBuilder:
     def _pass_1_parse_sources(self):
         logger.info("\n--- Starting Phase 1: Parsing Source Code ---")
         self.compilation_manager = CompilationManager(
-            parser_type=self.args.source_parser,
             project_path=self.args.project_path,
             compile_commands_path=self.args.compile_commands
         )

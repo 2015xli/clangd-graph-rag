@@ -26,8 +26,6 @@ from urllib.parse import urlparse, unquote
 from clangd_index_yaml_parser import RelativeLocation
 
 import clang.cindex
-import tree_sitter_c as tsc
-from tree_sitter import Language, Parser as TreeSitterParser
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -789,63 +787,14 @@ class _ClangWorkerImpl:
         hash_input = " ".join(bucket_lang + bucket_macros + bucket_features + bucket_includes + bucket_other)
         return hashlib.md5(hash_input.encode("utf-8")).hexdigest()
 
-class _TreesitterWorkerImpl:
-    """Syntactic parser implementation (Location-based identity)."""
-    def __init__(self):
-        if not tsc or not TreeSitterParser: raise ImportError("tree-sitter not installed.")
-        self.language = Language(tsc.language())
-        self.parser = TreeSitterParser(self.language)
-
-    def run(self, file_path: str) -> Tuple[Optional[Dict[str, SourceSpan]], Set]:
-        try:
-            with open(file_path, "rb") as f:
-                source = f.read()
-            tree = self.parser.parse(source)
-            source_lines = source.decode("utf-8", errors="ignore").splitlines()
-            
-            spans = {}
-            stack = [tree.root_node]
-            file_uri = f"file://{os.path.abspath(file_path)}"
-            while stack:
-                node = stack.pop()
-                if node.type == "function_definition":
-                    declarator = node.child_by_field_name("declarator")
-                    ident_node = next((c for c in declarator.children if c.type == 'identifier'), None)
-                    if not ident_node: continue
-                    
-                    name = source_lines[ident_node.start_point[0]][ident_node.start_point[1]:ident_node.end_point[1]]
-                    name_span = RelativeLocation(
-                        start_line=ident_node.start_point[0], start_column=ident_node.start_point[1],
-                        end_line=ident_node.end_point[0], end_column=ident_node.end_point[1]
-                    )
-                    body_span = RelativeLocation(
-                        start_line=node.start_point[0], start_column=node.start_point[1],
-                        end_line=node.end_point[0], end_column=node.end_point[1]
-                    )
-                    
-                    # Syntactic fallback: use location-based identity. 
-                    # Tree-sitter has no USR, so these spans will always match in Tier 2 (Location).
-                    node_key = CompilationParser.make_symbol_key(name, "Function", file_uri, name_span.start_line, name_span.start_column)
-                    synth_id = CompilationParser.make_synthetic_id(node_key)
-                    spans[synth_id] = SourceSpan(name=name, kind="Function", lang="C", name_location=name_span, body_location=body_span, id=synth_id, parent_id=None)
-                stack.extend(node.children)
-            
-            if not spans: return None, set()
-            return (file_uri, spans), set()
-        except Exception as e:
-            logger.error(f"Treesitter worker failed to parse {file_path}: {e}")
-            return None, set()
-
 # --- Worker Orchestration ---
 _worker_impl_instance = None
 _count_processed_tus = 0
 
-def _worker_initializer(parser_type: str, init_args: Dict[str, Any]):
+def _worker_initializer(init_args: Dict[str, Any]):
     global _worker_impl_instance
     sys.setrecursionlimit(3000)
-    if parser_type == 'clang': _worker_impl_instance = _ClangWorkerImpl(**init_args)
-    elif parser_type == 'treesitter': _worker_impl_instance = _TreesitterWorkerImpl()
-    else: raise ValueError(f"Unknown parser type: {parser_type}")
+    _worker_impl_instance = _ClangWorkerImpl(**init_args)
 
 def _parallel_worker(data: Any) -> Dict[str, Any]:
     global _worker_impl_instance
@@ -929,12 +878,12 @@ class CompilationParser:
         if ext in cls.C_SOURCE_EXTENSIONS or ext in cls.C_HEADER_EXTENSIONS: return "C"
         return "Unknown"
 
-    def _parallel_parse(self, items_to_process: List, parser_type: str, num_workers: int, desc: str, worker_init_args: Dict[str, Any] = None, batch_size: int = 1):
+    def _parallel_parse(self, items_to_process: List, num_workers: int, desc: str, worker_init_args: Dict[str, Any] = None, batch_size: int = 1):
         all_spans, all_includes, all_static_calls, all_type_alias_spans, all_macro_spans, file_tu_hash_map = defaultdict(dict), set(), set(), {}, {}, defaultdict(set)
-        initargs = (parser_type, worker_init_args or {})
+        initargs = (worker_init_args or {})
         items_iterator, max_pending, futures = iter(items_to_process), num_workers * 2, {}
         ctx = get_context("spawn")
-        with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx, initializer=_worker_initializer, initargs=initargs) as executor:
+        with ProcessPoolExecutor(max_workers=num_workers, mp_context=ctx, initializer=_worker_initializer, initargs=(initargs,)) as executor:
             def _next_batch(): return list(islice(items_iterator, batch_size))
             for _ in range(max_pending):
                 batch = _next_batch()
@@ -1033,13 +982,4 @@ class ClangParser(CompilationParser):
         source_files = [f for f in files_to_parse if f.lower().endswith(CompilationParser.ALL_SOURCE_EXTENSIONS)]
         cmd_files = {self._get_cmd_file_realpath(cmd): cmd for cmd in self.db.getAllCompileCommands()}
         compile_entries = [{'file': f, 'directory': cmd_files[f].directory, 'arguments': list(cmd_files[f].arguments)[1:]} for f in source_files if f in cmd_files]
-        self._parallel_parse(compile_entries, 'clang', num_workers, "Parsing TUs (clang)", worker_init_args={'project_path': self.project_path, 'clang_include_path': self.clang_include_path})
-
-class TreesitterParser(CompilationParser):
-    """Syntactic parser implementation (Location-based identity)."""
-    def __init__(self, project_path: str): super().__init__(project_path)
-    def parse(self, files_to_parse: List[str], num_workers: int = 1):
-        self.source_spans.clear(); self.include_relations.clear()
-        valid = [f for f in files_to_parse if os.path.isfile(f)]
-        self._parallel_parse(valid, 'treesitter', num_workers, "Parsing spans (treesitter)", worker_init_args={})
-    def get_include_relations(self) -> Set[IncludeRelation]: return set()
+        self._parallel_parse(compile_entries, num_workers, "Parsing TUs (clang)", worker_init_args={'project_path': self.project_path, 'clang_include_path': self.clang_include_path})
