@@ -20,9 +20,10 @@ from typing import Optional, Any
 import resource
 
 logger = logging.getLogger(__name__)
-litellm.set_verbose = False
-logger.setLevel(logging.WARNING)
+logger.setLevel(logging.DEBUG)
 
+logging.getLogger("LiteLLM").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 # --- Cache Management ---
 
 class LlmCacheManager:

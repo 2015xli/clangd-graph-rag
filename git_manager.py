@@ -66,7 +66,7 @@ class GitManager:
 
     def _filter_source_files(self, file_list):
         """Filters a list of file paths for C/C++ source and header files."""
-        return [f for f in file_list if f.lower().endswith(FileExtensions.ALL_C_CPP_EXTENSIONS)]
+        return [f for f in file_list if f.lower().endswith(FileExtensions.ALL_C_CPP)]
 
     def _get_detailed_changed_files(self, old_commit_hash: str, new_commit_hash: str) -> dict:
         """
@@ -152,15 +152,15 @@ class GitManager:
             
             filtered_renamed_exact = []
             for rename_pair in files_by_type['renamed_exact']:
-                if rename_pair['original'].lower().endswith(FileExtensions.ALL_C_CPP_EXTENSIONS) or \
-                   rename_pair['new'].lower().endswith(FileExtensions.ALL_C_CPP_EXTENSIONS):
+                if rename_pair['original'].lower().endswith(FileExtensions.ALL_C_CPP) or \
+                   rename_pair['new'].lower().endswith(FileExtensions.ALL_C_CPP):
                     filtered_renamed_exact.append(rename_pair)
             files_by_type['renamed_exact'] = filtered_renamed_exact
 
             filtered_copied_exact = []
             for copy_pair in files_by_type['copied_exact']:
-                if copy_pair['original'].lower().endswith(FileExtensions.ALL_C_CPP_EXTENSIONS) or \
-                   copy_pair['new'].lower().endswith(FileExtensions.ALL_C_CPP_EXTENSIONS):
+                if copy_pair['original'].lower().endswith(FileExtensions.ALL_C_CPP) or \
+                   copy_pair['new'].lower().endswith(FileExtensions.ALL_C_CPP):
                     filtered_copied_exact.append(copy_pair)
             files_by_type['copied_exact'] = filtered_copied_exact
 

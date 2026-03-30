@@ -6,68 +6,16 @@ import os
 import logging
 import sys
 import clang.cindex
-from dataclasses import dataclass, field
-from typing import List, Dict, Set, Tuple, Any, Optional, NamedTuple
+from typing import List, Dict, Set, Tuple, Any, Optional
 from collections import defaultdict
 
-from clangd_index_yaml_parser import RelativeLocation
+from clangd_index_yaml_parser import RelativeLocation, Location
 from utils import hash_usr_to_id, make_symbol_key, make_synthetic_id, get_language, FileExtensions
 from .node_parser import NodeParserMixin
-from .constants import *
+from .types import *
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
-
-# ============================================================
-# Data classes for span representation
-# ============================================================
-@dataclass(frozen=True, slots=True)
-class SourceSpan:
-    """Represents a lexically defined entity in the source code."""
-    name: str
-    kind: str
-    lang: str
-    name_location: RelativeLocation
-    body_location: RelativeLocation
-    id: str
-    parent_id: Optional[str]
-    original_name: Optional[str] = None
-    expanded_from_id: Optional[str] = None
-    member_ids: List[str] = field(default_factory=list)
-
-@dataclass(frozen=True, slots=True)
-class MacroSpan:
-    """Represents a preprocessor #define directive."""
-    id: str 
-    name: str
-    lang: str
-    file_uri: str
-    name_location: RelativeLocation
-    body_location: RelativeLocation
-    is_function_like: bool
-    macro_definition: str
-
-@dataclass(frozen=True, slots=True)
-class TypeAliasSpan:
-    """Represents a typedef or using alias."""
-    id: str 
-    file_uri: str 
-    lang: str
-    name: str
-    name_location: RelativeLocation
-    body_location: RelativeLocation
-    aliased_canonical_spelling: str
-    aliased_type_id: Optional[str]
-    aliased_type_kind: Optional[str]
-    is_aliasee_definition: bool
-    scope: str
-    parent_id: Optional[str]
-    original_name: Optional[str] = None
-    expanded_from_id: Optional[str] = None
-
-class IncludeRelation(NamedTuple):
-    source_file: str
-    included_file: str
 
 # ============================================================
 # Core Clang worker
@@ -119,7 +67,6 @@ class _ClangWorkerImpl(NodeParserMixin):
         
         try:
             os.chdir(dir_path)
-            # These helper methods are now imported or would be moved to worker context
             args = self._sanitize_args(args, file_path)
             self._tu_hash = sys.intern(self._get_tu_hash(args))
             self._processed_global_headers = self._global_header_cache.get(self._tu_hash, None)
@@ -233,7 +180,7 @@ class _ClangWorkerImpl(NodeParserMixin):
         file_name = parent.location.file.name if parent.location.file else parent.translation_unit.spelling
         if not file_name: return None
         if parent.kind.name not in NODE_KIND_FOR_BODY_SPANS:
-            if parent.kind.name not in "ClangParser.NODE_KIND_NAMESPACE": 
+            if parent.kind.name not in NODE_KIND_NAMESPACE: 
                 logger.error(f"Parent {parent.kind.name} ({parent.spelling}) of node {node.spelling} is not valid.")
                 return None
         usr = parent.get_usr()

@@ -9,16 +9,17 @@ import logging
 import os
 import gc
 from typing import Dict, List, Set
+from git.exc import InvalidGitRepositoryError
 
 import input_params
 from git_manager import GitManager
-from git.exc import InvalidGitRepositoryError
 from neo4j_manager import Neo4jManager
 from clangd_index_yaml_parser import SymbolParser
 from rag_updater import RagUpdater
 from include_relation_provider import IncludeRelationProvider
 from graph_update_scope_builder import GraphUpdateScopeBuilder
 from graph_debug_manager import GraphDebugManager
+from utils import FileExtensions
 
 from log_manager import init_logging
 init_logging()
@@ -165,8 +166,8 @@ class GraphUpdater:
 
     def _analyze_impact_from_graph(self, git_changes: Dict[str, List[str]]) -> Set[str]:
         logger.info("\n--- Phase 2: Analyzing Header Impact via Graph Query ---")
-        headers_to_check = [h for h in git_changes['modified'] if h.lower().endswith(FileExtensions.ALL_HEADER_EXTENSIONS)] + \
-                           [h for h in git_changes['deleted'] if h.lower().endswith(FileExtensions.ALL_HEADER_EXTENSIONS)]
+        headers_to_check = [h for h in git_changes['modified'] if h.lower().endswith(FileExtensions.ALL_HEADER)] + \
+                           [h for h in git_changes['deleted'] if h.lower().endswith(FileExtensions.ALL_HEADER)]
 
         if not headers_to_check:
             logger.info("No modified or deleted headers to analyze. Skipping graph query.")

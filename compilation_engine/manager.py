@@ -7,13 +7,18 @@ import logging
 import gc
 import sys
 import git
+import subprocess
+import tempfile
+import shutil
+import clang.cindex
+from pathlib import Path
 from typing import Optional, List, Set, Tuple, Dict, Any
 
 from git_manager import get_git_repo, resolve_commit_ref_to_hash
 from utils import FileExtensions
 from .cache import CacheManager
 from .orchestrator import ParallelOrchestrator
-from .worker import SourceSpan, MacroSpan, TypeAliasSpan, IncludeRelation
+from .types import SourceSpan, MacroSpan, TypeAliasSpan, IncludeRelation
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -52,11 +57,11 @@ class CompilationManager:
         self._clang_include_path = self._get_clang_resource_dir()
 
     def _get_clang_resource_dir(self):
-        import subprocess
         try:
-            res = subprocess.check_output(['clang', '-print-resource-dir']).decode('utf-8').strip()
+            res = subprocess.check_output(['clang', '-print-resource-dir'], text=True).strip()
             return os.path.join(res, 'include')
-        except: return None
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            return None
 
     def _load_into_self(self, data: Dict[str, Any]):
         self.source_spans = data.get("source_spans", {})
@@ -68,10 +73,6 @@ class CompilationManager:
     def _perform_parsing(self, files_to_parse: List[str], num_workers: int) -> Dict[str, Any]:
         if not files_to_parse:
             return {"source_spans": {}, "include_relations": set(), "static_call_relations": set(), "type_alias_spans": {}, "macro_spans": {}}
-
-        import clang.cindex
-        from pathlib import Path
-        import tempfile, shutil
 
         # Local resolve of the DB directory
         p = Path(self.compile_commands_path).expanduser().resolve()
@@ -128,7 +129,7 @@ class CompilationManager:
         all_files = []
         for root, _, fs in os.walk(folder_path):
             for f in fs:
-                if f.lower().endswith(FileExtensions.ALL_C_CPP_EXTENSIONS):
+                if f.lower().endswith(FileExtensions.ALL_C_CPP):
                     all_files.append(os.path.join(root, f))
         self.parse_files(all_files, num_workers)
 

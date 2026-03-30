@@ -14,6 +14,7 @@ from tqdm import tqdm
 from collections import defaultdict
 
 from .worker import _ClangWorkerImpl
+from .types import SourceSpan, MacroSpan, TypeAliasSpan, IncludeRelation
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)

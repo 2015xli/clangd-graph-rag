@@ -4,7 +4,7 @@ Compilation engine for parsing C/C++ source code and extracting semantic metadat
 """
 
 from .manager import CompilationManager
-from .worker import SourceSpan, MacroSpan, TypeAliasSpan, IncludeRelation
+from .types import SourceSpan, MacroSpan, TypeAliasSpan, IncludeRelation
 from utils import FileExtensions
 
 __all__ = [
