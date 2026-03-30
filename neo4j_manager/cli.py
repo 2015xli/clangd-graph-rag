@@ -1,19 +1,18 @@
+#!/usr/bin/env python3
+"""
+CLI interface for the Neo4j database manager.
+"""
 import logging
 import argparse
 import json
-from neo4j_ops import Neo4jBase, SchemaMixin, PurgeMixin, ProjectMixin
+import sys
+from . import Neo4jManager
 
 logger = logging.getLogger(__name__)
-
-class Neo4jManager(Neo4jBase, SchemaMixin, PurgeMixin, ProjectMixin):
-    """
-    Unified manager for Neo4j database operations.
-    Inherits core functionality, schema management, purging, and project metadata
-    from modular mixins in the neo4j_ops package.
-    """
-    pass
+logger.setLevel(logging.DEBUG)
 
 def _recursive_type_check(data, indent=0, path="", output_lines: list = None):
+    """Recursively traverses a nested data structure and logs types/shapes."""
     if output_lines is None:
         output_lines = []
     prefix = "  " * indent
@@ -60,13 +59,13 @@ def main():
 
     with Neo4jManager() as neo4j_mgr:
         if not neo4j_mgr.check_connection():
-            return 1
+            sys.exit(1)
 
         if args.command == "dump-schema":
             schema_info = neo4j_mgr.get_schema()
             if not schema_info or schema_info.get("error"):
                 logger.error("Could not retrieve schema.")
-                return 1
+                sys.exit(1)
             
             if args.json_format:
                 output_content = json.dumps(schema_info, default=str, indent=2)
@@ -84,8 +83,16 @@ def main():
                 print(output_content)
         
         elif args.command == "delete-property":
+            if not args.label and not args.all_labels:
+                logger.error("Error: Either --label or --all-labels must be specified for 'delete-property'.")
+                sys.exit(1)
+            if args.label and args.all_labels:
+                logger.error("Error: Cannot specify both --label and --all-labels. Choose one.")
+                sys.exit(1)
+
             count = neo4j_mgr.delete_property(args.label, args.key, args.all_labels)
             logger.info(f"Removed property '{args.key}' from {count} nodes.")
+
             if args.rebuild_indices and "embedding" in args.key.lower():
                 logger.info("Rebuilding vector indices as requested...")
                 neo4j_mgr.rebuild_vector_indices()
@@ -93,6 +100,7 @@ def main():
         elif args.command == "dump-schema-types":
             output_lines = _recursive_type_check(neo4j_mgr.get_schema(), path="schema_info")
             output_content = "\n".join(output_lines)
+
             if args.output:
                 try:
                     with open(args.output, 'w') as f:

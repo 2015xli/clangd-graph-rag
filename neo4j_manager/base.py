@@ -5,6 +5,7 @@ from typing import List, Dict, Tuple, Optional, Any
 from neo4j import GraphDatabase
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
 # Neo4j connection settings
 NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687")
@@ -18,10 +19,11 @@ class Neo4jBase:
         self._driver = None
         self._lock = threading.Lock()
 
+    # ---------- lifecycle ----------
     def _ensure_driver(self):
         if self._driver is None:
             with self._lock:
-                if self._driver is None:
+                if self._driver is None:  # double-checked
                     self._driver = GraphDatabase.driver(
                         self.uri,
                         auth=(self.user, self.password)
@@ -37,6 +39,7 @@ class Neo4jBase:
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        # keep existing behavior
         self.close()
 
     @property
@@ -54,6 +57,7 @@ class Neo4jBase:
             return False
 
     def process_batch(self, batch: List[Tuple[str, Dict]]) -> List[Any]:
+        """Executes a batch of queries within a single transaction."""
         all_counters = []
         with self.driver.session() as session:
             with session.begin_transaction() as tx:
@@ -64,16 +68,19 @@ class Neo4jBase:
         return all_counters
 
     def execute_autocommit_query(self, cypher: str, params: Dict = None) -> Any:
+        """Executes a single query and returns the update counters."""
         with self.driver.session() as session:
             result = session.run(cypher, **(params or {}))
             return result.consume().counters
 
     def execute_read_query(self, cypher: str, params: dict = None) -> list[dict]:
+        """Executes a read query and returns a list of result records."""
         with self.driver.session() as session:
             result = session.run(cypher, **(params or {}))
             return [record.data() for record in result]
 
     def execute_query_and_return_records(self, cypher: str, params: dict = None) -> List[Dict]:
+        """Executes a query and returns a list of result records."""
         with self.driver.session() as session:
             result = session.run(cypher, **(params or {}))
             return [record.data() for record in result]
