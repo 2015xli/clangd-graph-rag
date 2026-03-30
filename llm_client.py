@@ -6,7 +6,7 @@ It uses a centralized background event loop to manage concurrency and prevent
 file descriptor explosion when using FanoutCache.
 """
 
-import os
+import os, time
 import logging
 import litellm
 import hashlib
@@ -253,11 +253,19 @@ class LiteLlmClient(LlmClient):
             return ""
 
 class FakeLlmClient(LlmClient):
-    """A fake client for debugging that returns a static summary."""
+    """A fake client for debugging that returns a static summary.
+    By default, it does not use llm cache even if the cache is turn on, to avoid cache pollution.
+    """
     def __init__(self):
         self.api_name = "fake"
         self.is_local = True 
         super().__init__()
+
+    # WARNING: If you want to experiment with the llm cache for fake client, you should disable this function.
+    def generate_summary(self, prompt: str) -> str:
+        """Simulate a sync delay and return static text."""
+        time.sleep(0.01) 
+        return "This part implements important functionalities."
 
     async def _async_generate(self, prompt: str) -> str:
         """Simulate an async delay and return static text."""
