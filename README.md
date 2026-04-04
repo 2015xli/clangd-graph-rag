@@ -29,7 +29,7 @@ The project provides the graph RAG building and updating tools, along with an ex
 ---
 
 ### Current Schema
-Here is a simplified version of the [current neo4j schema](neo4j_current_schema.txt) for AI agent to use.
+Here is a simplified version of the [current neo4j schema](neo4j_simplified_schema.txt) for AI agent to use.
 
 ![Current Schema](docs/neo4j_current_schema.png)
 
@@ -141,7 +141,7 @@ python3 graph_builder.py /path/to/clangd-index.yaml /path/to/project/ --generate
 * With `--generate-summary` enabled, the tool will generate summary. By default it will use `--llm-api fake` to test the summary generation without actually calling an LLM API. You can use `--llm-api [openai|deepseek|ollama|fake]` to specify the LLM API to use. Option `ollama` will use local ollama setup. Please check the `llm_client.py` for the details.
 * The generated summaries are cached in two levels of caches, so that you don't need to regenerate them if the source code of the project remains unchanged. If you did not specify the --llm-api in your previous runs (i.e., using the default `fake` llm client), and now you want to use a real LLM API, the fake summaries will be removed automatically, so that your graphRAG does not have mixed fake and real summaries. 
 
-Please check the detailed design document for more details: [Clangd Graph RAG Builder](./docs/summary_graph_builder.md)
+Please check the detailed design document for more details: [Graph Builder](./docs/graph_builder.md) or go to the [Documentation](#documentation) section for a full description.
 
 ### Summary RAG Data Generation
 
@@ -149,7 +149,7 @@ After the graph is fully built (without --generate-summary enabled), you can gen
 ```bash
 python3 -m summary_driver /path/to/clangd-index.yaml /path/to/project/ --llm-api [openai|deepseek|ollama|fake]
 ```
-Please check the detailed design document for more details: [Code Graph RAG Data Generation](./docs/summary_code_graph_rag_generator.md)
+Please check the detailed design document for more details: [Summary Generation](./summary_driver/README.md) or go to the [Documentation](#documentation) section for a full description.
 
 ### Incremental Graph Update
 
@@ -164,7 +164,7 @@ python3 graph_updater.py /path/to/new/clangd-index.yaml /path/to/project/ --old-
 ```
 Note: If your full build graphRAG has been generated with a real LLM API, you definitely want to use a real one for the incremental update as well, to avoid the `fake` llm client polluting your graphRAG with meaningless summaries. If you accidently used the `fake` llm client, and your graphRAG is polluted, no worry. Please check section [Rebuild or Clean Up Graph](#rebuild-or-clean-up-graph) on how to deal with it. 
 
-Please check the detailed design document for more details: [Clangd Graph RAG Updater](./docs/summary_graph_updater.md)
+Please check the detailed design document for more details: [Graph Updater](./docs/graph_updater.md) or go to the [Documentation](#documentation) section for a full description.
 
 ### Common Options
 
@@ -213,7 +213,7 @@ Once the code graph is built and enriched, you can interact with it using natura
     ```
     You can now ask the agent questions.
 
-For more details, see the documentation for Agentic Components section in [Design Documentation](./docs/README.md).
+For more details, see the documentation for Agentic Components section in [Design Documentation](./docs/README.md#integration-and-agents).
 
 ## Supporting Scripts
 
@@ -312,11 +312,15 @@ If you don't want to rebuild your graph, you can simply regenerate the summaries
 
     Node cache caches summaries returned by the llm client, no matter which client it is, real or fake. So if you have used both real and fake clients to generate summaries, the node cache will contain both fake and real summaries. If you don't want to use the fake summaries, you can simply delete the entire cache file (see **LLM cache** below for why this is fine); or if you like, you can just remove the fake summaries in a surgical way.  
 
+    For more details, please check the documentation for [Summary Engine](./summary_engine/README.md).
+
 2. **LLM cache**: This is the Level-2 summary cache. When the summarizer has a cache miss in the Level-1 cache, it will issue an LLM request. The LLM client caches all the responses from real LLMs in `llm cache`, bypassing the responses from the fake client. The cache is indexed by the hash value of prompts. If the same prompt is issued again, the cached response will be returned. If your project source code has no change, but you changed the prompt, the `llm cache` will become invalid.
 
     This design ensures the `llm cache` has only real summaries. That means, all your real summaries won't be lost, even if you delete the Level-1 cache file at `<project_path>/.cache/summary_backup.json`. Of course you can also delete this Level-2 llm cache at `<project_path>/.cache/llm_cache/` if you want to start fresh. For example, you want to use a different LLM model, but usually you don't need to do that. 
 
     The llm cache is built with `diskcache (fanout)`, which is based on `sqlite`. The `fanout` configuration improves the concurrency performance. You can access its contents with sqlite tools like `sqlitebrowser` to view and edit the contents.
+
+    For more details, please check the documentation for [LLM Client](./docs/llm_client.md).
 
 3. **Why two levels of caches** As mentioned above, the node cache is valid as long as the source code is not modified, while the llm cache is valid only if the whole prompt matches. The node cache has both fake and real summaries, and the llm cache has only the real summaries. They can be used for different purposes. The node cache can be used to develop out-of-graph RAG systems; the llm cache can be shared by different projects if they point to the same cache folder.
 

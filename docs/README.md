@@ -23,7 +23,7 @@ These READMEs reside within the package folders to provide locality of informati
 *   **[Graph Ingester](../graph_ingester/README.md)**: The process that converts the symbols and relations to Neo4j nodes and relationships.
 *   **[Updater Engine](../updater_engine/README.md)**: The brain behind the [Graph Updater](./graph_updater.md)'s "Sufficient Subset" strategy for surgical incremental updates.
 
-#### AI Enrichment (RAG)
+#### Summary Enrichment 
 *   **[Summary Driver](../summary_driver/README.md)**: Orchestrates the multi-pass workflows for full and incremental RAG summary generation.
 *   **[Summary Engine](../summary_engine/README.md)**: The core intelligence layer for LLM-powered summarization and multi-level caching.
 *   **[LLM Client](./llm_client.md)**: The unified interface for interacting with various LLM and embedding model APIs.
