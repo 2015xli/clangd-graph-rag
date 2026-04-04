@@ -46,7 +46,7 @@ This step leverages and expands our existing source code parsing infrastructure.
 
 ## 4. Verification
 
-1.  After the changes are implemented, run the full `clangd_graph_rag_builder.py` pipeline on a C project.
+1.  After the changes are implemented, run the full `graph_builder.py` pipeline on a C project.
 2.  Connect to the Neo4j database.
 3.  Execute the following Cypher query: `MATCH (d:DATA_STRUCTURE) WHERE d.body_location IS NOT NULL RETURN d.name, d.body_location, d.kind LIMIT 20;`
 4.  Verify that the query returns `:DATA_STRUCTURE` nodes for structs, unions, and enums, and that the `body_location` property contains a valid list of four numbers (start line, start col, end line, end col).

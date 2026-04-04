@@ -9,7 +9,7 @@ import clang.cindex
 from urllib.parse import urlparse, unquote
 from typing import Optional, Tuple, Protocol, Dict, List, Any
 
-from clangd_index_yaml_parser import RelativeLocation
+from symbol_parser import RelativeLocation
 from utils import hash_usr_to_id, make_symbol_key, make_synthetic_id
 from .types import *
 

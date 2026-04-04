@@ -16,7 +16,7 @@ import gc
 from tqdm import tqdm
 
 import input_params
-from clangd_index_yaml_parser import SymbolParser, Symbol
+from symbol_parser import SymbolParser, Symbol
 from source_parser import CompilationManager
 from neo4j_manager import Neo4jManager
 from utils import align_string

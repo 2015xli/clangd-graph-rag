@@ -1,7 +1,7 @@
 import logging
 from typing import Dict, Tuple
 
-from clangd_index_yaml_parser import Location
+from symbol_parser import Location
 from source_parser import SourceSpan
 from utils import make_symbol_key
 

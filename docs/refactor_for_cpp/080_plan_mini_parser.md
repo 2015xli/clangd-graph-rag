@@ -1,6 +1,6 @@
 # Refactoring Sufficient Subset Generation for C++ Updates
 
-This document details the refactoring of the "sufficient subset" creation logic within `clangd_index_yaml_parser.py`. This was a critical step to ensure the incremental updater (`clangd_graph_rag_updater.py`) could correctly handle C++ codebases.
+This document details the refactoring of the "sufficient subset" creation logic within `symbol_parser.py`. This was a critical step to ensure the incremental updater (`graph_updater.py`) could correctly handle C++ codebases.
 
 ### The "Why": Original Limitation
 
@@ -55,7 +55,7 @@ This iterative process guarantees that the entire dependency chain is followed, 
 ### Solving the Circular Import
 
 This refactoring introduced a circular dependency:
-*   `clangd_index_yaml_parser` needed to import `ClangdCallGraphExtractor`.
+*   `symbol_parser` needed to import `ClangdCallGraphExtractor`.
 *   `clangd_call_graph_builder` (which contains the extractor) needed to import `SymbolParser`.
 
-The solution was to use a **local import**. The line `from clangd_call_graph_builder import ...` was moved from the top of `clangd_index_yaml_parser.py` to be inside the `create_sufficient_subset` method. This breaks the import cycle by delaying the import until runtime, after all modules have been initialized. It is a standard and clean Pythonic solution for this exact issue.
+The solution was to use a **local import**. The line `from clangd_call_graph_builder import ...` was moved from the top of `symbol_parser.py` to be inside the `create_sufficient_subset` method. This breaks the import cycle by delaying the import until runtime, after all modules have been initialized. It is a standard and clean Pythonic solution for this exact issue.

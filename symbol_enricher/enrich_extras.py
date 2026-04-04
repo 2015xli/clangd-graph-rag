@@ -2,7 +2,7 @@ import logging
 import sys
 from typing import Dict
 
-from clangd_index_yaml_parser import Symbol, Location, Reference
+from symbol_parser import Symbol, Location, Reference
 from source_parser import TypeAliasSpan
 
 logger = logging.getLogger(__name__)
@@ -33,7 +33,7 @@ class EnrichExtrasMixin:
             # Use sym.id (USR-derived) to look up a matching TypeAliasSpan
             matched_tas = unmatched_type_alias_spans.get(sym_id)
             if not matched_tas:
-                if sys.argv[0].endswith("clangd_graph_rag_builder.py"):
+                if sys.argv[0].endswith("graph_builder.py"):
                     logger.debug(f"Could not find matching TypeAliasSpan for TypeAlias symbol {sym_id} {sym.name} at {sym.definition.file_uri}:{sym.definition.start_line}:{sym.definition.start_column}")
                 continue
             

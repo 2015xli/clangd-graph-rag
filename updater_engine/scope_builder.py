@@ -13,7 +13,7 @@ from collections import defaultdict
 from tqdm import tqdm 
 
 # Lower-level data structures and utilities
-from clangd_index_yaml_parser import SymbolParser, Symbol
+from symbol_parser import SymbolParser, Symbol
 from source_parser import CompilationManager
 from neo4j_manager import Neo4jManager
 

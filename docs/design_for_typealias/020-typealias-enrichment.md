@@ -121,7 +121,7 @@ This modular approach will make the `SymbolEnricher` more organized and easier t
 *   **Keying Consistency:** It is paramount that the `make_usr_derived_id` logic used in `ClangParser` for `TypeAliasSpan` and in `SymbolEnricher` for matching `Symbol` objects is identical to ensure correct matching.
 *   **Filtering External Symbols:** The initial filtering of symbols to be within the project path (already present in `enrich_symbols`) should apply to `TypeAlias` symbols as well, preventing external aliases from being processed.
 *   **Memory Management:** Be mindful of memory usage, especially when dealing with large numbers of `TypeAliasSpan` objects and the creation of new `Symbol` objects.
-*   **`Location.from_relative_location`:** This helper function has been added to `clangd_index_yaml_parser.py` to facilitate the creation of `Location` objects from `RelativeLocation` and `file_uri`.
+*   **`Location.from_relative_location`:** This helper function has been added to `symbol_parser.py` to facilitate the creation of `Location` objects from `RelativeLocation` and `file_uri`.
 
 ### 5. `synthetic_id_to_index_id` Mapping Table
 

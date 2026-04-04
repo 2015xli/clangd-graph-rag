@@ -3,8 +3,44 @@
 ### 0: What does `clangd-graph-rag` project do?
 
 *   **What**: The project ingests clangd index files into a Neo4j graph database.
-*   **Code Graph**: It builds a code graph with file/folder structure, symbol definitions, and call graph.
-*   **Vector index**: Has a RAG generation pass enriches the graph with AI-generated summaries and embeddings.
+*   **Major transformation Pipeline**:
+    ```text
+    [Clangd Index]           [Source Code]
+       |                         |
+       V                         V
+    (Symbol Parser)          (Source Parser)
+    [symbol cache]            [parser cache]
+         \                     /
+            \                /
+               \           /
+                  \      /
+                      |                  
+                      V
+              (Symbol Enricher) 
+                      |
+                      V  
+              (Graph Ingester) 
+                      |
+                      V  
+               [Neo4j Graph]
+                      |
+                      V  
+              (Summary Driver)
+                      |
+                      V  
+              (Summary Engine)
+             [Level-1 summary cache]
+                      |
+                      V  
+                (LLM client)
+             [Level-2 summary cache]
+                      |
+                      V  
+                  [LLM API]
+
+    ```
+*   **Code Graph**: It builds a code graph with file/folder structure, symbol definitions, call graph, header dependence, etc.
+*   **Vector index**: Has a RAG generation pass that enriches the graph with AI-generated summaries and embeddings.
 *   **Performance**: The pipeline is designed for performance, with parallel data processing and optimized database interactions.
 *   **Modular**: The system is modular, with different Python scripts responsible for specific passes of the ingestion process.
 *   **Compatibility**: It can adapt to different clangd indexer versions.
@@ -134,7 +170,7 @@ Object:
 ### 1.2: What to have with source code graph rag?
 
 *   **Code Graph**: We represent the codebase as a graph, with nodes for files, folders, and symbols (functions, classes, etc.), and edges for relationships between them.
-    * Node types: `PROJECT`, `FOLDER`, `FILE`, `FUNCTION`, `STRUCT`, `CLASS`, `VARIABLE`, etc.  
+    * Node types: `PROJECT`, `FOLDER`, `FILE`, `FUNCTION`, `STRUCT`, `CLASS`, `MACRO`, `VARIABLE`, `TYPE_ALIAS`, etc.  
     * Edge types: `[:CONTAINS]`, `[:DEFINES]`, `[:DECLARES]`, `[:CALLS]`, `[:INCLUDES]`, `[:INHERITS]`, `[:OVERRIDDEN_BY]`, `[:HAS_METHOD]`, `[:HAS_FIELD]`, `[:HAS_NESTED]`, etc.  
 *   **Summary**: AI-generated summaries for functions/methods, and roll-up to class, file, folder, up to the root project node.
     *   Function/Method generates summaries based on their code. Other nodes roll-up summaries from their children.
@@ -145,12 +181,14 @@ Object:
 * **Symbols**: 
   *  Supports named entities, such as functions, classes, variables, etc.
   *  Does not support anonymous entities, such as lambda functions, anonymous classes, etc.
+  *  Does not support macros.
 * **References**: 
   *  Supports caller-callee relations with later clangd version, not earlire versions
   *  Supports parent-child relations for class-members, but not lexical nesting relations esp. for anonymous structures like function, class, struct.
 * **Relations**:
-   * Support named class inheritance relations and method overriding relations.
-   * Does not support file-level relations, such as folder containing file relations, file including file relations, etc.
+  *  Support named class inheritance relations and method overriding relations.
+  *  Does not support file-level relations, such as folder containing file relations, file including file relations, etc.
+  *  Does not give information on type alias target (aliasee), only the type alias symbol name itself.
 
 ## Part 2: Challenges in building code graph
 
@@ -213,7 +251,23 @@ The situation becomes difficult when anonymous entities, type specializations ar
 *   **Synthetic symbol**: We create synthetic symbol for anonymous entities in the source code. At the same time, build the lexical nesting relationship between the entities. Actually, since we don't know if an entity has a corresponding symbol in the index file, we create synthetic symbols for all entities met in the source code. 
 *   **Map synthetic symbol ID to symbol ID**: Later, we try to map the synthetic symbols to clangd index symbols. In this way, we build the relations between the synthetic symbols and the clangd index symbols. Then we can use the clangd index to build the code graph that has both the indexed symbols and synthetic symbols (that are not indexed by clangd).
 
-### 2.4: Tying It Together: Source Code Parsing
+### 2.4: Problem: Macro Definition and Expansion Relations
+
+*   **The Challenge**: In large C++ projects (like LLVM), the preprocessor is often used as a code-generation engine. A single macro can generate entire classes or methods. While `clangd` indexes the resulting symbols, it loses the connection to the source macro. An AI agent seeing a symbol like `WaitEventType` might be confused because that string does not appear literally in the source file.
+*   **The Solution**:
+    *   **Causality Tracking**: During AST traversal, the `SourceParser` records the physical extents of all `MACRO_INSTANTIATION` nodes. 
+    *   **Geometric Enclosure**: For every defined symbol, the parser performs a geometric check: is this symbol's entire extent enclosed within a macro instantiation? If so, the outermost enclosing macro is identified as the semantic origin.
+    *   **Graph Representation**: The `SymbolEnricher` attaches the `expanded_from_id` and the `original_name` (the raw invocation text, e.g., `AMDGPU_DECLARE_WAIT_EVENTS(WaitEventType)`). This allows the graph to store an `[:EXPANDED_FROM]` relationship from the symbol to a `:MACRO` node, providing "evidence" for the symbol's existence.
+
+### 2.5: Problem: TypeAlias Target Type (Aliasee or Aliased Type)
+
+*   **The Challenge**: The `clangd` index provides information about `typedef` and `using` statements (Type Aliases) as symbols, but it does not provide a direct link to the target type they point to (the "aliasee"). Without this, an AI agent cannot follow the type hierarchy (e.g., "What is this `Handle` type actually an alias for?").
+*   **The Solution**:
+    *   **Authoritative Resolution**: The `SourceParser` uses `libclang`'s semantic resolution to find the "canonical" type of every `TYPE_ALIAS` node encountered in the AST. It captures the USR of this target type.
+    *   **Identity Mapping**: The `SymbolEnricher` uses its `synthetic_id_to_index_id` registry to resolve the target USR-hash to a canonical Symbol ID. 
+    *   **Graph Representation**: An `[:ALIAS_OF]` relationship is created between the `:TYPE_ALIAS` node and its target (usually a `:CLASS_STRUCTURE` or `:DATA_STRUCTURE`), enabling transparent type-navigation for AI agents.
+
+### 2.6: Tying It Together: Source Code Parsing
 
 As we've seen, the project has three fundamental needs that cannot be met by the `clangd` index alone:
 
@@ -226,7 +280,7 @@ All of these require parsing the source code itself. The project uses two techno
 *   **`clang.cindex`**: This is the primary engine. It uses a `compile_commands.json` file to parse code with full compiler context, making it semantically accurate. It is the only method that can reliably extract the `#include` graph and handle complex lexical nesting.
 *   **`tree-sitter`**: This is a much faster, but purely syntactic parser. It is not aware of macros or include paths and is primarily used as a fallback for getting function spans when a compilation database is not available. (May be deprecated in the future.)
 
-### 2.5: A Note on `RefKind`
+### 2.7: A Note on `RefKind`
 
 *   **What is `RefKind`?**: A numeric value in the Clangd index that specifies the *type* of a symbol reference (e.g., declaration, definition, call).
 *   **The Change**: The numeric values for a function call changed in newer versions of Clangd.
@@ -261,11 +315,24 @@ enum class RefKind : uint8_t {
 
 ```
 
+### 2.8: Stable Identity: Semantic and Syntactic Pluralism
+
+Building a robust code graph requires identities that are stable across code edits. A simple line-number based identity would break every time a developer adds a comment.
+
+*   **Semantic Identity (USR-Hash)**: Primarily used by the `SourceParser` and `SymbolParser`.
+    *   **The USR**: A Unified Symbol Resolution string generated by the compiler. It encodes names, namespaces, and parameter types.
+    *   **The Hash**: We use the first 8 bytes of the SHA1 hash of the USR, matching `clangd`'s internal identity logic.
+    *   **Benefit**: Stable across line/column changes and O(1) matching between disparate tools.
+*   **Syntactic Identity (Lexical)**: Used for nodes where a USR is unavailable (e.g., anonymous entities or certain macro artifacts).
+    *   **The Key**: `kind::name::file_uri:line:col`.
+    *   **Expansion vs. Spelling**: We strictly use **Expansion Coordinates** (where the code was generated) rather than Spelling Coordinates (where it was typed).
+    *   **Rationale**: Multiple symbols can share the same spelling (e.g., in a macro definition), but in a single Translation Unit, no two implementation entities can occupy the same expansion point. This ensures syntactic uniqueness.
+
 ---
 
 ## Part 3: Pipeline Designs
 
-### 3.1: The Full Build Pipeline (Refactored)
+### 3.1: The Full Build Pipeline
 
 This process builds the entire graph from scratch using a robust, re-ordered 8-pass pipeline.
 
@@ -277,9 +344,10 @@ This process builds the entire graph from scratch using a robust, re-ordered 8-p
 *   **Pass 4: Ingest Symbols**: The `SymbolProcessor` creates `:FUNCTION` and `:DATA_STRUCTURE` nodes. It writes the `body_location` array as a property on each `:FUNCTION` node.
 *   **Pass 5: Ingest Include Relations**: The `IncludeRelationProvider` creates all `[:INCLUDES]` relationships.
 *   **Pass 6: Ingest Call Graph**: The call graph is constructed. If the legacy (no `Container`) format is used, the extractor now reads the `body_location` from the enriched in-memory symbols.
-*   **Pass 7 & 8: RAG and Cleanup**: The large `SymbolParser` object is deleted to free memory, the RAG process runs (reading `body_location` from the graph), and orphan nodes are cleaned up.
+*   **Pass 7: Graph Wrapup**: Orphan nodes are cleaned up.
+*   **Pass 8: RAG Summary**: The large `SymbolParser` object is deleted to free memory, the RAG process runs (reading `body_location` from the graph) for LLM model to summarize.
 
-### 3.2: The Incremental Update Pipeline (Refactored)
+### 3.2: The Incremental Update Pipeline
 
 This process was completely rewritten for correctness and robustness, using a dependency-aware algorithm.
 
@@ -293,29 +361,29 @@ This process was completely rewritten for correctness and robustness, using a de
 
 ## Part 4: Source Code Architecture
 
-### 4.1: Major Components & Responsibilities (Refactored)
+### 4.1: Major Components & Responsibilities 
 
-*   **`clangd_index_yaml_parser.py`**: High-speed, parallel parsing of the `clangd` YAML index file.
-*   **`compilation_manager.py`**: The high-level orchestrator for source code parsing. Manages strategies (`clang` vs. `treesitter`) and caching.
-*   **`compilation_parser.py`**: The low-level parsing engine. Contains the parallelized `ClangParser` and the syntactic `TreesitterParser`.
-*   **`graph_ingester/include.py`**: A new component that owns all logic for the `[:INCLUDES]` relationship, including ingestion and dependency analysis for the updater.
-*   **`graph_ingester/symbol.py`**: Builds the graph's structural backbone. Its `PathProcessor` now consolidates paths from symbols and includes. Its `SymbolProcessor` now writes the `body_location` property to function nodes.
-*   **`graph_ingester/call.py`**: Builds the `:CALLS` relationships. Its legacy `WithoutContainer` extractor is now simpler, relying on pre-enriched in-memory `Symbol` objects.
-*   **`code_graph_rag_generator.py`**: The AI enrichment engine. It is now simpler and reads `body_location` data directly from the graph.
-*   **`symbol_enricher.py`**: This component's role has been significantly reduced. It now acts as a simple, temporary "enricher" used in an early pipeline pass to attach span data to in-memory symbols.
+*   **`symbol_parser.py`**: High-speed, parallel parsing of the `clangd` YAML index file.
+*   **`source_parser` module**: The low-level parsing engine. Contains the parallelized `ClangParser`.
+*   **`symbol_enricher.py`**: This component acts as a bridge enrich in-memory symbols with more information.
+*   **`graph_ingester/include.py`**: A component that owns all logic for the `[:INCLUDES]` relationship, including ingestion and dependency analysis for the updater.
+*   **`graph_ingester/path.py`**: Builds the graph's structural backbone. Its `PathProcessor` now consolidates paths from symbols and includes.
+*   **`graph_ingester/symbol.py`**: The core of symbol/relation ingestion. Its `SymbolProcessor` extracts info from `SymbolParser` output for the ingestion.
+*   **`graph_ingester/call.py`**: Builds the `:CALLS` relationships. Uses call graph extractor for both `WithoutContainer` and `WithContainer` cases.
+*   **`summary_driver` module**: The AI summary enrichment drivers, for both full build graph and incremental updated graph.
 
 ### 4.2: Orchestrator Deep Dive (Graph Construction)
 
-*   **`clangd_graph_rag_builder.py` (`GraphBuilder`)**: This class orchestrates the new, robust 8-pass pipeline for full builds. It now runs all parsing and enrichment passes first before creating any nodes in the database, ensuring all file nodes are created correctly and function nodes are created with their `body_location` property from the start.
+*   **`graph_builder.py` (`GraphBuilder`)**: This class orchestrates the new, robust 8-pass pipeline for full builds. It now runs all parsing and enrichment passes first before creating any nodes in the database, ensuring all file nodes are created correctly and function nodes are created with their `body_location` property from the start.
 
-*   **`clangd_graph_rag_updater.py` (`GraphUpdater`)**: This class was completely rewritten to use a dependency-aware algorithm. It no longer uses a simple "1-hop neighbor" approach. Instead, it uses the `[:INCLUDES]` graph to find the full scope of files affected by a change, purges that scope, and then runs a "mini" version of the new builder pipeline to surgically patch the graph.
+*   **`graph_updater.py` (`GraphUpdater`)**: This class was completely rewritten to use a dependency-aware algorithm. It no longer uses a simple "1-hop neighbor" approach. Instead, it uses the `[:INCLUDES]` graph to find the full scope of files affected by a change, purges that scope, and then runs a "mini" version of the new builder pipeline to surgically patch the graph.
 
-### 3.3: Orchestrator Deep Dive (RAG Summary Generation)
+### 4.3: Orchestrator Deep Dive (RAG Summary Generation)
 The orchestrators responsible for the AI-enrichment (RAG) phase, which runs after the main graph structure is in place.
 
-*   **`code_graph_rag_generator.py` (`RagGenerator`)**: This orchestrator performs a **full RAG build**. It is responsible for generating summaries for every relevant node in the entire graph. It queries the database for all nodes of a given type (e.g., all `:FUNCTION` nodes) and feeds them into the multi-pass summarization engine defined in the base `RagOrchestrator`.
+*   **`summary_driver/full_summarizer.py` (`FullSummarizer`)**: This orchestrator performs a **full RAG build**. It is responsible for generating summaries for every relevant node in the entire graph. It queries the database for all nodes of a given type (e.g., all `:FUNCTION` nodes) and feeds them into the multi-pass summarization engine defined in the`summary_engine` module.
 
-*   **`rag_updater.py` (`RagUpdater`)**: This orchestrator performs a **targeted, incremental RAG update**. Its goal is maximum efficiency by touching the minimum number of nodes required. It is seeded with a small set of symbols identified as changed by the `GraphUpdater`, then expands the scope with dependency analysis and runs targeted summarization for efficient updates.
+*   **`summary_driver/incremental_summarizer.py` (`IncrementalSummarizer`)**: This orchestrator performs a **targeted, incremental RAG update**. Its goal is maximum efficiency by touching the minimum number of nodes required. It is seeded with a small set of symbols identified as changed by the `GraphUpdater`, then expands the scope with dependency analysis and runs targeted summarization for efficient updates.
 
 
 ---
@@ -324,7 +392,7 @@ The orchestrators responsible for the AI-enrichment (RAG) phase, which runs afte
 
 ### 5.1: Supporting Modules
 
-*   **`neo4j_manager.py`**
+*   **`neo4j_manager` module**
     *   **Purpose**: A Data Access Layer (DAL) for the Neo4j database.
     *   **Functionality**: Encapsulates all Cypher queries, manages the database connection, and provides methods for schema creation, data purging, and batch transaction execution.
 *   **`git_manager.py`**
@@ -356,16 +424,16 @@ These are simple, standalone scripts created to assist with development, debuggi
 
 *   **The Challenge**: How do you support both a full, from-scratch graph build and a surgical, incremental update without writing the core logic twice?
 *   **The Principle**: Decouple the **Orchestrators** from the **Processors**.
-    *   **Orchestrators** (`GraphBuilder` & `GraphUpdater`, `RagGenerator` & `RagUpdater`) are responsible for *what* data to process.
-    *   **Processors** (`SymbolProcessor`, `RagOrchestrator`, etc.) are responsible for *how* to process the data they are given.
+    *   **Orchestrators** (`GraphBuilder` & `GraphUpdater`, `FullSummarizer` & `IncrementalSummarizer`) are responsible for *what* data to process.
+    *   **Processors** (`SymbolProcessor`, `SummaryEngine`, etc.) are responsible for *how* to process the data they are given.
 *   **Example 1: `SymbolProcessor`**
     *   This class ingests symbol data. Its methods operate on a dictionary of `Symbol` objects.
     *   In a full build, `GraphBuilder` passes it the *entire* symbol dictionary from the main parser.
     *   In an update, `GraphUpdater` passes it the much smaller dictionary from the "mini-index".
     *   The `SymbolProcessor`'s code is identical in both cases; it is agnostic to the overall context.
-*   **Example 2: `RagOrchestrator`**
-    *   This class is the base class of `RagGenerator` and `RagUpdater`, it provides common logic and shared methods for both full and incremental processing.
-    *   Both `RagGenerator` and `RagUpdater` use `RagOrchestrator`'s `_parallel_process` for all of their actual summary generation, which uses the same set of underlying worker methods (e.g., `_process_one_function`, `_process_one_class`, `_process_one_namespace`, etc.), achieving maximum code reuse.
+*   **Example 2: `SummaryEngine`**
+    *   This class is used by both `FullSummarizer` and `IncrementalSummarizer`, it provides common logic and shared methods for both full and incremental processing.
+    *   Both `FullSummarizer` and `IncrementalSummarizer` use `SummaryEngine`'s `_parallel_process` for all of their actual summary generation, which uses the same set of underlying worker methods (e.g., `_process_one_function`, `_process_one_class`, `_process_one_namespace`, etc.), achieving maximum code reuse.
 
 ### 6.2: Performance: Parallelism Strategy
 
@@ -377,7 +445,11 @@ These are simple, standalone scripts created to assist with development, debuggi
 
 *   **I/O-Bound: RAG Generation (`ThreadPoolExecutor`)**
     *   **Task**: Generating summaries involves making hundreds or thousands of network calls to an LLM API. The program spends most of its time waiting for responses.
-    *   **Solution**: The `RagGenerator` uses a `ThreadPoolExecutor` to manage a large number of lightweight threads, allowing for massive concurrency on network requests.
+    *   **Solution**: The `FullSummarizer` uses a `ThreadPoolExecutor` to manage a large number of lightweight threads, allowing for massive concurrency on network requests.
+
+*   **I/O-Bound: LLM Request (`AsyncIO`)**
+    *   **Task**: Generating thousands of summaries requires making thousands of concurrent network calls. Managing this with thousands of raw OS threads is inefficient.
+    *   **Solution**: The `llm_client.py` uses an **Asyncio Sidecar** architecture. It starts a single dedicated background thread running a permanent `asyncio` event loop. All LLM requests are dispatched to this sidecar, which leverages `aiohttp` (via LiteLLM) to manage massive concurrency with minimal overhead. This maximizes network throughput while keeping the main process responsive.
 
 ### 6.3: Performance: Data Ingestion Strategies
 
@@ -396,7 +468,8 @@ These are simple, standalone scripts created to assist with development, debuggi
 *   **Major caches**:
        * Index Parsing Cache: Avoids parsing the multi-gigabyte clangd YAML file.
        * Compilation Parser Cache: Avoids parsing thousands of source files.
-       * Summary Cache: Avoids making expensive LLM API calls.
+       * Level-1 Summary Cache: The node cache, indexed by symbol identifier. Avoids making expensive LLM API calls.
+       * Level-2 Summary Cache: The LLM cache, indexed by prompt hash. Avoids making expensive LLM API calls.
 *   **Minor caches**:
        * Header File Parsing Cache: An in-memory cache to avoid re-parsing the same header file hundreds of times within a single run in large projects.
 
@@ -420,7 +493,7 @@ These are simple, standalone scripts created to assist with development, debuggi
 *   **Validity Check (Fallback)**: If not in a Git repository, it falls back to storing a hash of the complete list of file
      paths being parsed. The cache is only used if the current file list produces an identical hash.
 
-#### 6.4.3: Summary Cache (summary_backup.json)
+#### 6.4.3: Level-1 Summary Cache (node cache in summary_backup.json)
 
 *   **What**: The SummaryCacheManager caches the output of LLM calls (code_analysis and summary) and the code_hash of the
      source code they were generated from.
@@ -429,7 +502,15 @@ These are simple, standalone scripts created to assist with development, debuggi
     *   *Save*: It uses a "Promote-on-Success" strategy for safety. During a run, intermediate saves are written to a temporary (.tmp) file. At the end of a successful run, a sanity check is performed. If it passes, rolling backups are created (.json -> .bak.1, etc.) and the temporary file is promoted to become the new official cache.
 *   **Validity Check**: The sanity check is performed during the final save. It compares the number of entries in the new temporary cache against the current main cache. The promotion is aborted if the new cache is suspiciously smaller (e.g., < 95% of the old size), preventing a bad run from destroying a good cache.
 
-#### 6.4.4: Header File Parsing Cache (In-Memory)
+#### 6.4.4: Level-2 Summary Cache (llm cache in <project_path>/.cache/llm_cache/)
+
+*   **What**: This is a **prompt-level cache** that stores the raw responses from the LLM API. It acts as a second line of defense behind the project-level node cache.
+*   **Mechanism**: 
+    *   **Indexing**: Every LLM request is hashed (SHA256) based on its entire prompt (system instructions + user message).
+    *   **Persistence**: Implemented using `diskcache.FanoutCache`. This uses a sharded SQLite backend to handle high-concurrency writes from the AsyncIO sidecar without database locking issues.
+*   **Benefit**: If you rebuild your graph or clear the L1 cache, the system will still "remember" the LLM responses for identical prompts. This provides near-instant "regeneration" for unchanged nodes and reduces API costs to absolute zero for repeated logic. Unlike the L1 cache, this cache is model-agnostic and resilient to changes in the graph's structural IDs.
+
+#### 6.4.5: Header File Parsing Cache (In-Memory)
 
 *   **What**: Since the same header file can be included by hundreds of source files, the ClangParser uses an in-memory cache to avoid re-parsing the same header's Abstract Syntax Tree (AST) repeatedly within a single run.
 *   **How:**
@@ -446,7 +527,7 @@ These are simple, standalone scripts created to assist with development, debuggi
     3.  Crucially, this `body_location` data is then **persisted to the Neo4j graph** as a property on each `:FUNCTION` node.
     4.  Because the graph is now the source of truth for this data, the massive `SymbolParser` object is no longer needed for the final RAG pass.
     5.  The `GraphBuilder` now explicitly deletes the `SymbolParser` object immediately after the call graph is built, allowing the Python garbage collector to free gigabytes of memory *before* the memory-intensive RAG process begins. This provides a much cleaner separation and more stable memory footprint.
-    6.  The `RagOrchestrator` will retrieve the `body_location` data from the Neo4j graph and use it to extract source code and generate summaries.
+    6.  The `SummaryEngine` will retrieve the `body_location` data from the Neo4j graph and use it to extract source code and generate summaries.
 
 ### 6.6: Developer Experience Designs
 
@@ -457,7 +538,36 @@ These are simple, standalone scripts created to assist with development, debuggi
 *   **2. Polymorphic Mocking (`FakeLlmClient`)**
     *   **Problem**: Calling real LLM APIs is slow and expensive, hindering rapid development and testing.
     *   **Solution**: A `FakeLlmClient` was created that conforms to the same base `LlmClient` interface but simply returns a hardcoded string. The `get_llm_client` factory returns this client when the user specifies `--llm-api fake`.
-    *   **Benefit**: This is a clean, polymorphic design. The `RagGenerator` is completely unaware it is using a fake client; it just calls the `generate_summary` method. This allows for a powerful debugging/dry-run mode without adding any conditional `if/else` logic to the core application or production clients.
+    *   **Benefit**: This is a clean, polymorphic design. The `FullSummarizer` is completely unaware it is using a fake client; it just calls the `generate_summary` method. This allows for a powerful debugging/dry-run mode without adding any conditional `if/else` logic to the core application or production clients.
+
+### 6.7: RAG Orchestration: The Waterfall and Propagation Strategy
+
+To minimize costs and maximize speed, the `SummaryEngine` employs a "Principle of Least Effort" for every node.
+
+*   **The Waterfall Decision**:
+    1.  **DB Hit**: If a valid, non-stale summary exists in Neo4j, return it (Unchanged).
+    2.  **Cache Hit**: If missing from DB but exists in the L1 node cache, restore it (Restored).
+    3.  **LLM Request**: If missing or stale, generate via LLM (Regenerated).
+*   **Dependency Propagation**:
+    *   The orchestrator tracks status flags: `visited`, `code_analysis_changed`, and `summary_changed`.
+    *   If a leaf function's code analysis changes, its contextual summary becomes stale.
+    *   This "staleness" then bubbles up: a changed function summary marks its parent Class as stale, which in turn marks the File, Folder, and finally the PROJECT node as stale.
+    *   This ensures a single line change in a function correctly triggers a cascade of architectural updates without re-summarizing unaffected branches.
+
+### 6.8: Safety Pillar: Failure Resilience and Cache Integrity
+
+LLM summaries are expensive and time-consuming to generate. The system uses a multi-layered safety strategy to protect this data.
+
+*   **Promote-on-Success**: All cache writes are first directed to `.tmp` files. The main `summary_backup.json` is never touched until the run is complete.
+*   **The 95% Sanity Check**: Before promoting a new cache, the `SummaryCacheManager` compares its size to the existing one. If the new cache is significantly smaller (e.g., < 95% of previous entries), the promotion is aborted. This prevents a failed run (e.g., network outage or empty database) from wiping out months of cached work.
+*   **Automatic Self-Healing**: As documented in Part 6.4.1, the system uses custom unpicklers to automatically migrate old cache formats to new module structures, ensuring long-term data continuity.
+
+### 6.9: Resource Balancing and Tuning
+
+The pipeline's performance depends on correctly balancing two very different types of concurrency:
+
+*   **CPU-Bound (Parsing)**: `num-parse-workers` should typically be set to `N-1` (where N is your CPU core count). These processes are heavy and contend for local RAM.
+*   **I/O-Bound (LLM)**: `num-remote-workers` can be set much higher (e.g., 50–100+). These are lightweight threads that spend 99% of their time waiting for network responses. They are limited primarily by your LLM API rate limits rather than local hardware.
 
 ---
 

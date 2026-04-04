@@ -9,7 +9,7 @@ import clang.cindex
 from typing import List, Dict, Set, Tuple, Any, Optional
 from collections import defaultdict
 
-from clangd_index_yaml_parser import RelativeLocation, Location
+from symbol_parser import RelativeLocation, Location
 from utils import hash_usr_to_id, make_symbol_key, make_synthetic_id, get_language, FileExtensions
 from .node_parser import NodeParserMixin
 from .types import *

@@ -5,7 +5,7 @@ Data structures and Clang node kind constants for the compilation engine.
 import clang.cindex
 from dataclasses import dataclass, field
 from typing import List, Optional, NamedTuple
-from clangd_index_yaml_parser import RelativeLocation
+from symbol_parser import RelativeLocation
 
 # --- Data Structures (Models) ---
 

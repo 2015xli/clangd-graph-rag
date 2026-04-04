@@ -52,9 +52,11 @@ When building a code graph for the Linux kernel (WSL2 release) on a workstation 
 
 ## Why This Project?
 
-For C/C++ project, Clangd index YAML file is an intermediate data format from [Clangd-indexer](https://clangd.llvm.org/design/indexing.html) containing detailed syntactical information used by language servers for code navigation and completion. However, while powerful for IDEs, the raw index data doesn't expose the full graph structure of a codebase (especially the call graph) or integrate the semantic understanding that Large Language Models (LLMs) can leverage.
+For C/C++ project, Clangd index YAML file is an intermediate data format from [Clangd-indexer](https://clangd.llvm.org/design/indexing.html) containing detailed syntactical information used by language servers for code navigation and completion. However, while powerful for IDEs, the raw index data doesn't expose the full graph structure of a codebase (e.g., the call graph, header inclusion graph, macro expansion graph, etc.) or integrate the semantic understanding that Large Language Models (LLMs) can leverage.
 
-This project fills that gap. It ingests Clangd index data into a Neo4j graph database, reconstructing the complete file, symbol, and call graph hierarchy. It then enriches this structure with AI-generated summaries and vector embeddings, transforming the raw compiler index into a semantically rich knowledge graph. In essence, `clangd-graph-rag` extends Clangd's powerful foundation into an AI-ready code graph, enabling LLMs to reason about a codebase's structure and behavior for advanced tasks like in-depth code analysis, refactoring, and automated reviewing.
+This project fills that gap. It reconciles the Clangd index data and Clang parsing data, and ingests them into a Neo4j graph database, reconstructing the complete file, symbol, and relationship hierarchy. It then enriches this structure with AI-generated summaries and vector embeddings, transforming the raw compiler index into a semantically rich knowledge graph. In essence, `clangd-graph-rag` extends Clangd's powerful foundation into an AI-ready code graph, enabling LLMs to reason about a codebase's structure and behavior for advanced tasks like in-depth code analysis, refactoring, and automated reviewing.
+
+Another critical feature is that this project supports building the graphRAG incrementally, which means it can update the graph based on the diff of git commits without rebuilding the entire graph from scratch. This significantly reduces the time and cost of maintaining the graphRAG.
 
 Note, this is an independent project and is not affiliated with the official Clang or clangd projects.
 
@@ -62,11 +64,10 @@ Note, this is an independent project and is not affiliated with the official Cla
 
 *   **AI-Enriched Code Graph**: Builds a comprehensive graph of files, folders, symbols, and function calls, then enriches it with AI-generated summaries and vector embeddings for semantic understanding.
 *   **Robust Dependency Analysis**: Builds a complete `[:INCLUDES]` graph by parsing source files, enabling accurate impact analysis for header file changes.
-*   **Compiler-Accurate Parsing**: Leverages `clang` via a `compile_commands.json` file to parse source code with full semantic context, correctly handling complex macros and include paths.
+*   **Compiler-Accurate Parsing**: Leverages `clang` via its compilation database (the `compile_commands.json` file) to parse source code with full semantic context, correctly handling complex macros and include paths.
 *   **Incremental Updates**: Includes a Git-aware updater script that efficiently processes only the files changed between commits, avoiding the need for a full rebuild.
 *   **AI Agent Interaction**: Provides a tool server and an example agent to allow for interactive, natural language-based exploration and analysis of the code graph.
-*   **Adaptive Call Graph Construction**: Intelligently adapts its strategy for building the call graph based on the version of the `clangd` index, using the `Container` field when available and falling back to a spatial analysis when not.
-*   **High-Performance & Memory Efficient**: Designed for performance with multi-process and multi-threaded parallelism, efficient batching for database operations, and intelligent memory management to handle large codebases.
+*   **High-Performance & Memory Efficient**: Designed for performance with multi-process, multi-threaded, and asyncio coroutine parallelism, efficient batching for database operations, and intelligent memory management to handle large codebases.
 *   **Modular & Reusable**: The core logic is encapsulated in modular classes and helper scripts, promoting code reuse and maintainability.
 
 ## Prerequisites
@@ -127,20 +128,20 @@ For all the scripts that can run standalone, you can always use --help to see th
 
 ### Full Graph Build
 
-Used for the initial, from-scratch ingestion of a project. Orchestrated by `clangd_graph_rag_builder.py`.
+Used for the initial, from-scratch ingestion of a project. Orchestrated by `graph_builder.py`.
 
 ```bash
 # Basic build (graph structure only, no LLM summary RAG data, which you can generate separately later)
-python3 clangd_graph_rag_builder.py /path/to/clangd-index.yaml /path/to/project/
+python3 graph_builder.py /path/to/clangd-index.yaml /path/to/project/
 
 # Build the graph with LLM summary RAG data generation (you don't need separate command for summary generation) 
-python3 clangd_graph_rag_builder.py /path/to/clangd-index.yaml /path/to/project/ --generate-summary [--llm-api [openai|deepseek|ollama|fake]]
+python3 graph_builder.py /path/to/clangd-index.yaml /path/to/project/ --generate-summary [--llm-api [openai|deepseek|ollama|fake]]
 ```
 * Without `--generate-summary`, the tool will only perform the graph enrichment phase. This is to give you an option to check the enrichment results before generating summaries that may cost time and money.
 * With `--generate-summary` enabled, the tool will generate summary. By default it will use `--llm-api fake` to test the summary generation without actually calling an LLM API. You can use `--llm-api [openai|deepseek|ollama|fake]` to specify the LLM API to use. Option `ollama` will use local ollama setup. Please check the `llm_client.py` for the details.
 * The generated summaries are cached in two levels of caches, so that you don't need to regenerate them if the source code of the project remains unchanged. If you did not specify the --llm-api in your previous runs (i.e., using the default `fake` llm client), and now you want to use a real LLM API, the fake summaries will be removed automatically, so that your graphRAG does not have mixed fake and real summaries. 
 
-Please check the detailed design document for more details: [Clangd Graph RAG Builder](./docs/summary_clangd_graph_rag_builder.md)
+Please check the detailed design document for more details: [Clangd Graph RAG Builder](./docs/summary_graph_builder.md)
 
 ### Summary RAG Data Generation
 
@@ -152,18 +153,18 @@ Please check the detailed design document for more details: [Code Graph RAG Data
 
 ### Incremental Graph Update
 
-Used to efficiently update an existing graph with changes from Git. Orchestrated by `clangd_graph_rag_updater.py`.
+Used to efficiently update an existing graph with changes from Git. Orchestrated by `graph_updater.py`.
 
 ```bash
 # Update from the recorded last commit in the graph to the current HEAD 
-python3 clangd_graph_rag_updater.py /path/to/new/clangd-index.yaml /path/to/project/ --generate-summary --llm-api [openai|deepseek|ollama|fake]
+python3 graph_updater.py /path/to/new/clangd-index.yaml /path/to/project/ --generate-summary --llm-api [openai|deepseek|ollama|fake]
 
 # Update between two specific commits
-python3 clangd_graph_rag_updater.py /path/to/new/clangd-index.yaml /path/to/project/ --old-commit <hash1> --new-commit <hash2> --generate-summary --llm-api [openai|deepseek|ollama|fake]
+python3 graph_updater.py /path/to/new/clangd-index.yaml /path/to/project/ --old-commit <hash1> --new-commit <hash2> --generate-summary --llm-api [openai|deepseek|ollama|fake]
 ```
 Note: If your full build graphRAG has been generated with a real LLM API, you definitely want to use a real one for the incremental update as well, to avoid the `fake` llm client polluting your graphRAG with meaningless summaries. If you accidently used the `fake` llm client, and your graphRAG is polluted, no worry. Please check section [Rebuild or Clean Up Graph](#rebuild-or-clean-up-graph) on how to deal with it. 
 
-Please check the detailed design document for more details: [Clangd Graph RAG Updater](./docs/summary_clangd_graph_rag_updater.md)
+Please check the detailed design document for more details: [Clangd Graph RAG Updater](./docs/summary_graph_updater.md)
 
 ### Common Options
 

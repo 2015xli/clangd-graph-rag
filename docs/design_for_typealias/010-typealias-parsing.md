@@ -92,6 +92,6 @@ To modify `compilation_parser.py` to accurately identify `typedef` and `using` d
 *   **External Headers:** Ensure that aliases and types originating from external headers (outside the project path) are filtered out, consistent with existing project-only filtering.
 *   **Error Handling:** Implement robust error handling for cases where type resolution or ID generation fails.
 *   **Qualified Name Construction:** The `qualified_name` for aliases will be constructed in the node ingestion phase by combining the `scope` string and the alias's `name`.
-*   **`Location.from_relative_location` Helper:** A helper function will be needed in `clangd_index_yaml_parser.py` to convert `RelativeLocation` to `Location` for `declaration` and `definition` properties of new `Symbol` objects in the enrichment phase.
+*   **`Location.from_relative_location` Helper:** A helper function will be needed in `symbol_parser.py` to convert `RelativeLocation` to `Location` for `declaration` and `definition` properties of new `Symbol` objects in the enrichment phase.
 
 ---

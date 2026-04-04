@@ -13,7 +13,7 @@ from collections import defaultdict
 
 import input_params
 from source_parser import CompilationManager
-from clangd_index_yaml_parser import (
+from symbol_parser import (
     SymbolParser, Symbol, Location, Reference, RelativeLocation, CallRelation
 )
 from neo4j_manager import Neo4jManager

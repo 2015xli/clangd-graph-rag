@@ -27,7 +27,7 @@ from .hierarchy_processor import HierarchyProcessorMixin
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-class SummarizationEngine(
+class SummaryEngine(
     FunctionProcessorMixin,
     ScopeProcessorMixin,
     HierarchyProcessorMixin

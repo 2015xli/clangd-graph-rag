@@ -14,7 +14,7 @@ from git.exc import InvalidGitRepositoryError
 import input_params
 from git_manager import GitManager
 from neo4j_manager import Neo4jManager
-from clangd_index_yaml_parser import SymbolParser
+from symbol_parser import SymbolParser
 from summary_driver import IncrementalSummarizer
 from graph_ingester import IncludeRelationProvider
 from updater_engine import GraphUpdateScopeBuilder, GraphDebugManager

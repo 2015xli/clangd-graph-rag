@@ -3,7 +3,7 @@ import gc, sys
 from typing import Dict, Set
 from urllib.parse import urlparse, unquote
 
-from clangd_index_yaml_parser import Location, RelativeLocation
+from symbol_parser import Location, RelativeLocation
 from source_parser import SourceSpan
 from utils import hash_usr_to_id, make_symbol_key
 
@@ -229,8 +229,8 @@ class HierarchyMixin:
                 field_span = SourceSpan(sym.name, "Variable", sym.language, field_name, field_name, '', '')
                 span_tree = file_span_data.get(loc.file_uri, {}) 
                 if not span_tree:
-                    if sys.argv[0].endswith("clangd_graph_rag_builder.py"):
-                        # When the graph is incrementally updated with clangd_graph_rag_updater.py (not built from scratch), it is normal that some files don't have span trees.
+                    if sys.argv[0].endswith("graph_builder.py"):
+                        # When the graph is incrementally updated with graph_updater.py (not built from scratch), it is normal that some files don't have span trees.
                         # The reason is, the symbol (and its file) is extended from the seed symbols, whose source file may not be parsed.
                         # We only log the debug message for the builder, when all the source files should be parsed, and have span trees.
                         logger.debug(f"Could not find span tree for file {loc.file_uri}, no-body symbol {sym.name} {sym.id}")
@@ -273,7 +273,7 @@ class HierarchyMixin:
 
                 span_tree = file_span_data.get(loc.file_uri, {})
                 if not span_tree:
-                    if sys.argv[0].endswith("clangd_graph_rag_builder.py"):
+                    if sys.argv[0].endswith("graph_builder.py"):
                         logger.debug(f"Could not find span tree for file {loc.file_uri}, with-body symbol {sym.name} {sym.id}")
                     continue
 

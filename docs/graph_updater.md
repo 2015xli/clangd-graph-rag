@@ -1,16 +1,16 @@
-# Summary: `clangd_graph_rag_updater.py` - Incremental Code Graph RAG Updater
+# Summary: `graph_updater.py` - Incremental Code Graph RAG Updater
 
-This document summarizes the design and functionality of `clangd_graph_rag_updater.py`. This script is responsible for incrementally updating the Neo4j code graph based on changes in a Git repository.
+This document summarizes the design and functionality of `graph_updater.py`. This script is responsible for incrementally updating the Neo4j code graph based on changes in a Git repository.
 
 The logic has been significantly refactored to align with the main graph builder, ensuring consistent and robust updates.
 
 ## 1. Purpose
 
-The primary purpose of `clangd_graph_rag_updater.py` is to provide an efficient mechanism for keeping the Neo4j code graph synchronized with an evolving C/C++ codebase. This avoids the computationally expensive process of re-ingesting the entire project for minor changes.
+The primary purpose of `graph_updater.py` is to provide an efficient mechanism for keeping the Neo4j code graph synchronized with an evolving C/C++ codebase. This avoids the computationally expensive process of re-ingesting the entire project for minor changes.
 
 ## 2. Core Design: Graph-Based Dependency Analysis
 
-The updater's core logic revolves around a robust, multi-stage process to determine the full impact of any code change. It uses the `[:INCLUDES]` relationships in the graph to find all files affected by a change, making it much more accurate than simple call-graph analysis.
+The updater's core logic revolves around a robust, multi-stage process to determine the full impact of any code change. It also uses the `[:INCLUDES]` relationships in the graph to find all files affected by a change, making it much more accurate than simple call-graph analysis.
 
 ## 3. The Incremental Update Pipeline
 
@@ -18,7 +18,7 @@ The update process is divided into a sequence of high-level phases orchestrated 
 
 ### Phase 1 & 2: Identify Full Impact Scope
 
-*   **Component**: `git_manager.GitManager`, `include_relation_provider.IncludeRelationProvider`
+*   **Component**: `git_manager.GitManager`, `graph_ingester.IncludeRelationProvider`
 *   **Purpose**: To determine the complete set of "dirty files" that need to be re-processed.
 *   **Mechanism**:
     1.  **Textual Changes**: First, it calls `GitManager` to get the lists of `added`, `modified`, and `deleted` source files between two commits.
@@ -35,7 +35,7 @@ The update process is divided into a sequence of high-level phases orchestrated 
     3.  It enriches the **entire, full symbol set** with this new structural information. This is a critical step to ensure dependency analysis is performed on the most up-to-date view of the code.
     4.  It identifies the "seed symbols" (those defined in the dirty files) and expands this set by one level of dependencies (e.g., parents, children, callers, callees, base classes) to create a "sufficient subset".
     5.  The result is a new, small `SymbolParser` object (the "mini-parser") containing only the symbols needed for the update.
-*   **Further Reading**: For a detailed explanation, see [`summary_graph_update_scope_builder.md`](./summary_graph_update_scope_builder.md).
+*   **Further Reading**: For a detailed explanation, see [`Updater Engine`](../updater_engine/README.md).
 
 ### Phase 4: Purge Stale Graph Data
 
@@ -50,11 +50,20 @@ The update process is divided into a sequence of high-level phases orchestrated 
 *   **Purpose**: To surgically "patch" the graph with the new, updated information.
 *   **Mechanism**: The `GraphUpdater` calls the `rebuild_mini_scope()` method on the scope builder, which runs the complete ingestion pipeline (`PathProcessor`, `SymbolProcessor`, `ClangdCallGraphExtractor`, etc.) using the "mini-parser" as its data source.
 
-### Phase 6 & 7: Finalize and Run RAG
+### Phase 6: Wrap Up the Graph
 
-*   **Component**: `neo4j_manager.Neo4jManager`, `code_graph_rag_generator.RagGenerator`
-*   **Purpose**: To finalize the graph state and update AI-generated data.
+*   **Component**: `neo4j_manager.Neo4jManager`
+*   **Purpose**: To finalize the graph state, before updating the RAG summaries
 *   **Mechanism**:
-    1.  **Cleanup**: Orphan nodes that may have been created during the patch are removed.
+    1.  **Cleanup**: Orphan nodes that may have been created during the patch are removed. (Should be zero in normal operation)
     2.  **Update Commit**: The `:PROJECT` node in the graph is updated with the new commit hash, bringing the database's recorded state in sync with the codebase.
-    3.  **Targeted RAG**: If enabled, the `GraphUpdater` calls `summarize_targeted_update()`, providing the set of all symbol IDs from the "mini-parser" as the initial "seed." The `RagGenerator` then intelligently updates summaries for the changed nodes and any parent nodes affected by the change.
+
+### Phase 7: Incremental RAG Summary Update
+
+*   **Component**: `summary_driver.IncrementalSummarizer`
+*   **Purpose**: To update AI-generated data for the changed nodes.
+*   **Mechanism**: If enabled, `GraphUpdater` calls `IncrementalSummarizer.summarize_targeted_update()`, providing the set of all symbol IDs from the "mini-parser" as the initial "seed." The `RagGenerator` then intelligently updates summaries for the changed nodes and any parent nodes affected by the change.
+
+### Phase 8: Add Agent Schema
+*   **Component**: `neo4j_manager.Neo4jManager`
+*   **Purpose**: To add the `:ENTITY` label and unified vector indexes to facilitate AI agent reasoning.

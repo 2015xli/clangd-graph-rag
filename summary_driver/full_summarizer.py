@@ -12,7 +12,7 @@ import logging
 import re
 
 import input_params
-from summary_engine import SummarizationEngine
+from summary_engine import SummaryEngine
 from neo4j_manager import Neo4jManager
 
 # Set up logging for this module
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 class FullSummarizer:
-    """Orchestrates the full-build generation of RAG data using the SummarizationEngine."""
+    """Orchestrates the full-build generation of RAG data using the SummaryEngine."""
 
     def __init__(self, neo4j_mgr: Neo4jManager, project_path: str, args: argparse.Namespace):
         self.neo4j_mgr = neo4j_mgr
@@ -28,7 +28,7 @@ class FullSummarizer:
         self.args = args 
         
         # Initialize the Summarization Engine via composition
-        self.engine = SummarizationEngine(
+        self.engine = SummaryEngine(
             neo4j_mgr=self.neo4j_mgr,
             project_path=self.project_path,
             args=self.args

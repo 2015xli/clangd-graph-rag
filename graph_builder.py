@@ -26,7 +26,7 @@ from graph_ingester import (
     ClangdCallGraphExtractor, 
     IncludeRelationProvider
 )
-from clangd_index_yaml_parser import SymbolParser
+from symbol_parser import SymbolParser
 from neo4j_manager import Neo4jManager
 from memory_debugger import Debugger
 from git_manager import GitManager

@@ -6,7 +6,7 @@ The goal of this first step is to introduce `FIELD` nodes and connect them to th
 
 ## 2. Affected Files
 
-1.  **`clangd_index_yaml_parser.py`**: To ensure symbols of kind `Field` are parsed correctly.
+1.  **`symbol_parser.py`**: To ensure symbols of kind `Field` are parsed correctly.
 2.  **`clangd_symbol_nodes_builder.py`**: To add logic for creating `:FIELD` nodes and `[:HAS_FIELD]` relationships.
 3.  **`neo4j_manager.py`**: To add a uniqueness constraint for the new `:FIELD` node label.
 
@@ -19,7 +19,7 @@ The goal of this first step is to introduce `FIELD` nodes and connect them to th
     "CREATE CONSTRAINT IF NOT EXISTS FOR (f:FIELD) REQUIRE f.id IS UNIQUE",
     ```
 
-### 3.2. `clangd_index_yaml_parser.py`
+### 3.2. `symbol_parser.py`
 
 *   **Correction**: The initial assumption that a `Field` symbol's `scope` property contains the direct ID of its parent was incorrect. The `scope` is a string representation (e.g., `MyStruct::`).
 *   To handle this, a lookup map must be constructed in the `clangd_symbol_nodes_builder.py` module by iterating through all data structure symbols first. No changes are needed in the parser itself.
@@ -63,7 +63,7 @@ This file saw the most changes for this step.
 
 ## 4. Verification
 
-1.  Run the `clangd_graph_rag_builder.py` on a C project.
+1.  Run the `graph_builder.py` on a C project.
 2.  After ingestion, connect to the Neo4j database.
 3.  Execute the query `MATCH (n:FIELD) RETURN n LIMIT 10;` to verify that `:FIELD` nodes have been created with the correct properties.
 4.  Execute the query `MATCH (d:DATA_STRUCTURE)-[:HAS_FIELD]->(f:FIELD) RETURN d, f LIMIT 10;` to verify that the relationships are correctly established.

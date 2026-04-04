@@ -244,7 +244,7 @@ class PurgeMixin:
         if not symbol_ids:
             return
 
-        from clangd_index_yaml_parser import Symbol
+        from symbol_parser import Symbol
 
         mode_str = "Isolation (DETACH DELETE)" if debug_mode else "Aggregation (Relationship Purge)"
         logger.info(f"Resolving {len(symbol_ids)} seed identities using {mode_str}...")

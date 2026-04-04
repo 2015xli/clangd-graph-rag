@@ -8,12 +8,12 @@ With `CLASS_STRUCTURE` nodes now in the graph, the next logical step is to model
 
 ## 2. Affected Files
 
-1.  **`clangd_index_yaml_parser.py`**: To parse `!Relations` documents from the `clangd` index.
+1.  **`symbol_parser.py`**: To parse `!Relations` documents from the `clangd` index.
 2.  **`clangd_symbol_nodes_builder.py`**: To add new passes that create the `[:INHERITS]` and `[:OVERRIDDEN_BY]` relationships.
 
 ## 3. Implementation Plan
 
-### 3.1. `clangd_index_yaml_parser.py`
+### 3.1. `symbol_parser.py`
 
 *   The `clangd` index contains `!Relations` documents that describe both inheritance and method overrides. The `Predicate` field distinguishes them:
     ```yaml

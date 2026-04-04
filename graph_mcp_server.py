@@ -22,6 +22,7 @@ neo4j_mgr: Optional[Neo4jManager] = None
 project_root_path: Optional[str] = None
 embedding_client = get_embedding_client("local")
 HAS_EMBEDDINGS: bool = False
+NEO4J_SCHEMA_FILE = "neo4j_simplified_scheme.txt"
 
 # --- Helper Functions ---
 def _initialize_managers():
@@ -69,7 +70,7 @@ def get_graph_schema() -> str:
     """
     Retrieves the content of the neo4j_current_schema.txt file.
     """
-    schema_file_path = os.path.join(os.path.dirname(__file__), "neo4j_current_schema.txt")
+    schema_file_path = os.path.join(os.path.dirname(__file__), NEO4J_SCHEMA_FILE)
     schema_content = ""
     if os.path.isfile(schema_file_path):
         try:

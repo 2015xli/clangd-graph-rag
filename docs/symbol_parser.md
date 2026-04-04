@@ -1,4 +1,4 @@
-# Algorithm Summary: `clangd_index_yaml_parser.py`
+# Algorithm Summary: `symbol_parser.py`
 
 ## 1. Role in the Pipeline
 
@@ -14,7 +14,7 @@ The main entry point is the `parse()` method, which orchestrates a sequence of s
 
 Before any parsing occurs, the script checks for a pre-processed cache file (`.pkl`).
 
-*   **Mechanism**: It looks for a `.pkl` file with the same base name as the input YAML file (e.g., `index.yaml` -> `index.pkl`). If this cache file exists and its modification time is newer than the YAML file's, the parser loads the entire symbol collection directly from this binary cache.
+*   **Mechanism**: It looks for a `.pkl` file with the same base name as the input YAML file (e.g., `index.yaml` -> `index.pkl`). If this cache file exists and its modification time is newer than the YAML file's, the parser loads the entire symbol collection directly from this binary cache. When it loads the pkl file, it uses customized loader to be backward compatible with a `.pkl` file that was saved by a different module name.
 *   **Benefit**: This is the fast path. For subsequent runs on an unchanged index file, this step bypasses all expensive YAML parsing and completes in seconds instead of minutes.
 
 ### Step 2: Parallel YAML Parsing (The Worker Path)

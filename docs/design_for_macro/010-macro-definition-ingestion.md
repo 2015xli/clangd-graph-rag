@@ -19,7 +19,7 @@ class MacroSpan:
     macro_definition: str # The full textual directive: #define ...
 ```
 
-#### 1.2 Update `Symbol` (clangd_index_yaml_parser.py)
+#### 1.2 Update `Symbol` (symbol_parser.py)
 Holds macro-specific properties for database ingestion.
 ```python
 @dataclass

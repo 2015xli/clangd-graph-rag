@@ -3,6 +3,6 @@
 Summarization Engine package for generating AI-based code summaries and embeddings.
 """
 
-from .orchestrator import SummarizationEngine
+from .orchestrator import SummaryEngine
 
-__all__ = ['SummarizationEngine']
+__all__ = ['SummaryEngine']

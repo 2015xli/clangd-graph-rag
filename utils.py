@@ -25,6 +25,7 @@ class CompatibilityUnpickler(pickle.Unpickler):
             "compilation_manager": "source_parser",
             "compilation_ops": "source_parser",
             "compilation_engine": "source_parser",
+            "clangd_index_yaml_parser": "symbol_parser",
         }
         
         for old_name, new_name in renamed_modules.items():

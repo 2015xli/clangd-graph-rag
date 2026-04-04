@@ -23,7 +23,7 @@ This extractor is simpler to update.
 *   **In `extract_call_relationships`**:
     *   The logic that identifies a `caller_symbol` and `callee_symbol` remains the same.
     *   The change is in how we verify the symbols. The check `if caller_symbol and caller_symbol.is_function():` needs to be updated.
-    *   The `Symbol` data class in `clangd_index_yaml_parser.py` should be updated with a new helper method:
+    *   The `Symbol` data class in `symbol_parser.py` should be updated with a new helper method:
         ```python
         def is_callable(self) -> bool:
             return self.kind in ('Function', 'InstanceMethod', 'StaticMethod', 'Constructor', 'Destructor', 'ConversionFunction')

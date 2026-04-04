@@ -2,11 +2,11 @@
 
 ## 1. Goal
 
-This is the final step in the refactoring process. The goal is to make the incremental updater, `clangd_graph_rag_updater.py`, fully compatible with the new, richer C++ schema. This involves updating the data purging logic and ensuring the "rebuild" phase correctly utilizes the updated builder components.
+This is the final step in the refactoring process. The goal is to make the incremental updater, `graph_updater.py`, fully compatible with the new, richer C++ schema. This involves updating the data purging logic and ensuring the "rebuild" phase correctly utilizes the updated builder components.
 
 ## 2. Affected Files
 
-1.  **`clangd_graph_rag_updater.py`**: The `GraphUpdater` class needs to be aware of all new node and relationship types.
+1.  **`graph_updater.py`**: The `GraphUpdater` class needs to be aware of all new node and relationship types.
 2.  **`neo4j_manager.py`**: The purging methods need to be updated.
 
 ## 3. Implementation Plan
@@ -27,7 +27,7 @@ This is the final step in the refactoring process. The goal is to make the incre
         2.  `NOT EXISTS((ns)-[:CONTAINS]->())`: It contains no other nodes (including sub-namespaces or symbols).
     *   This iterative approach ensures that orphaned namespace trees are correctly pruned from the bottom up.
 
-### 3.2. `clangd_graph_rag_updater.py` (Implemented)
+### 3.2. `graph_updater.py` (Implemented)
 
 The `GraphUpdater` orchestrates the process, so its logic has been carefully reviewed and updated.
 
@@ -59,11 +59,11 @@ The `GraphUpdater` orchestrates the process, so its logic has been carefully rev
 ## 4. Verification
 
 1.  Create a Git repository with a simple C++ project.
-2.  Run the full `clangd_graph_rag_builder.py` to ingest the initial state.
+2.  Run the full `graph_builder.py` to ingest the initial state.
 3.  Make a change to a C++ source file (e.g., add a new method to a class, change a method's body, add a new class, delete a file that declares a namespace).
 4.  Commit the change.
 5.  Generate a new `clangd` index for the updated state.
-6.  Run `clangd_graph_rag_updater.py`, pointing it to the new index file.
+6.  Run `graph_updater.py`, pointing it to the new index file.
 7.  Verify in Neo4j:
     *   Check that the old nodes corresponding to the changed file have been removed.
     *   Check that the new nodes (e.g., the new method, new class) have been created correctly.

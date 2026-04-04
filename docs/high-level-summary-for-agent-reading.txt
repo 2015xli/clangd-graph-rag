@@ -1,0 +1,132 @@
+This project, clangd-graph-rag, is a sophisticated pipeline designed to transform C/C++ codebases into an
+  AI-queryable knowledge graph within a Neo4j database.
+
+  Core Functionality:
+   1. Ingestion: It parses compile_commands.json and a clangd-index.yaml file to build a foundational code graph. This
+      graph represents the file/folder hierarchy, symbol definitions (functions, classes, etc.), and their relationships.
+   2. Enrichment: The system goes beyond the clangd index by directly parsing source code using Clang's libraries. This
+      allows it to build crucial relationships that the index alone doesn't provide, such as a complete call graph (even
+      for older index formats) and a comprehensive header inclusion graph ([:INCLUDES]).
+   3. RAG Generation: It leverages Large Language Models (LLMs) to generate natural language summaries for code elements
+      (functions, classes, files). These summaries, along with vector embeddings, are attached to the graph nodes, turning
+      the structural graph into a semantic one.
+   4. Incremental Updates: It intelligently updates the graph by analyzing Git history. Critically, it uses the
+      [:INCLUDES] graph to identify not just changed files but all files impacted by header modifications, ensuring the
+      graph remains consistent.
+   5. AI Agent Interaction: The project provides a complete framework for querying the graph with natural language. This
+      includes a graph_mcp_server.py that exposes safe, read-only tools (like execute_cypher_query and get_source_code)
+      and an example rag_adk_agent that uses these tools to reason about the codebase and answer user questions.
+
+  Key Design Principles:
+   * Accuracy: It relies on compiler-level tools (Clang) for parsing, ensuring a high-fidelity representation of the
+     code.
+   * Performance: It is built for speed and efficiency, using parallel processing for CPU-bound tasks (parsing) and
+     asynchronous operations for I/O-bound tasks (LLM calls), along with extensive multi-level caching.
+   * Modularity: The system is organized into specialized packages (ingester, parser, enricher, engines), allowing for
+     maximum code reuse between full builds and incremental updates.
+   * Robustness: It is designed to handle real-world complexities like varying Clangd versions, memory management for
+     large-scale projects (like the Linux kernel), and rigorous data integrity checks during updates.
+
+ ╭────────────────────────────╮
+ │      graph_builder.py      │
+ ╰────────────────────────────╯
+✦ The main driver for building a code graph from scratch. It orchestrates a multi-pass pipeline: parsing the index and
+  source code, enriching symbols with physical spans, ingesting the file hierarchy and symbols, building include and
+  call graphs, and finally triggering RAG generation.
+
+ ╭────────────────────────────╮
+ │      graph_updater.py      │
+ ╰────────────────────────────╯
+✦ The main driver for incremental updates. It analyzes Git changes and header dependencies to define a "dirty scope,"
+  purges stale data, and then surgically rebuilds only the affected parts of the graph and RAG summaries.
+
+ ╭────────────────────────────╮
+ │      symbol_parser.py      │
+ ╰────────────────────────────╯
+✦ A high-performance parser for Clangd's YAML index. It uses streaming and multi-process parallelism to transform
+  multi-gigabyte YAML files into an in-memory graph of Python objects, complete with cross-reference linking and
+  version detection.
+
+ ╭────────────────────────────╮
+ │       source_parser/       │
+ ╰────────────────────────────╯
+✦ The "Ground Truth" engine. It uses libclang to perform authoritative AST analysis of the source code. It extracts
+  function spans, include relationships, macro definitions, and type aliases, providing the physical coordinates
+  required for accurate RAG.
+
+ ╭────────────────────────────╮
+ │      graph_ingester/       │
+ ╰────────────────────────────╯
+✦ The "Implementation Tier" for graph construction. It contains modular processors for building the file system
+  hierarchy, logical symbol nodes, call graphs (metadata or spatial), and the transitive include graph.
+
+ ╭────────────────────────────╮
+ │      symbol_enricher/      │
+ ╰────────────────────────────╯
+✦ The semantic bridge. It reconciles the high-level index data with the low-level source parser data. It anchors
+  symbols to their implementation files, builds lexical hierarchies, and synthesizes symbols for entities the
+  indexer missed.
+
+ ╭────────────────────────────╮
+ │       updater_engine/      │
+ ╰────────────────────────────╯
+✦ The intelligence behind incremental updates. It implements the "Sufficient Subset" algorithm to identify all symbols
+  affected by a change and provides the GraphDebugManager for auditing and verifying update correctness.
+
+ ╭────────────────────────────╮
+ │       summary_engine/      │
+ ╰────────────────────────────╯
+✦ The intelligence and data layer for RAG. It manages the stateless logic for LLM summarization, hierarchical
+  roll-ups, and a robust L1/L2 caching system with "Promote-on-Success" safety logic.
+
+ ╭────────────────────────────╮
+ │       summary_driver/      │
+ ╰────────────────────────────╯
+✦ Orchestrates the high-level RAG workflows. It defines the specific multi-pass sequences for both full builds
+  (FullSummarizer) and targeted incremental updates (IncrementalSummarizer).
+
+ ╭────────────────────────────╮
+ │       neo4j_manager/       │
+ ╰────────────────────────────╯
+✦ The Data Access Layer (DAL). It centralizes all Neo4j interactions, managing connections, schema constraints,
+  vector indexes, and specialized purging logic. It also provides a CLI for database maintenance.
+
+ ╭────────────────────────────╮
+ │     graph_mcp_server.py    │
+ ╰────────────────────────────╯
+✦ An MCP (Model Context Protocol) server that exposes the code graph as a set of tools for AI agents. It provides safe,
+  read-only access to schema, project info, source code, and Cypher queries.
+
+ ╭────────────────────────────╮
+ │       rag_adk_agent/       │
+ ╰────────────────────────────╯
+✦ An example AI coding agent built with the Google Agent Development Kit (ADK). It demonstrates how an LLM can use
+  the code graph to reason about complex software architectures and answer developer questions.
+
+ ╭────────────────────────────╮
+ │        llm_client.py       │
+ ╰────────────────────────────╯
+✦ A flexible factory for LLM and embedding clients. It supports multiple providers (OpenAI, DeepSeek, Ollama) via
+  LiteLLM and includes a disk-based L2 cache to minimize API costs. It also has a "fake" client for testing purposes.
+
+ ╭────────────────────────────╮
+ │       git_manager.py       │
+ ╰────────────────────────────╯
+✦ A wrapper around GitPython that provides clean, categorized change detection and Git reference resolution for the
+  incremental update pipeline.
+
+ ╭────────────────────────────╮
+ │       input_params.py      │
+ ╰────────────────────────────╯
+✦ Centralizes command-line argument definitions across all scripts, ensuring consistent flags for workers, batching,
+  and RAG configurations.
+
+ ╭────────────────────────────╮
+ │       log_manager.py       │
+ ╰────────────────────────────╯
+✦ Configures a high-fidelity, multi-process safe logging system with dual console/file output and granular filtering.
+
+ ╭────────────────────────────╮
+ │     memory_debugger.py     │
+ ╰────────────────────────────╯
+✦ A utility for heap profiling and memory leak detection, crucial for processing very large codebases.

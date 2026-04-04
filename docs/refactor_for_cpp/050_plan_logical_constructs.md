@@ -10,7 +10,7 @@ This step focuses on accurately modeling the logical and lexical structure of a 
 ## 2. Affected Files
 
 1.  **`compilation_parser.py`**: Refactored to generate a hierarchical "Span Tree" for each file, which is the foundation for the new lexical nesting logic.
-2.  **`clangd_index_yaml_parser.py`**: The `Symbol` dataclass was updated to include an optional `parent_id`.
+2.  **`symbol_parser.py`**: The `Symbol` dataclass was updated to include an optional `parent_id`.
 3.  **`symbol_enricher.py`**: Completely refactored to implement a two-pass algorithm that uses the Span Tree to enrich all symbols with a `parent_id` and to synthesize new symbols for anonymous structures.
 4.  **`clangd_symbol_nodes_builder.py`**: Updated to use the new `parent_id` and `namespace_id` attributes to create `:HAS_NESTED` and `:SCOPE_CONTAINS` relationships.
 5.  **`neo4j_manager.py`**: To add new constraints for `:NAMESPACE` and `:VARIABLE` nodes.

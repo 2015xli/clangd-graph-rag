@@ -2,7 +2,7 @@ import logging
 import gc
 from typing import Optional, Dict, Tuple
 
-from clangd_index_yaml_parser import SymbolParser
+from symbol_parser import SymbolParser
 from source_parser import CompilationManager, SourceSpan
 from .matcher import MatcherMixin
 from .hierarchy import HierarchyMixin

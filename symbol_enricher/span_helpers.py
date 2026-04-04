@@ -2,7 +2,7 @@ import logging
 from urllib.parse import urlparse, unquote
 from typing import Optional
 
-from clangd_index_yaml_parser import Symbol, Location
+from symbol_parser import Symbol, Location
 from source_parser import SourceSpan
 
 logger = logging.getLogger(__name__)

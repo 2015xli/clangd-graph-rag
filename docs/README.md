@@ -1,83 +1,47 @@
-# Project Design Documentation
+# C/C++ Source Code GraphRAG: Design and Architecture
 
-This directory contains detailed design documents for the `clangd-graph-rag` project. 
+This directory is the central portal for the project's technical documentation. It is designed for developers and contributors who want to understand the design principles, internal strategies, and modular architecture of the code graph system.
 
-For a comprehensive high-level overview of the project's architecture, design principles, and pipelines, please start with the main presentation summary.
+## Documentation Map
+
+### 1. High-Level Overview
+*   **[Building an AI-Ready Code Graph RAG](./Building_an_AI-Ready_Code_Graph_RAG_based_on_Clangd_index.md)**: The foundational "Main Presentation" document. Start here for high-level concepts, slide-by-slide pipeline breakdowns, and performance rationales.
+
+### 2. End-to-End Orchestration
+*   **[graph_builder.md](./graph_builder.md)**: Describes the main pipeline for building the code graph from scratch.
+*   **[graph_updater.md](./graph_updater.md)**: Describes the incremental update pipeline for the code graph based on Git changes.
+
+### 3. Modular Component Guides
+These READMEs reside within the package folders to provide locality of information for developers working on the code.
+
+#### Symbols Construction
+*   **[Symbol Parser](../symbol_parser.md)**: The foundational library for the entire ingestion pipeline. It efficiently transforms a massive `clangd` YAML index into a fully-linked, in-memory graph of Python objects.
+*   **[Source Parser](../source_parser/README.md)**: The "Ground Truth" engine that extracts symbol definitions and relations, and header file include relations from the source code via `libclang`.
+*   **[Symbol Enricher](../symbol_enricher/README.md)**: The semantic bridge that reconciles the clangd index symbols (from `Symbol Parser`) with physical source code information (from `Source Parser`). It also enriches with additional symbols and relationships such as Macros, TypeAlias, and static call relationships, etc.
+
+#### Graph Construction
+*   **[Graph Ingester](../graph_ingester/README.md)**: The process that converts the symbols and relations to Neo4j nodes and relationships.
+*   **[Updater Engine](../updater_engine/README.md)**: The brain behind the [Graph Updater](./graph_updater.md)'s "Sufficient Subset" strategy for surgical incremental updates.
+
+#### AI Enrichment (RAG)
+*   **[Summary Driver](../summary_driver/README.md)**: Orchestrates the multi-pass workflows for full and incremental RAG summary generation.
+*   **[Summary Engine](../summary_engine/README.md)**: The core intelligence layer for LLM-powered summarization and multi-level caching.
+*   **[LLM Client](./llm_client.md)**: The unified interface for interacting with various LLM and embedding model APIs.
+
+#### Support and Infrastructure
+*   **[Neo4j Manager](../neo4j_manager/README.md)**: The Data Access Layer (DAL) and database maintenance tools.
+*   **[Infrastructure Services](./infrastructure.md)**: Shared modules for Git, logging, LLM clients, and memory debugging.
+
+### 4. Integration and Agents
+*   **[Example MCP Server](./graph_mcp_server.md)**: Technical details on the MCP Tool Server.
+*   **[Example Coding Agent](../rag_adk_agent/README.md)**: An example expert coding agent leveraging the code graph.
+
+### 5. Reference and Deep Dives
+*   **[Technical Reference](./reference/README.md)**: Provide very detailed schema definitions, index specifications, and detailed problem analyses.
 
 ---
 
-### Comprehensive Overview
-
--   **[Building_an_AI-Ready_Code_Graph_RAG_based_on_Clangd_index.md](./Building_an_AI-Ready_Code_Graph_RAG_based_on_Clangd_index.md)**: A detailed, slide-by-slide breakdown of the entire project, covering high-level concepts, pipeline designs, architecture, and performance optimizations. 
-
-### End-to-End Orchestrators
-
-These documents describe the high-level scripts that a user runs to orchestrate end-to-end workflows.
-
-#### Graph building orchestrators
--   **[summary_clangd_graph_rag_builder.md](./summary_clangd_graph_rag_builder.md)**: Describes the main pipeline for building the code graph from scratch.
--   **[summary_clangd_graph_rag_updater.md](./summary_clangd_graph_rag_updater.md)**: Describes the incremental update pipeline for the code graph based on Git changes.
-
-#### RAG generation orchestrators
--   **[summary_code_graph_rag_generator.md](./summary_code_graph_rag_generator.md)**: Describes the pipeline for running a full RAG summarization pass on the entire graph.
--   **[summary_rag_updater.md](./summary_rag_updater.md)**: Describes the pipeline for running a targeted, incremental RAG update.
-
-### Graph Building Components
-
-These documents detail the core modules responsible for each major stage of building the initial code graph.
-
-#### Major clangd index parsing and processing components
--   **[summary_clangd_index_yaml_parser.md](./summary_clangd_index_yaml_parser.md)**: Explains the high-performance, parallel parsing of the raw `clangd` index file.
--   **[summary_path_processor.md](./summary_path_processor.md)**: Describes the logic for building the file and folder hierarchy in the graph (implementation in `graph_ingester/path.py`).
-
-#### Major source code parsing and processing components
--   **[summary_compilation_manager.md](./summary_compilation_manager.md)**: Explains the high-level orchestration of source code parsing, caching, and strategy selection.
--   **[summary_compilation_parser.md](./summary_compilation_parser.md)**: Details the low-level parsing logic for extracting function spans an-d include relations.
-
-#### The component that reconciles clangd index data with source-parsed data
--   **[summary_symbol_enricher.md](./summary_symbol_enricher.md)**: Details the critical process of reconciling `clangd` index data with source-parsed data to establish lexical hierarchies.
-
-#### The component that creates all logical code symbols and their relationships
--   **[summary_clangd_symbol_nodes_builder.md](./summary_clangd_symbol_nodes_builder.md)**: Details the creation of all logical code symbols (functions, classes, etc.) and their relationships.
--   **[summary_include_relation_provider.md](./summary_include_relation_provider.md)**: Covers the logic for ingesting and querying file include relationships.
--   **[summary_clangd_call_graph_builder.md](./summary_clangd_call_graph_builder.md)**: Covers the adaptive strategies for constructing the function call graph.
-
-#### Graph update components
--   **[summary_graph_update_scope_builder.md](./summary_graph_update_scope_builder.md)**: Details the identification of the "sufficient subset" of symbols for incremental updates (implementation in `updater_engine/scope_builder.py`).
--   **[summary_graph_debug_manager.md](./summary_graph_debug_manager.md)**: Describes the debugging and auditing tools for the code graph (implementation in `updater_engine/debug_manager.py`).
-
-### RAG Generation Architectural Layers
-
-These documents describe the core components of three-layer RAG generation system. Both RagGenerator and RagUpdater share the same components of three-layer architecture.
-
--   **[summary_rag_orchestrator.md](./summary_rag_orchestrator.md)**: The Logistics & Validation Layer, responsible for workflow, parallelism, and data validation.
--   **[summary_node_summary_processor.md](./summary_node_summary_processor.md)**: The Logic Layer, which contains the "brain" for processing each node.
--   **[summary_summary_cache_manager.md](./summary_summary_cache_manager.md)**: The Data & Persistence Layer, responsible for cache safety and management.
-
-### Supporting Modules
-
-These documents describe the helper modules that provide essential services like database access, Git integration, and argument parsing.
-
--   **[summary_neo4j_manager.md](./summary_neo4j_manager.md)**: The Data Access Layer for Neo4j.
--   **[summary_git_manager.md](./summary_git_manager.md)**: The abstraction layer for Git operations.
--   **[summary_llm_client.md](./summary_llm_client.md)**: The factory for providing model-agnostic LLM and embedding clients.
--   **[summary_input_params.md](./summary_input_params.md)**: The centralized module for handling command-line arguments.
--   **[summary_log_manager.md](./summary_log_manager.md)**: Describes the advanced, dual-level logging configuration.
--   **[summary_memory_debugger.md](./summary_memory_debugger.md)**: A simple utility for debugging memory usage.
-
-### Agentic Components
-
-These documents describe components designed to allow AI agents to interact with the generated code graph.
-
--   **[summary_graph_mcp_server.md](./summary_graph_mcp_server.md)**: An example MCP server that exposes the code graph as a set of tools for an AI agent.
--   **[summary_rag_adk_agent.md](./summary_rag_adk_agent.md)**: An example AI coding agent that uses the MCP server to answer questions about a codebase.
-
-### References
-
--   **[neo4j_current_schema.txt](./neo4j_current_schema.txt)**: Description on the current schema of the Neo4j database.
--   **[clangd-index-yaml-spec.txt](./clangd-index-yaml-spec.txt)**: Reference information on the `clangd` index format.
--   **[problem_in_yaml_index_Scope_string.txt](./problem_in_yaml_index_Scope_string.txt)**: Description on the problem in the `Scope` field of the `clangd` index format.
-
-### Appendix
-
--  **[refactor_for_cpp/](./refactor_for_cpp/)**: The outdated documents when I extended the code graph from supporting C-language project to C++-language project.
+## 🏗️ Appendix: Historical Reference
+*   **[refactor_for_cpp/](./refactor_for_cpp/)**: Archive of documents from the C-to-C++ extension phase.
+*   **[design_for_macro/](./design_for_macro/)**: Architectural plans for preprocessor support.
+*   **[design_for_typealias/](./design_for_typealias/)**: Architectural plans for type alias resolution.
