@@ -28,7 +28,7 @@ We only apply causality to **symbol definitions** (`node.is_definition()`).
 ### 3. Data Flow
 
 1.  **`compilation_parser.py`**: Stores `original_name` and `expanded_from_id` in `SourceSpan` and `TypeAliasSpan`.
-2.  **`source_span_provider.py`**: Transfers these fields to the corresponding `Symbol` objects during enrichment or synthesis.
+2.  **`symbol_enricher.py`**: Transfers these fields to the corresponding `Symbol` objects during enrichment or synthesis.
 3.  **`clangd_symbol_nodes_builder.py`**:
     *   Writes `original_name` as a node property.
     *   Ingests the `[:EXPANDED_FROM]` relationship from the symbol to the macro node.

@@ -15,10 +15,9 @@ import input_params
 from git_manager import GitManager
 from neo4j_manager import Neo4jManager
 from clangd_index_yaml_parser import SymbolParser
-from rag_updater import RagUpdater
-from include_relation_provider import IncludeRelationProvider
-from graph_update_scope_builder import GraphUpdateScopeBuilder
-from graph_debug_manager import GraphDebugManager
+from summary_driver import IncrementalSummarizer
+from graph_ingester import IncludeRelationProvider
+from updater_engine import GraphUpdateScopeBuilder, GraphDebugManager
 from utils import FileExtensions
 
 from log_manager import init_logging
@@ -99,21 +98,24 @@ class GraphUpdater:
             dirty_files_rel = {os.path.relpath(f, self.project_path) for f in dirty_files}
             deleted_files_rel = [os.path.relpath(f, self.project_path) for f in git_changes['deleted']]
             
+            seed_ids = scope_builder.get_seed_symbol_ids()
+
             # --- DEBUGGING: Pre-Purge Dump ---
             if self.args.debug_incremental:
                 debug_mgr.remove_updated_property() # Clean up from previous potential failed runs
                 debug_mgr.dump_purged_scope(
                     list(dirty_files_rel | set(deleted_files_rel)), 
                     deleted_files_rel, 
-                    scope_builder.seed_symbol_ids
+                    seed_ids
                 )
             
             self._purge_stale_graph_data(dirty_files_rel, deleted_files_rel)
             
             # --- FIX: Purge by ID to handle USR collisions and identity migration ---
-            if scope_builder.seed_symbol_to_label:
+            if seed_ids:
                 self.neo4j_mgr.purge_nodes_by_id(
-                    scope_builder.seed_symbol_to_label, 
+                    seed_ids, 
+                    full_symbol_parser.symbols,
                     dirty_files_rel, 
                     self.args.debug_incremental
                 )
@@ -210,7 +212,7 @@ class GraphUpdater:
 
         logger.info("\n--- Phase 7: Running targeted RAG update ---")
 
-        rag_updater = RagUpdater(
+        rag_updater = IncrementalSummarizer(
             neo4j_mgr=self.neo4j_mgr,
             project_path=self.project_path,
             args=self.args

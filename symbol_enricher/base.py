@@ -3,16 +3,16 @@ import gc
 from typing import Optional, Dict, Tuple
 
 from clangd_index_yaml_parser import SymbolParser
-from compilation_engine import CompilationManager, SourceSpan
+from source_parser import CompilationManager, SourceSpan
 from .matcher import MatcherMixin
 from .hierarchy import HierarchyMixin
 from .enrich_extras import EnrichExtrasMixin
-from .span_helpers import UtilsMixin
+from .span_helpers import HelpersMixin
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-class SourceSpanProvider(MatcherMixin, HierarchyMixin, EnrichExtrasMixin, UtilsMixin):
+class SymbolEnricher(MatcherMixin, HierarchyMixin, EnrichExtrasMixin, HelpersMixin):
     """
     Matches pre-parsed span data from a CompilationManager with Symbol objects
     from a SymbolParser, enriching them in-place with `body_location` and `parent_id`.
@@ -44,7 +44,7 @@ class SourceSpanProvider(MatcherMixin, HierarchyMixin, EnrichExtrasMixin, UtilsM
         self.assigned_parent_unmatched_alias = 0
         self.assigned_parent_by_member_list = 0
 
-    def enrich_symbols_with_span(self):
+    def enrich_symbols(self):
         """
         Orchestrates the enrichment of in-memory Symbol objects with span data.
         This is a multi-pass process that prioritizes semantic matching over coordinate matching.

@@ -2,7 +2,7 @@
 
 ## 1. Role in the Pipeline
 
-This module provides the `SymbolProcessor` class, which is responsible for the most complex part of the graph construction: **ingesting all logical code symbols and their intricate web of relationships**. It acts as the engine for **Pass 4** of the full ingestion pipeline, running after symbols have been parsed (`SymbolParser`) and enriched with lexical data (`SourceSpanProvider`).
+This module provides the `SymbolProcessor` class, which is responsible for the most complex part of the graph construction: **ingesting all logical code symbols and their intricate web of relationships**. It acts as the engine for **Pass 4** of the full ingestion pipeline, running after symbols have been parsed (`SymbolParser`) and enriched with lexical data (`SymbolEnricher`).
 
 Its purpose is to transform the final, in-memory collection of `Symbol` objects into a rich, interconnected graph in Neo4j. The logic for processing file and folder paths, which precedes this pass, resides in the separate `path_processor.py` module.
 

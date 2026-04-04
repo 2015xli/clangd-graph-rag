@@ -53,7 +53,7 @@ To modify `clangd_symbol_nodes_builder.py` to ingest `TypeAlias` data, establish
 
 ### Considerations
 
-*   **Data Flow:** Ensure that the `SymbolProcessor` receives the enriched `Symbol` objects (containing `aliased_canonical_spelling`, `aliased_structure_id`, etc.) from `SourceSpanProvider`.
+*   **Data Flow:** Ensure that the `SymbolProcessor` receives the enriched `Symbol` objects (containing `aliased_canonical_spelling`, `aliased_structure_id`, etc.) from `SymbolEnricher`.
 *   **Batching:** All new ingestion queries must be properly batched for performance.
 *   **Error Handling:** Implement robust error handling.
 *   **Qualified Name:** Ensure `qualified_name` is correctly passed and stored for `TYPE_ALIAS` nodes.

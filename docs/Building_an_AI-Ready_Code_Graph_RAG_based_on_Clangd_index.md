@@ -298,11 +298,11 @@ This process was completely rewritten for correctness and robustness, using a de
 *   **`clangd_index_yaml_parser.py`**: High-speed, parallel parsing of the `clangd` YAML index file.
 *   **`compilation_manager.py`**: The high-level orchestrator for source code parsing. Manages strategies (`clang` vs. `treesitter`) and caching.
 *   **`compilation_parser.py`**: The low-level parsing engine. Contains the parallelized `ClangParser` and the syntactic `TreesitterParser`.
-*   **`include_relation_provider.py`**: A new component that owns all logic for the `[:INCLUDES]` relationship, including ingestion and dependency analysis for the updater.
-*   **`clangd_symbol_nodes_builder.py`**: Builds the graph's structural backbone. Its `PathProcessor` now consolidates paths from symbols and includes. Its `SymbolProcessor` now writes the `body_location` property to function nodes.
-*   **`clangd_call_graph_builder.py`**: Builds the `:CALLS` relationships. Its legacy `WithoutContainer` extractor is now simpler, relying on pre-enriched in-memory `Symbol` objects.
+*   **`graph_ingester/include.py`**: A new component that owns all logic for the `[:INCLUDES]` relationship, including ingestion and dependency analysis for the updater.
+*   **`graph_ingester/symbol.py`**: Builds the graph's structural backbone. Its `PathProcessor` now consolidates paths from symbols and includes. Its `SymbolProcessor` now writes the `body_location` property to function nodes.
+*   **`graph_ingester/call.py`**: Builds the `:CALLS` relationships. Its legacy `WithoutContainer` extractor is now simpler, relying on pre-enriched in-memory `Symbol` objects.
 *   **`code_graph_rag_generator.py`**: The AI enrichment engine. It is now simpler and reads `body_location` data directly from the graph.
-*   **`source_span_provider.py`**: This component's role has been significantly reduced. It now acts as a simple, temporary "enricher" used in an early pipeline pass to attach span data to in-memory symbols.
+*   **`symbol_enricher.py`**: This component's role has been significantly reduced. It now acts as a simple, temporary "enricher" used in an early pipeline pass to attach span data to in-memory symbols.
 
 ### 4.2: Orchestrator Deep Dive (Graph Construction)
 

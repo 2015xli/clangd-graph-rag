@@ -4,6 +4,66 @@ General utility functions for the project.
 """
 import hashlib
 import os   
+import pickle
+import logging
+
+logger = logging.getLogger(__name__)
+
+class CompatibilityUnpickler(pickle.Unpickler):
+    """
+    A custom Unpickler that handles module renames for backward compatibility.
+    If a class is found under an old module name, it is redirected to the new one.
+    """
+    def __init__(self, file, *args, **kwargs):
+        super().__init__(file, *args, **kwargs)
+        self.migrated = False
+
+    def find_class(self, module, name):
+        # Mapping of old legacy module names to the current 'source_parser' package
+        renamed_modules = {
+            "compilation_parser": "source_parser",
+            "compilation_manager": "source_parser",
+            "compilation_ops": "source_parser",
+            "compilation_engine": "source_parser",
+        }
+        
+        for old_name, new_name in renamed_modules.items():
+            if module == old_name or module.startswith(f"{old_name}."):
+                new_module = module.replace(old_name, new_name, 1)
+                logger.warning(f"Redirecting pickle class: {module}.{name} -> {new_module}.{name}")
+                module = new_module
+                self.migrated = True
+                break
+                
+        return super().find_class(module, name)
+
+def safe_pickle_load(file_path: str):
+    """
+    Loads a pickle file with module name compatibility and automatic migration.
+    If redirection occurred during loading, the file is overwritten with the
+    updated module names.
+    """
+    if not os.path.exists(file_path):
+        return None
+
+    try:
+        with open(file_path, 'rb') as f:
+            unpickler = CompatibilityUnpickler(f)
+            data = unpickler.load()
+        
+        if unpickler.migrated:
+            logger.warning(f"Migrating legacy pickle cache '{os.path.basename(file_path)}' to current module structure...")
+            try:
+                with open(file_path, 'wb') as f:
+                    pickle.dump(data, f)
+                logger.info(f"Successfully migrated '{os.path.basename(file_path)}'.")
+            except Exception as e:
+                logger.error(f"Failed to save migrated cache '{file_path}': {e}")
+                
+        return data
+    except Exception as e:
+        logger.error(f"Error loading pickle file {file_path}: {e}")
+        return None
 
 class FileExtensions:
     """Grouped file extension constants for C/C++ projects."""

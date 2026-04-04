@@ -74,7 +74,7 @@ By default, `libclang` may report the expansion location of a macro-expanded sym
 #### 3.1.5. Anonymity Management and the ID Bridge
 Anonymous enums, structs, and unions present a naming challenge.
 *   **The Strategy**: The parser detects anonymity via spelling patterns (e.g., `(unnamed enum at...)`). For these nodes, it uses the **raw USR string** as the node's name for debug visibility.
-*   **The Bridge**: Because USRs are stable, the USR-hash ID of the anonymous parent matches the `Type` field of its children (like `EnumConstant`) in the Clangd index. This allows the `SourceSpanProvider` to bridge members back to their anonymous parents mathematically, even when they are defined in separate files (via `#include` in an anonymous enum).
+*   **The Bridge**: Because USRs are stable, the USR-hash ID of the anonymous parent matches the `Type` field of its children (like `EnumConstant`) in the Clangd index. This allows the `SymbolEnricher` to bridge members back to their anonymous parents mathematically, even when they are defined in separate files (via `#include` in an anonymous enum).
 
 
 ### 3.2. Performance and Scalability Architecture
@@ -143,4 +143,4 @@ Not all children are relevant members. The parser filters the children against t
 For every valid member found, the parser computes its **USR-derived ID** and stores it in the parent's `member_ids` list.
 
 #### 4.2.3. Why this is Robust
-This logic captures the **semantic ownership** defined by the compiler's AST. Even if a macro expands to an `EnumConstant` whose coordinates are in a different file or at a distant line number, the `ClangParser` sees that it is semantically owned by the parent `Enum`. This list is then used by the `SourceSpanProvider` as the "ultimate truth" for linking members to their parents, bypassing the limitations of coordinate-based containment.
+This logic captures the **semantic ownership** defined by the compiler's AST. Even if a macro expands to an `EnumConstant` whose coordinates are in a different file or at a distant line number, the `ClangParser` sees that it is semantically owned by the parent `Enum`. This list is then used by the `SymbolEnricher` as the "ultimate truth" for linking members to their parents, bypassing the limitations of coordinate-based containment.

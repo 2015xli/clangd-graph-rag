@@ -27,7 +27,7 @@ The update process is divided into a sequence of high-level phases orchestrated 
 
 ### Phase 3: Build the "Sufficient Subset" for the Update
 
-*   **Component**: `graph_update_scope_builder.GraphUpdateScopeBuilder`
+*   **Component**: `updater_engine.GraphUpdateScopeBuilder`
 *   **Purpose**: To determine the precise, self-contained set of symbols required to correctly patch the graph.
 *   **Mechanism**: This is the most complex logical step. The `GraphUpdater` delegates this to the `GraphUpdateScopeBuilder`, which performs the following actions:
     1.  It parses the **entire new `clangd` index file** to have a complete, in-memory view of all symbols in the new commit.
@@ -46,7 +46,7 @@ The update process is divided into a sequence of high-level phases orchestrated 
 
 ### Phase 5: Rebuild Dirty Scope (Ingestion)
 
-*   **Component**: `graph_update_scope_builder.GraphUpdateScopeBuilder`
+*   **Component**: `updater_engine.GraphUpdateScopeBuilder`
 *   **Purpose**: To surgically "patch" the graph with the new, updated information.
 *   **Mechanism**: The `GraphUpdater` calls the `rebuild_mini_scope()` method on the scope builder, which runs the complete ingestion pipeline (`PathProcessor`, `SymbolProcessor`, `ClangdCallGraphExtractor`, etc.) using the "mini-parser" as its data source.
 

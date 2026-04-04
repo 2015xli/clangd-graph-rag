@@ -134,19 +134,19 @@ Used for the initial, from-scratch ingestion of a project. Orchestrated by `clan
 python3 clangd_graph_rag_builder.py /path/to/clangd-index.yaml /path/to/project/
 
 # Build the graph with LLM summary RAG data generation (you don't need separate command for summary generation) 
-python3 clangd_graph_rag_builder.py /path/to/clangd-index.yaml /path/to/project/ --generate-summary
+python3 clangd_graph_rag_builder.py /path/to/clangd-index.yaml /path/to/project/ --generate-summary [--llm-api [openai|deepseek|ollama|fake]]
 ```
-* Without `--generate-summary`, the tool will only perform the graph enrichment phase. This is to give you an option to check the enrichment results before generating summaries, which may cost time and money.
+* Without `--generate-summary`, the tool will only perform the graph enrichment phase. This is to give you an option to check the enrichment results before generating summaries that may cost time and money.
 * With `--generate-summary` enabled, the tool will generate summary. By default it will use `--llm-api fake` to test the summary generation without actually calling an LLM API. You can use `--llm-api [openai|deepseek|ollama|fake]` to specify the LLM API to use. Option `ollama` will use local ollama setup. Please check the `llm_client.py` for the details.
-* The generated summaries are cached in `<project_path>/.cache/summary_cache.json`, so that you don't need to regenerate them if the source code remains unchanged. You can move or rename this file to force regeneration. 
+* The generated summaries are cached in two levels of caches, so that you don't need to regenerate them if the source code of the project remains unchanged. If you did not specify the --llm-api in your previous runs (i.e., using the default `fake` llm client), and now you want to use a real LLM API, the fake summaries will be removed automatically, so that your graphRAG does not have mixed fake and real summaries. 
 
 Please check the detailed design document for more details: [Clangd Graph RAG Builder](./docs/summary_clangd_graph_rag_builder.md)
 
 ### Summary RAG Data Generation
 
-After the graph is built (without --generate-summary enabled), you can generate LLM summary RAG data with the following command:
+After the graph is fully built (without --generate-summary enabled), you can generate LLM summary RAG data with the following command. If you don't specify the --llm-api, it will use the `fake` llm client.
 ```bash
-python3 code_graph_rag_generator.py /path/to/clangd-index.yaml /path/to/project/
+python3 -m summary_driver /path/to/clangd-index.yaml /path/to/project/ --llm-api [openai|deepseek|ollama|fake]
 ```
 Please check the detailed design document for more details: [Code Graph RAG Data Generation](./docs/summary_code_graph_rag_generator.md)
 
@@ -155,12 +155,14 @@ Please check the detailed design document for more details: [Code Graph RAG Data
 Used to efficiently update an existing graph with changes from Git. Orchestrated by `clangd_graph_rag_updater.py`.
 
 ```bash
-# Update from the last known commit in the graph to the current HEAD
-python3 clangd_graph_rag_updater.py /path/to/new/clangd-index.yaml /path/to/project/
+# Update from the recorded last commit in the graph to the current HEAD 
+python3 clangd_graph_rag_updater.py /path/to/new/clangd-index.yaml /path/to/project/ --generate-summary --llm-api [openai|deepseek|ollama|fake]
 
 # Update between two specific commits
-python3 clangd_graph_rag_updater.py /path/to/new/clangd-index.yaml /path/to/project/ --old-commit <hash1> --new-commit <hash2>
+python3 clangd_graph_rag_updater.py /path/to/new/clangd-index.yaml /path/to/project/ --old-commit <hash1> --new-commit <hash2> --generate-summary --llm-api [openai|deepseek|ollama|fake]
 ```
+Note: If your full build graphRAG has been generated with a real LLM API, you definitely want to use a real one for the incremental update as well, to avoid the `fake` llm client polluting your graphRAG with meaningless summaries. If you accidently used the `fake` llm client, and your graphRAG is polluted, no worry. Please check section [Rebuild or Clean Up Graph](#rebuild-or-clean-up-graph) on how to deal with it. 
+
 Please check the detailed design document for more details: [Clangd Graph RAG Updater](./docs/summary_clangd_graph_rag_updater.md)
 
 ### Common Options
@@ -176,7 +178,6 @@ Both the builder, updater and other scripts accept a wide range of common argume
     *   `--num-parse-workers`: Number of parallel parsing worker processes for YAML index file and source file parsing, in case you have a large codebase with lots of files (like Linux kernel). This may need to be tuned based on your system resources. Usually set to a number close to the number of available CPU cores.
     *   `--num-remote-workers`: Number of remote worker threads for LLM API calls. This is for IO bound operation, can be set to a big number. May use coroutines in future, but threads works fine for now.
 *   **Batching Arguments**: Tune performance for database ingestion (e.g., `--ingest-batch-size`, `--cypher-tx-size`).
-
 
 ## Interacting with the Graph: AI Agent
 
@@ -217,26 +218,107 @@ For more details, see the documentation for Agentic Components section in [Desig
 
 These scripts are the core components of the pipeline and can also be run standalone for debugging or partial processing.
 
-*   **`clangd_symbol_nodes_builder.py`**:
-    *   **Purpose**: Ingests the file/folder structure and symbol definitions.
-    *   **Assumption**: Best run on a clean database.
-    *   **Usage**: `python3 clangd_symbol_nodes_builder.py <index.yaml> <project_path/>`
+*   **`python3 -m source_parser`**:
+    *   **Purpose**: Parses source code to extract function spans and include relations. Useful for AST inspection and header impact analysis.
+    *   **Usage**: `python3 -m source_parser /path/to/source/`
 
-*   **`clangd_call_graph_builder.py`**:
-    *   **Purpose**: Ingests *only* the function call graph relationships.
-    *   **Assumption**: Symbol nodes (such as `:FILE`, `:FUNCTION`) must already exist in the database.
-    *   **Usage**: `python3 clangd_call_graph_builder.py <index.yaml> <project_path/> --ingest`
-
-*   **`code_graph_rag_generator.py`**:
+*   **`python3 -m summary_driver`**:
     *   **Purpose**: Runs the RAG enrichment process on an *existing* graph.
     *   **Assumption**: The structural graph (files, symbols, calls) must already be populated in the database.
-    *   **Usage**: `python3 code_graph_rag_generator.py <index.yaml> <project_path/> --llm-api fake`
-    Please check the detailed design document for more details: [Code Graph RAG Generator](./docs/summary_code_graph_rag_generator.md)
+    *   **Usage**: `python3 -m summary_driver <index.yaml> <project_path/> --llm-api [openai|deepseek|ollama|fake]`
 
-*   **`neo4j_manager.py`**:
+*   **`python3 -m summary_engine`**:
+    *   **Purpose**: Manages the RAG summary cache (backup and restore).
+    *   **Usage**: `python3 -m summary_engine backup`
+
+*   **`python3 -m neo4j_manager`**:
     *   **Purpose**: A command-line utility for database maintenance.
     *   **Functionality**: Includes tools to `dump-schema` for inspection or `delete-property` to clean up data.
-    *   **Usage**: `python3 neo4j_manager.py dump-schema`
+    *   **Usage**: `python3 -m neo4j_manager dump-schema`
+
+*   **`graph_ingester/symbol.py`**:
+    *   **Purpose**: Ingests the file/folder structure and symbol definitions, mainly for debugging.
+    *   **Assumption**: Best run on a clean database.
+    *   **Usage**: `python3 -m graph_ingester symbol <index.yaml> <project_path/>`
+
+*   **`graph_ingester/call.py`**:
+    *   **Purpose**: Dumps or ingests *only* the function call graph relationships, mainly for debugging.
+    *   **Assumption**: Symbol nodes (such as `:FILE`, `:FUNCTION`) must already exist in the database.
+    *   **Usage**: `python3 -m graph_ingester call <index.yaml> <project_path/> --ingest`
+
+
+## Rebuild or Clean Up Graph
+
+If your graph has mixed summaries of fake and real LLM API, you have following opitions to solve the problem. 
+
+### Surgical clean up summaries
+
+The recommended way to clean up fake summaries (generated using the `fake` LLM client) is to use the dedicated cleanup command. This will surgically remove fake content from both the Neo4j graph database and the summary cache, leaving you a clean graph and cache that have only real summaries.
+
+```bash
+python3 -m summary_engine clean-fakes
+```
+
+Then, you can generate the summaries with real LLM API by following section [Summary Data Generation](#summary-rag-data-generation). 
+
+#### What if I want to clean the summaries manually? (Not recommended)
+
+You can perform the steps manually just in case you need to:
+
+1. **Delete the fake summary property from Neo4j**:
+    ```bash
+    python3 -m neo4j_manager delete-property --key fake_summary --all-labels --rebuild-indices
+    ```
+
+2. **Delete the fake summaries in node cache**:
+    Fake summary can be cached in the file at `<project_path>/.cache/summary_cache.json`. You can manually delete the fake summaries from this file.
+    ```bash
+    python3 -m summary_engine clean-fake-cache
+    ```
+
+### Rebuild the graphRAG
+
+You can rebuild your graph with `--generate-summary --llm-api <real-api-name>`. Graph rebuilding may be acceptable sometimes, depending on your situation. 
+
+1. **Rebuilding time** If you had a full build with your project before, and the source code has no change since then, the rebuilding of its graphRAG can be quite fast, because the previous run already caches the results of the long time operations, i.e., the source tree parsing and the yaml index parsing. It may take only several minutes to rebuild the graph with the cached results. The real time consuming part (and also money consuming) is the summary generation process with a real LLM API. 
+
+2. **Summarization time/cost** If you had used real LLM API to generate some summaries, the results are not lost in graphRAG rebuilding. They are cached by the `llm-cache` separately in the disk, managed by `llm_client.py`. So rebuilding does not increase your time or cost for summarization.
+
+3. **Other considerations** Graph rebuilding sometimes is useful when you have incrementally updated the graphRAG many times. Incremental update may introduce some minor inconsistencies, and rebuilding can help to fix them. This is just a guess, not confirmed. The minor inconsistencies I observed so far are due to issues in the source code and the way clangd-indexer works, not the incremental update itself. E.g., the source code may have two classes of same name, while clangd-indexer will choose one "winner" to represent the class (since they have the same USR: "Unified Symbol Resolution"), but merge the other class's relationships to the "winner".
+
+#### What if the database is huge when rebuilding
+
+Rebuilding the graph will delete existing nodes/relationships. If your graph is really big (millions of nodes/relationships like Linux kernel), it may take some time to reset the database. It is recommended to reset your database through Neo4j commands before you start the rebuilding. Please check Neo4j manual or Google a solution on how to reset it. 
+
+What I do is to delete the database files directly with the following commands. Don't use them unless you really know what you are doing. You need first check your Neo4j conf file (mine is /etc/neo4j/neo4j.conf) for its data path.
+
+```
+sudo systemctl stop neo4j 
+sudo rm -fr <your_neo4j_data_path>/databases/neo4j/*
+sudo rm -fr <your_neo4j_data_path>/transactions/neo4j/*
+sudo systemctl start neo4j 
+```
+
+### Regenerate the summaries
+
+If you don't want to rebuild your graph, you can simply regenerate the summaries, by following section [Summary Data Generation](#summary-rag-data-generation). We have two-level summary caching mechanism built-in, which can help you avoid regenerating summaries for unchanged code, thus saving your LLM credits. 
+
+#### Just in case you are interested
+
+1. **Node cache**: This is the Level-1 summary cache. When you generate summaries, the `summary_engine` will cache all the summaries in `<project_path>/.cache/summary_backup.json`. This cache is indexed by node ID (or file path for `FILE|FOLDER` nodes). It saves the `code_hash` of the node if the node is a function/method. When checking the cache validity, it compares the latest source code's hash value with the `code_hash` saved in the cache. If the function source code is modified, the cache will be invalidated and the cache has a miss. But if you only changed the prompt, the cache is still valid.
+
+    Before calling the LLM to generate a summary, it will first check if the node cache has a valid summary for this node, and if so, it will return the cached summary. Please check the `summary_engine/node_cache.py` for more details. 
+
+    Node cache caches summaries returned by the llm client, no matter which client it is, real or fake. So if you have used both real and fake clients to generate summaries, the node cache will contain both fake and real summaries. If you don't want to use the fake summaries, you can simply delete the entire cache file (see **LLM cache** below for why this is fine); or if you like, you can just remove the fake summaries in a surgical way.  
+
+2. **LLM cache**: This is the Level-2 summary cache. When the summarizer has a cache miss in the Level-1 cache, it will issue an LLM request. The LLM client caches all the responses from real LLMs in `llm cache`, bypassing the responses from the fake client. The cache is indexed by the hash value of prompts. If the same prompt is issued again, the cached response will be returned. If your project source code has no change, but you changed the prompt, the `llm cache` will become invalid.
+
+    This design ensures the `llm cache` has only real summaries. That means, all your real summaries won't be lost, even if you delete the Level-1 cache file at `<project_path>/.cache/summary_backup.json`. Of course you can also delete this Level-2 llm cache at `<project_path>/.cache/llm_cache/` if you want to start fresh. For example, you want to use a different LLM model, but usually you don't need to do that. 
+
+    The llm cache is built with `diskcache (fanout)`, which is based on `sqlite`. The `fanout` configuration improves the concurrency performance. You can access its contents with sqlite tools like `sqlitebrowser` to view and edit the contents.
+
+3. **Why two levels of caches** As mentioned above, the node cache is valid as long as the source code is not modified, while the llm cache is valid only if the whole prompt matches. The node cache has both fake and real summaries, and the llm cache has only the real summaries. They can be used for different purposes. The node cache can be used to develop out-of-graph RAG systems; the llm cache can be shared by different projects if they point to the same cache folder.
+
 
 ## Documentation & Contributing
 

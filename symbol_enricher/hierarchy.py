@@ -4,7 +4,7 @@ from typing import Dict, Set
 from urllib.parse import urlparse, unquote
 
 from clangd_index_yaml_parser import Location, RelativeLocation
-from compilation_engine import SourceSpan
+from source_parser import SourceSpan
 from utils import hash_usr_to_id, make_symbol_key
 
 logger = logging.getLogger(__name__)

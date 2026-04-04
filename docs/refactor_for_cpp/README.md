@@ -30,7 +30,7 @@ This phase focused on incrementally evolving the graph schema to support core C+
 
 This phase tackled the more subtle and complex challenges of accurately representing C++'s lexical and logical structure.
 
--   **[Logical Constructs & Lexical Nesting](./050_plan_logical_constructs.md)**: This is one of the most critical design documents. It details the **Problem** of why the `clangd` index's `scope` string is insufficient for building hierarchies, and the **Solution**: a robust, two-stage, span-based reconciliation process between the `CompilationParser` and `SourceSpanProvider` that correctly models lexical nesting even for anonymous structures.
+-   **[Logical Constructs & Lexical Nesting](./050_plan_logical_constructs.md)**: This is one of the most critical design documents. It details the **Problem** of why the `clangd` index's `scope` string is insufficient for building hierarchies, and the **Solution**: a robust, two-stage, span-based reconciliation process between the `CompilationParser` and `SymbolEnricher` that correctly models lexical nesting even for anonymous structures.
 
 ---
 

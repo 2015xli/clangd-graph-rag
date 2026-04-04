@@ -2,7 +2,7 @@ import logging
 from typing import Dict, Tuple
 
 from clangd_index_yaml_parser import Location
-from compilation_engine import SourceSpan
+from source_parser import SourceSpan
 from utils import make_symbol_key
 
 logger = logging.getLogger(__name__)

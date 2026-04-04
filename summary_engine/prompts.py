@@ -1,20 +1,31 @@
 from typing import Optional
+import logging
 
-class RagGenerationPromptManager:
+# Set up logging for this module
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+class PromptManager:
+    """
+    Manages the prompt templates used for generating code analyses and summaries.
+    """
     def __init__(self):
         pass
 
     def get_code_analysis_prompt(self, chunk: str, is_first_chunk: bool, is_last_chunk: bool, running_summary: str = "") -> str:
         """
         Returns the prompt for individual code analysis (Pass 1).
-        Handles first, middle, and last chunks.
+        Handles first, middle, and last chunks for iterative summarization of large functions.
         """
         if is_first_chunk:
             if is_last_chunk:
+                # Single chunk function
                 return f"Summarize the purpose of this C/C++ function based on its code. Don't respond with your reasoning process, but only give the summary.:\n\n```cpp\n{chunk}```"
             else:
+                # First chunk of a multi-chunk function
                 return f"Summarize this C/C++ code, which is the beginning of a larger function/method. Don't respond with your reasoning process, but only give the summary.:\n\n```cpp\n{chunk}```"
         else:
+            # Subsequent chunks
             position_prompt = "This is the end of the function body." if is_last_chunk else "The function body continues after this code."
             return (
                 f"The summary of the first part of a large function/method so far is: \n'{running_summary}'\n\n" 
@@ -26,6 +37,7 @@ class RagGenerationPromptManager:
     def get_contextual_function_prompt(self, code_analysis: str, caller_text: str, callee_text: str) -> str:
         """
         Returns the prompt for contextual function summarization (Pass 2, single pass).
+        Combines the function's own analysis with its callers and callees.
         """
         return (
             f"A C/C++ function or method is summarized as: '{code_analysis}'.\n"
@@ -54,6 +66,7 @@ class RagGenerationPromptManager:
     def get_class_summary_prompt(self, class_name: str, parent_text: str, field_text_prompt: str, method_text: str) -> str:
         """
         Returns the prompt for class summarization (Pass 3, single pass).
+        Uses inheritance, members, and methods for a holistic view.
         """
         return (
             f"A C++ class named '{class_name}' is defined. {parent_text} {field_text_prompt} {method_text}\n\n"
@@ -80,6 +93,7 @@ class RagGenerationPromptManager:
     def get_file_summary_prompt(self, file_name: str, summaries_text: str) -> str:
         """
         Returns the prompt for file summarization (Pass 4).
+        Rolls up summaries of all defined/declared entities in the file.
         """
         return (
             f"A file named '{file_name}' contains components with the following responsibilities: [{summaries_text}]. "
@@ -89,6 +103,7 @@ class RagGenerationPromptManager:
     def get_folder_summary_prompt(self, folder_name: str, child_summaries_text: str) -> str:
         """
         Returns the prompt for folder summarization (Pass 5).
+        Rolls up summaries of files and subfolders.
         """
         return (
             f"A folder named '{folder_name}' contains the following components: [{child_summaries_text}]. "
@@ -98,6 +113,7 @@ class RagGenerationPromptManager:
     def get_project_summary_prompt(self, child_summaries_text: str) -> str:
         """
         Returns the prompt for project summarization (Pass 5).
+        Final top-level roll-up.
         """
         return (
             f"A software project contains the following top-level components: [{child_summaries_text}]. "
@@ -107,6 +123,7 @@ class RagGenerationPromptManager:
     def get_namespace_summary_prompt(self, namespace_name: str, child_summaries_text: str) -> str:
         """
         Returns the prompt for namespace summarization (Pass 4).
+        Rolls up entities contained within the C++ namespace.
         """
         return (
             f"A C++ namespace named '{namespace_name}' contains the following components: [{child_summaries_text}]. "
@@ -116,6 +133,7 @@ class RagGenerationPromptManager:
     def get_iterative_parent_children_prompt(self, relation_name: str, entity_name: Optional[str] = None) -> str:
         """
         Returns the template for iterative parent children summarization.
+        Used when the number of children is too large for a single prompt.
         """
         label = relation_name.split('_')[0]
         return (
@@ -127,6 +145,7 @@ class RagGenerationPromptManager:
     def get_iterative_relation_prompt(self, relation_name: str, running_summary: str, relation_summaries_chunk: str, entity_name: Optional[str] = None) -> str:
         """
         Returns the formatted prompt for iterative relation summarization based on relation_name.
+        Dispatches to the specific template needed for the relationship type.
         """
         if relation_name == "function_has_callers":
             template = self.get_iterative_caller_prompt_template()

@@ -25,13 +25,13 @@ So we gave up using Symbol's Scope string to build the :HAS_NESTED relationship.
 
 3. I solved the problem by directly using cland.cindex compilation parser to construct the nesting relationship.
 
-3.1. It iterates the file AST to find all nodes that have body spans. Then it creates a synthetic ID for it, and creates a SourceSpan object to record the node's info. The info will be used by SourceSpanProvider to create synthetic Symbol object when it enriches the symbol data from SymbolParser.
+3.1. It iterates the file AST to find all nodes that have body spans. Then it creates a synthetic ID for it, and creates a SourceSpan object to record the node's info. The info will be used by SymbolEnricher to create synthetic Symbol object when it enriches the symbol data from SymbolParser.
 
-3.2. In SourceSpanProvider, it tries to match the symbols of SymbolParser with key (symbol name, file uri, start line, start column) to the SourceSpan objects returned by the clang parser. If a symbol is matched to a SourceSpan object, it adds the body location info to the symbol data. Otherwise, if no symbol can be matched, it creates symthetic Symbol objects for all the remaining SourceSpan objects, and add them to symbolParser. 
+3.2. In SymbolEnricher, it tries to match the symbols of SymbolParser with key (symbol name, file uri, start line, start column) to the SourceSpan objects returned by the clang parser. If a symbol is matched to a SourceSpan object, it adds the body location info to the symbol data. Otherwise, if no symbol can be matched, it creates symthetic Symbol objects for all the remaining SourceSpan objects, and add them to symbolParser. 
 
 3.3. At the same time, since the SourceSpan object also records its parent SourceSpan id, we can leverage this info to build the nester-nestee relationship. (In clang index yaml file, the !Ref documents also record the parent symbol ID in its Container field for most symbols. But there are still many missing, especially the anonymous entities.)
 
-3.4. For fields (or variables, pure virtual method, etc.) that have no parent symbol given by the clang index yaml file, the SourceSpanProvider just searches all the SourceSpan objects from the same file of the field, then identifies the innermost body span that contains the field's location, and uses it as its parent SourceSpan (hence the parent synthetic Symbol).
+3.4. For fields (or variables, pure virtual method, etc.) that have no parent symbol given by the clang index yaml file, the SymbolEnricher just searches all the SourceSpan objects from the same file of the field, then identifies the innermost body span that contains the field's location, and uses it as its parent SourceSpan (hence the parent synthetic Symbol).
 
 By using the SourceSpan as the absolute source of truth for all lexical nesting and generating "synthetic" symbols for anonymous structures, I can handle both named and anonymous entities with a unified, elegant mechanism.
 

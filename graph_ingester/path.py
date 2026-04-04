@@ -14,7 +14,7 @@ from tqdm import tqdm
 from neo4j_manager import Neo4jManager
 from utils import align_string
 from clangd_index_yaml_parser import Symbol
-from compilation_engine import CompilationManager
+from source_parser import CompilationManager
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)

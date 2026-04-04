@@ -11,10 +11,11 @@ import tiktoken
 import re
 from typing import Optional, Dict, Any, Tuple, List
 
-from summary_cache_manager import SummaryCacheManager
+from .node_cache import SummaryCacheManager
 from llm_client import LlmClient
-from rag_generation_prompts import RagGenerationPromptManager
+from .prompts import PromptManager
 
+# Set up logging for this module
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
@@ -34,7 +35,7 @@ class NodeSummaryProcessor:
                  project_path: str,
                  cache_manager: SummaryCacheManager,
                  llm_client: LlmClient,
-                 prompt_manager: RagGenerationPromptManager,
+                 prompt_manager: PromptManager,
                  token_encoding: str = 'cl100k_base',
                  max_context_token_size: Optional[int] = None):
         

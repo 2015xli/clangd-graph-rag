@@ -1,20 +1,35 @@
 #!/usr/bin/env python3
 """
 Orchestrates the incremental update of RAG data in the code graph.
+Uses the SummarizationEngine via composition.
 """
 
 import logging
-import os
+import os, argparse
 from typing import Set, Dict, List
 from collections import defaultdict
 
-from rag_orchestrator import RagOrchestrator
+from summary_engine import SummarizationEngine
+from neo4j_manager import Neo4jManager
 
+# Set up logging for this module
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-class RagUpdater(RagOrchestrator):
-    """Orchestrates the targeted update of RAG data."""
+class IncrementalSummarizer:
+    """Orchestrates the targeted update of RAG data using the SummarizationEngine."""
+
+    def __init__(self, neo4j_mgr: Neo4jManager, project_path: str, args: argparse.Namespace):
+        self.neo4j_mgr = neo4j_mgr
+        self.project_path = project_path
+        self.args = args
+        
+        # Initialize the Summarization Engine via composition
+        self.engine = SummarizationEngine(
+            neo4j_mgr=self.neo4j_mgr,
+            project_path=self.project_path,
+            args=self.args
+        )
 
     def summarize_targeted_update(self, seed_symbol_ids: set, structurally_changed_files: dict):
         """
@@ -24,28 +39,31 @@ class RagUpdater(RagOrchestrator):
             logging.info("No seed symbols or structural changes provided for targeted update. Skipping.")
             return
 
-        self.summary_cache_manager.load()
-        logging.info(f"--- Starting Targeted RAG Update for {len(seed_symbol_ids)} seed symbols and {sum(len(v) for v in structurally_changed_files.values())} structural file changes ---")
+        # 0. Initialize the run (loads cache and cleans up faked content if needed)
+        self.engine.initialize_run()
+        
+        logging.info(f"--- Starting Targeted RAG Update for {len(seed_symbol_ids)} seed symbols and "
+                     f"{sum(len(v) for v in structurally_changed_files.values())} structural file changes ---")
 
-        # --- Function Summary Passes (Content Changes) ---
+        # --- Pass 1: Individual Code Analysis ---
         logging.info("Targeted Update - Pass 1: Analyzing changed functions individually...")
         
-        # No need to pre-filter the seed IDs to only include functions and methods
-        # because the _analyze_functions_individually_with_ids function will do it for us
-        updated_code_analysis_ids = self._analyze_functions_individually_with_ids(list(seed_symbol_ids))
+        # analyze_functions_individually_with_ids will filter for functions/methods internally
+        updated_code_analysis_ids = self.engine.analyze_functions_individually_with_ids(list(seed_symbol_ids))
         logging.info(f"{len(updated_code_analysis_ids)} functions received a new code analysis.")
-        self.summary_cache_manager.save(mode="updater", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
+        self.engine.summary_cache_manager.save(mode="updater", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
 
+        # --- Pass 2: Contextual Function Summarization ---
         logging.info("Targeted Update - Pass 2: Summarizing functions with context...")
         neighbor_function_ids = self._get_neighbor_function_ids(updated_code_analysis_ids)
         all_function_ids_to_process = updated_code_analysis_ids.union(neighbor_function_ids)
         logging.info(f"Expanded scope for Pass 2 to {len(all_function_ids_to_process)} total functions.")
         
-        updated_final_summary_ids = self._summarize_functions_with_context_with_ids(list(all_function_ids_to_process))
+        updated_final_summary_ids = self.engine.summarize_functions_with_context_with_ids(list(all_function_ids_to_process))
         logging.info(f"{len(updated_final_summary_ids)} functions received a new final summary.")
-        self.summary_cache_manager.save(mode="updater", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
+        self.engine.summary_cache_manager.save(mode="updater", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
 
-        # --- Targeted Class Summaries ---
+        # --- Pass 3: Targeted Class Summaries ---
         logging.info("Targeted Update - Pass 3: Summarizing changed class structures...")
         seed_class_ids_from_seeds = self._find_classes_of_symbol_ids(seed_symbol_ids)
         seed_class_ids_from_functions = self._find_classes_for_updated_methods(updated_final_summary_ids)
@@ -53,11 +71,11 @@ class RagUpdater(RagOrchestrator):
             structurally_changed_files.get('added', []) + structurally_changed_files.get('modified', [])
         )
         all_seed_class_ids = seed_class_ids_from_functions.union(seed_class_ids_from_files).union(seed_class_ids_from_seeds)
-        updated_class_summary_ids = self._summarize_classes_with_ids(all_seed_class_ids)
+        updated_class_summary_ids = self.engine.summarize_classes_with_ids(all_seed_class_ids)
         logging.info(f"{len(updated_class_summary_ids)} classes received a new summary.")
-        self.summary_cache_manager.save(mode="updater", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
+        self.engine.summary_cache_manager.save(mode="updater", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
 
-        # --- Targeted Namespace Summaries ---
+        # --- Pass 4: Targeted Namespace Summaries ---
         logging.info("Targeted Update - Pass 4: Summarizing changed namespaces...")
         seed_namespace_ids_from_children = self._find_namespaces_for_updated_children(
             updated_final_summary_ids.union(updated_class_summary_ids)
@@ -66,21 +84,26 @@ class RagUpdater(RagOrchestrator):
             structurally_changed_files.get('added', []) + structurally_changed_files.get('modified', [])
         )
         all_seed_namespace_ids = seed_namespace_ids_from_children.union(seed_namespace_ids_from_files)
-        updated_namespace_summary_ids = self._summarize_namespaces_with_ids(all_seed_namespace_ids)
+        updated_namespace_summary_ids = self.engine.summarize_namespaces_with_ids(all_seed_namespace_ids)
         logging.info(f"{len(updated_namespace_summary_ids)} namespaces received a new summary.")
-        self.summary_cache_manager.save(mode="updater", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
+        self.engine.summary_cache_manager.save(mode="updater", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
 
-        # --- File & Folder Roll-up Passes (Content + Structural Changes) ---
+        # --- Pass 5-7: File & Folder Roll-up Passes ---
         files_with_summary_changes = self._find_files_for_updated_symbols(updated_final_summary_ids)
         files_with_class_summary_changes = self._find_files_for_updated_classes(updated_class_summary_ids)
         files_with_namespace_summary_changes = self._find_files_for_updated_namespaces(updated_namespace_summary_ids)
         added_files = set(structurally_changed_files.get('added', []))
         modified_files = set(structurally_changed_files.get('modified', []))
-        files_to_resummarize = files_with_summary_changes.union(files_with_class_summary_changes).union(files_with_namespace_summary_changes).union(added_files).union(modified_files)
-        self._summarize_files_with_paths(list(files_to_resummarize))
+        
+        files_to_resummarize = (files_with_summary_changes.union(files_with_class_summary_changes)
+                               .union(files_with_namespace_summary_changes).union(added_files)
+                               .union(modified_files))
+        
+        self.engine.summarize_files_with_paths(list(files_to_resummarize))
 
         deleted_files = set(structurally_changed_files.get('deleted', []))
         all_trigger_files = files_to_resummarize.union(deleted_files)
+        
         if not all_trigger_files:
             logging.info("No file or folder roll-up needed.")
         else:
@@ -91,21 +114,28 @@ class RagUpdater(RagOrchestrator):
                     all_affected_folders_paths.add(parent)
                     parent = os.path.dirname(parent)
             
-            self._summarize_folders_with_paths(list(all_affected_folders_paths))
-            self._summarize_project()
+            self.engine.summarize_folders_with_paths(list(all_affected_folders_paths))
+            self.engine.summarize_project()
         
-        # Final save with healing/pruning logic
-        self.summary_cache_manager.save(mode="updater", neo4j_mgr=self.neo4j_mgr)
+        # Final save of the cache
+        self.engine.summary_cache_manager.save(mode="updater", neo4j_mgr=self.neo4j_mgr)
 
-        logging.info(f"Total number of summaries processed: {self.n_restored + self.n_generated + self.n_unchanged + self.n_nochildren + self.n_failed}")
-        logging.info(f"  Restored: {self.n_restored}, Generated: {self.n_generated}, Unchanged: {self.n_unchanged}, No children: {self.n_nochildren}, Failed: {self.n_failed}")
+        total_processed = (self.engine.n_restored + self.engine.n_generated + 
+                           self.engine.n_unchanged + self.engine.n_nochildren + 
+                           self.engine.n_failed)
+        
+        logging.info(f"Total number of summaries processed: {total_processed}")
+        logging.info(f"  Restored: {self.engine.n_restored}, Generated: {self.engine.n_generated}, "
+                     f"Unchanged: {self.engine.n_unchanged}, No children: {self.engine.n_nochildren}, "
+                     f"Failed: {self.engine.n_failed}")
 
-        # --- Final Pass ---
-        self.generate_embeddings()
+        # --- Final Pass: Embeddings ---
+        self.engine.generate_embeddings()
         logging.info("--- Finished Targeted RAG Update ---")
         
 
     def _get_neighbor_function_ids(self, seed_symbol_ids: set) -> set:
+        """Finds functions that are direct callers/callees of the changed functions."""
         if not seed_symbol_ids:
             return set()
         
@@ -124,6 +154,7 @@ class RagUpdater(RagOrchestrator):
         return seed_symbol_ids
 
     def _find_files_for_updated_symbols(self, symbol_ids: set) -> set:
+        """Finds file paths for a set of symbol IDs."""
         if not symbol_ids:
             return set()
         query = """
@@ -135,6 +166,7 @@ class RagUpdater(RagOrchestrator):
         return {r['path'] for r in results}
 
     def _find_classes_of_symbol_ids(self, symbol_ids: set) -> set:
+        """Filters a set of symbol IDs to return only those that are class structures."""
         if not symbol_ids:
             return set()
         query = """
@@ -146,6 +178,7 @@ class RagUpdater(RagOrchestrator):
         return {r['id'] for r in results}
     
     def _find_classes_for_updated_methods(self, method_ids: set) -> set:
+        """Finds parent classes for a set of updated method IDs."""
         if not method_ids:
             return set()
         query = """
@@ -157,6 +190,7 @@ class RagUpdater(RagOrchestrator):
         return {r['id'] for r in results}
 
     def _find_classes_for_changed_files(self, file_paths: list[str]) -> set:
+        """Finds class structures defined or declared in changed files."""
         if not file_paths:
             return set()
         query = """
@@ -168,6 +202,7 @@ class RagUpdater(RagOrchestrator):
         return {r['id'] for r in results}
 
     def _find_files_for_updated_classes(self, class_ids: set) -> set:
+        """Finds file paths for updated class IDs."""
         if not class_ids:
             return set()
         query = """
@@ -179,6 +214,7 @@ class RagUpdater(RagOrchestrator):
         return {r['path'] for r in results}
 
     def _find_namespaces_for_updated_children(self, child_ids: Set[str]) -> Set[str]:
+        """Finds parent namespaces for updated children."""
         if not child_ids:
             return set()
         query = """
@@ -190,6 +226,7 @@ class RagUpdater(RagOrchestrator):
         return {r['id'] for r in results}
 
     def _find_namespaces_for_changed_files(self, file_paths: list[str]) -> Set[str]:
+        """Finds namespaces declared in changed files."""
         if not file_paths:
             return set()
         query = """
@@ -201,6 +238,7 @@ class RagUpdater(RagOrchestrator):
         return {r['id'] for r in results}
 
     def _find_files_for_updated_namespaces(self, namespace_ids: set) -> set:
+        """Finds file paths for updated namespace IDs."""
         if not namespace_ids:
             return set()
         query = """
@@ -210,5 +248,3 @@ class RagUpdater(RagOrchestrator):
         """
         results = self.neo4j_mgr.execute_read_query(query, {"namespace_ids": list(namespace_ids)})
         return {r['path'] for r in results}
-
-    

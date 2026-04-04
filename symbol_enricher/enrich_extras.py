@@ -3,7 +3,7 @@ import sys
 from typing import Dict
 
 from clangd_index_yaml_parser import Symbol, Location, Reference
-from compilation_engine import TypeAliasSpan
+from source_parser import TypeAliasSpan
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)

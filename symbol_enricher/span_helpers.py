@@ -3,12 +3,12 @@ from urllib.parse import urlparse, unquote
 from typing import Optional
 
 from clangd_index_yaml_parser import Symbol, Location
-from compilation_engine import SourceSpan
+from source_parser import SourceSpan
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-class UtilsMixin:
+class HelpersMixin:
     """Provides utility methods for filtering, geometric checks, and symbol creation."""
     VARIABLE_KIND = {"Field", "StaticProperty", "EnumConstant", "Variable"}
 

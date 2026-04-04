@@ -28,19 +28,23 @@ These documents detail the core modules responsible for each major stage of buil
 
 #### Major clangd index parsing and processing components
 -   **[summary_clangd_index_yaml_parser.md](./summary_clangd_index_yaml_parser.md)**: Explains the high-performance, parallel parsing of the raw `clangd` index file.
--   **[summary_path_processor.md](./summary_path_processor.md)**: Describes the logic for building the file and folder hierarchy in the graph.
+-   **[summary_path_processor.md](./summary_path_processor.md)**: Describes the logic for building the file and folder hierarchy in the graph (implementation in `graph_ingester/path.py`).
 
 #### Major source code parsing and processing components
 -   **[summary_compilation_manager.md](./summary_compilation_manager.md)**: Explains the high-level orchestration of source code parsing, caching, and strategy selection.
 -   **[summary_compilation_parser.md](./summary_compilation_parser.md)**: Details the low-level parsing logic for extracting function spans an-d include relations.
 
 #### The component that reconciles clangd index data with source-parsed data
--   **[summary_source_span_provider.md](./summary_source_span_provider.md)**: Details the critical process of reconciling `clangd` index data with source-parsed data to establish lexical hierarchies.
+-   **[summary_symbol_enricher.md](./summary_symbol_enricher.md)**: Details the critical process of reconciling `clangd` index data with source-parsed data to establish lexical hierarchies.
 
 #### The component that creates all logical code symbols and their relationships
 -   **[summary_clangd_symbol_nodes_builder.md](./summary_clangd_symbol_nodes_builder.md)**: Details the creation of all logical code symbols (functions, classes, etc.) and their relationships.
 -   **[summary_include_relation_provider.md](./summary_include_relation_provider.md)**: Covers the logic for ingesting and querying file include relationships.
 -   **[summary_clangd_call_graph_builder.md](./summary_clangd_call_graph_builder.md)**: Covers the adaptive strategies for constructing the function call graph.
+
+#### Graph update components
+-   **[summary_graph_update_scope_builder.md](./summary_graph_update_scope_builder.md)**: Details the identification of the "sufficient subset" of symbols for incremental updates (implementation in `updater_engine/scope_builder.py`).
+-   **[summary_graph_debug_manager.md](./summary_graph_debug_manager.md)**: Describes the debugging and auditing tools for the code graph (implementation in `updater_engine/debug_manager.py`).
 
 ### RAG Generation Architectural Layers
 

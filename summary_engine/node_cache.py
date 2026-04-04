@@ -3,8 +3,7 @@
 This module provides the SummaryCacheManager class, which manages the data and
 persistence for the RAG summary cache.
 
-It can also be run as a standalone script to backup summaries from Neo4j to a
-cache file, or restore summaries from the file back to Neo4j.
+It acts as an L1 cache layer for nodes, storing summaries and code analyses.
 """
 
 import os
@@ -16,8 +15,8 @@ from typing import Optional, Dict, Any
 from collections import defaultdict
 
 from neo4j_manager import Neo4jManager
-from log_manager import init_logging
 
+# Set up logging for this module
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
@@ -232,6 +231,32 @@ class SummaryCacheManager:
         self.cache_path = os.path.join(self.project_path, ".cache", self.DEFAULT_CACHE_FILENAME)
         logger.info(f"Discovered and configured project path: {self.project_path}")
 
+    def clean_fake_summaries(self) -> int:
+        """
+        Removes all entries from the in-memory cache that contain fake summary content.
+        Returns the number of removed entries.
+        """
+        from llm_client import FAKE_SUMMARY_CONTENT
+        
+        logger.info(f"Surgically cleaning fake summaries from L1 cache (values matching: '{FAKE_SUMMARY_CONTENT}')...")
+        
+        total_removed = 0
+        new_cache = defaultdict(lambda: defaultdict(dict))
+        
+        for label, entries in self.cache.items():
+            for identifier, data in entries.items():
+                is_fake = (data.get('summary') == FAKE_SUMMARY_CONTENT or 
+                           data.get('code_analysis') == FAKE_SUMMARY_CONTENT)
+                
+                if is_fake:
+                    total_removed += 1
+                else:
+                    new_cache[label][identifier] = data
+        
+        self.cache = new_cache
+        logger.info(f"Removed {total_removed} fake entries from L1 cache.")
+        return total_removed
+
     def backup_db_to_file(self, neo4j_mgr: Neo4jManager, batch_size: int = 10000):
         """Rebuilds the cache from scratch by querying all summaries from Neo4j."""
         logger.info("Starting full summary backup from Neo4j to rebuild cache...")
@@ -321,37 +346,3 @@ class SummaryCacheManager:
                     logger.error(f"Failed with batch (first item): {batch[0] if batch else 'N/A'}")
 
         logger.info("Restore from cache file to Neo4j graph complete.")
-
-
-if __name__ == "__main__":
-    init_logging()
-
-    parser = argparse.ArgumentParser(description="A tool for managing the RAG summary cache.")
-    subparsers = parser.add_subparsers(dest="command", required=True, help="Available commands")
-    
-    parser_backup = subparsers.add_parser("backup", help="Backup summaries from Neo4j graph to the cache file.")
-    parser_backup.add_argument("--batch-size", type=int, default=10000, help="Number of records per query.")
-    
-    parser_restore = subparsers.add_parser("restore", help="Restore summaries from the cache file to the Neo4j graph.")
-    parser_restore.add_argument("--batch-size", type=int, default=2000, help="Number of records per transaction.")
-
-    args = parser.parse_args()
-
-    try:
-        with Neo4jManager() as neo4j_mgr:
-            if not neo4j_mgr.check_connection():
-                logger.critical("Could not connect to Neo4j.")
-                sys.exit(1)
-            
-            # Instantiate manager without a project path; it will be discovered.
-            cache_manager = SummaryCacheManager(project_path=None)
-            cache_manager.configure_project_path(neo4j_mgr)
-
-            if args.command == "backup":
-                cache_manager.backup_db_to_file(neo4j_mgr, batch_size=args.batch_size)
-            elif args.command == "restore":
-                cache_manager.restore_db_from_file(neo4j_mgr, batch_size=args.batch_size)
-
-    except Exception as e:
-        logger.critical(f"An unhandled error occurred: {e}", exc_info=True)
-        sys.exit(1)

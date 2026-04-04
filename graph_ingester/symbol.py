@@ -17,10 +17,10 @@ from tqdm import tqdm
 
 import input_params
 from clangd_index_yaml_parser import SymbolParser, Symbol
-from compilation_engine import CompilationManager
+from source_parser import CompilationManager
 from neo4j_manager import Neo4jManager
 from utils import align_string
-from path_processor import PathProcessor, PathManager
+from .path import PathProcessor, PathManager
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -557,14 +557,14 @@ def main():
     logger.info("--- Finished Phase 0 ---")
 
     logger.info("\n--- Starting Phase 1: Parsing Source Code for Spans ---")
-    compilation_manager = CompilationManager(parser_type=args.source_parser, project_path=args.project_path, compile_commands_path=args.compile_commands)
+    compilation_manager = CompilationManager(project_path=args.project_path, compile_commands_path=args.compile_commands)
     compilation_manager.parse_folder(args.project_path, args.num_parse_workers)
     logger.info("--- Finished Phase 1 ---")
 
-    from source_span_provider import SourceSpanProvider
+    from symbol_enricher import SymbolEnricher
     logger.info("\n--- Starting Phase 2: Enriching Symbols with Spans ---")
-    span_provider = SourceSpanProvider(symbol_parser=symbol_parser, compilation_manager=compilation_manager)
-    span_provider.enrich_symbols_with_span()
+    symbol_enricher = SymbolEnricher(symbol_parser=symbol_parser, compilation_manager=compilation_manager)
+    symbol_enricher.enrich_symbols()
     logger.info("--- Finished Phase 2 ---")
     
     path_manager = PathManager(args.project_path)

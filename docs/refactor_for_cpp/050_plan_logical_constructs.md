@@ -11,7 +11,7 @@ This step focuses on accurately modeling the logical and lexical structure of a 
 
 1.  **`compilation_parser.py`**: Refactored to generate a hierarchical "Span Tree" for each file, which is the foundation for the new lexical nesting logic.
 2.  **`clangd_index_yaml_parser.py`**: The `Symbol` dataclass was updated to include an optional `parent_id`.
-3.  **`source_span_provider.py`**: Completely refactored to implement a two-pass algorithm that uses the Span Tree to enrich all symbols with a `parent_id` and to synthesize new symbols for anonymous structures.
+3.  **`symbol_enricher.py`**: Completely refactored to implement a two-pass algorithm that uses the Span Tree to enrich all symbols with a `parent_id` and to synthesize new symbols for anonymous structures.
 4.  **`clangd_symbol_nodes_builder.py`**: Updated to use the new `parent_id` and `namespace_id` attributes to create `:HAS_NESTED` and `:SCOPE_CONTAINS` relationships.
 5.  **`neo4j_manager.py`**: To add new constraints for `:NAMESPACE` and `:VARIABLE` nodes.
 
@@ -48,7 +48,7 @@ The final implementation uses a purely spatial, span-based approach, with the `S
     *   The `_ClangWorkerImpl` was modified to perform a recursive AST walk that builds `SpanNode` objects. Each `SpanNode` contains its kind, name, name/body spans, and a list of its `children` `SpanNode`s, perfectly mirroring the code's nested structure.
     *   The final output of the parser is a dictionary mapping each file URI to a "forest" (a list of top-level `SpanNode` trees).
 
-2.  **`source_span_provider.py` - Two-Pass Enrichment:**
+2.  **`symbol_enricher.py` - Two-Pass Enrichment:**
     *   This provider was completely redesigned to implement a powerful two-pass algorithm.
     *   **Pre-computation:** It first traverses the `SpanTree` data to build two lookup maps:
         1.  A map from a span's location to a generated `synthetic_id`.

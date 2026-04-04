@@ -23,7 +23,7 @@ These passes prepare all data in memory before connecting to the database.
     *   **Purpose**: To parse the entire project's source code. This provides: include relationships, body locations for functions, **Type Alias** definitions, and ground-truth **Macro** definitions.
 
 *   **Pass 2: Enrich Symbols with Spans**
-    *   **Component**: `source_span_provider.SourceSpanProvider`
+    *   **Component**: `symbol_enricher.SymbolEnricher`
     *   **Purpose**: Matches indexed symbols with parsed source data. Attaches `body_location` and **macro causality metadata** (`original_name`, `expanded_from_id`) to symbols. It also **discovers and injects new Symbols** for macros and missing type aliases.
 
 ### Database Passes

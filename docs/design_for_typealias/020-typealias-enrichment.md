@@ -6,18 +6,18 @@ This document details the implementation steps for the TypeAlias enrichment stag
 
 ### Objective
 
-To modify `source_span_provider.py` to integrate the `TypeAliasSpan` data, ensuring that all relevant type alias information is present in the `SymbolParser`'s collection of `Symbol` objects before ingestion into Neo4j.
+To modify `symbol_enricher.py` to integrate the `TypeAliasSpan` data, ensuring that all relevant type alias information is present in the `SymbolParser`'s collection of `Symbol` objects before ingestion into Neo4j.
 
-### File: `source_span_provider.py`
+### File: `symbol_enricher.py`
 
-#### 1. Update `SourceSpanProvider.__init__`
+#### 1. Update `SymbolEnricher.__init__`
 
 *   **Access `TypeAliasSpan`s:**
     *   Modify the `__init__` method to retrieve the `TypeAliasSpan` objects from the `compilation_manager`.
     *   Add:
         *   `self.type_alias_spans: Dict[str, TypeAliasSpan] = compilation_manager.get_type_alias_spans()`
 
-#### 2. Modify `SourceSpanProvider.enrich_symbols_with_span`
+#### 2. Modify `SymbolEnricher.enrich_symbols`
 
 *   **New Matching and Enrichment Logic for `TypeAlias`:**
     *   **Iterate and Match Existing `Symbol`s:**
@@ -57,32 +57,32 @@ To modify `source_span_provider.py` to integrate the `TypeAliasSpan` data, ensur
 
 #### 3. Update `_create_synthetic_symbol` (or similar helper)
 
-*   The `_create_synthetic_symbol` helper in `source_span_provider.py` will be updated to handle `TypeAliasSpan` objects.
+*   The `_create_synthetic_symbol` helper in `symbol_enricher.py` will be updated to handle `TypeAliasSpan` objects.
 *   It will construct a `Symbol` object, setting its `kind` to `'TypeAlias'`, and populating the `aliased_canonical_spelling`, `aliased_type_id`, `aliased_type_kind`, `parent_id`, `scope`, and `body_location` properties from the `TypeAliasSpan`.
 
-#### 4. Modularization Plan for `SourceSpanProvider`
+#### 4. Modularization Plan for `SymbolEnricher`
 
-The `SourceSpanProvider` class, particularly its `enrich_symbols_with_span` method, currently orchestrates several distinct enrichment passes. To improve modularity, readability, and maintainability, the `enrich_symbols_with_span` method will be refactored into a series of smaller, more focused private methods. Each method will be responsible for a specific aspect of the symbol enrichment process.
+The `SymbolEnricher` class, particularly its `enrich_symbols` method, currently orchestrates several distinct enrichment passes. To improve modularity, readability, and maintainability, the `enrich_symbols` method will be refactored into a series of smaller, more focused private methods. Each method will be responsible for a specific aspect of the symbol enrichment process.
 
 **Proposed Refactoring:**
 
-1.  **`enrich_symbols_with_span(self)` (Orchestrator Method):**
+1.  **`enrich_symbols(self)` (Orchestrator Method):**
     *   This method will become the main orchestrator, calling the new private methods in a logical sequence.
     *   It will manage the overall flow and logging of the enrichment process.
 
 2.  **`_filter_symbols_by_project_path(self)`:**
     *   **Purpose:** Extracts the initial filtering logic that removes symbols whose definitions or declarations are outside the project path.
-    *   **Current Location:** Currently at the beginning of `enrich_symbols_with_span`.
+    *   **Current Location:** Currently at the beginning of `enrich_symbols`.
 
 3.  **`_match_and_synthesize_source_spans(self)`:**
     *   **Purpose:** Encapsulates the logic for matching existing `Symbol` objects with `SourceSpan` data and creating synthetic `Symbol` objects for unmatched `SourceSpan`s (e.g., anonymous structures).
-    *   **Current Location:** Covers the logic described as "Pass 1" and "Pass 2" in the existing `enrich_symbols_with_span` method.
+    *   **Current Location:** Covers the logic described as "Pass 1" and "Pass 2" in the existing `enrich_symbols` method.
     *   **Inputs:** `self.symbol_parser.symbols`, `self.compilation_manager.get_source_spans()`.
     *   **Outputs:** Updates `self.symbol_parser.symbols` in-place.
 
 4.  **`_assign_parent_ids_lexically(self)`:**
     *   **Purpose:** Encapsulates the logic for assigning `parent_id`s based on lexical scope for symbols that do not already have a `parent_id` from `clangd` references.
-    *   **Current Location:** Covers the logic described as "Pass 3" in the existing `enrich_symbols_with_span` method.
+    *   **Current Location:** Covers the logic described as "Pass 3" in the existing `enrich_symbols` method.
     *   **Inputs:** `self.symbol_parser.symbols`, `self.compilation_manager.get_source_spans()`.
     *   **Outputs:** Updates `self.symbol_parser.symbols` in-place.
 
@@ -94,12 +94,12 @@ The `SourceSpanProvider` class, particularly its `enrich_symbols_with_span` meth
 
 6.  **`_enrich_with_static_calls(self)`:**
     *   **Purpose:** This method already exists and will remain as is, responsible for injecting static call relations into `Symbol` objects.
-    *   **Current Location:** Already a separate method in `source_span_provider.py`.
+    *   **Current Location:** Already a separate method in `symbol_enricher.py`.
 
-**Revised `enrich_symbols_with_span` Flow:**
+**Revised `enrich_symbols` Flow:**
 
 ```python
-def enrich_symbols_with_span(self):
+def enrich_symbols(self):
     if not self.symbol_parser:
         logger.warning("No SymbolParser provided; cannot enrich symbols.")
         return
@@ -112,14 +112,14 @@ def enrich_symbols_with_span(self):
     # Cleanup and logging
 ```
 
-This modular approach will make the `SourceSpanProvider` more organized and easier to extend in the future (e.g., for Variable/Field enrichment).
+This modular approach will make the `SymbolEnricher` more organized and easier to extend in the future (e.g., for Variable/Field enrichment).
 
 ---
 
 ### Considerations
 
-*   **Keying Consistency:** It is paramount that the `make_usr_derived_id` logic used in `ClangParser` for `TypeAliasSpan` and in `SourceSpanProvider` for matching `Symbol` objects is identical to ensure correct matching.
-*   **Filtering External Symbols:** The initial filtering of symbols to be within the project path (already present in `enrich_symbols_with_span`) should apply to `TypeAlias` symbols as well, preventing external aliases from being processed.
+*   **Keying Consistency:** It is paramount that the `make_usr_derived_id` logic used in `ClangParser` for `TypeAliasSpan` and in `SymbolEnricher` for matching `Symbol` objects is identical to ensure correct matching.
+*   **Filtering External Symbols:** The initial filtering of symbols to be within the project path (already present in `enrich_symbols`) should apply to `TypeAlias` symbols as well, preventing external aliases from being processed.
 *   **Memory Management:** Be mindful of memory usage, especially when dealing with large numbers of `TypeAliasSpan` objects and the creation of new `Symbol` objects.
 *   **`Location.from_relative_location`:** This helper function has been added to `clangd_index_yaml_parser.py` to facilitate the creation of `Location` objects from `RelativeLocation` and `file_uri`.
 

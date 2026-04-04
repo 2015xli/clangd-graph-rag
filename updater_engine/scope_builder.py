@@ -14,15 +14,16 @@ from tqdm import tqdm
 
 # Lower-level data structures and utilities
 from clangd_index_yaml_parser import SymbolParser, Symbol
-from compilation_engine import CompilationManager
+from source_parser import CompilationManager
 from neo4j_manager import Neo4jManager
 
 # Ingestion components
-from clangd_symbol_nodes_builder import SymbolProcessor
-from path_processor import PathProcessor, PathManager
-from clangd_call_graph_builder import ClangdCallGraphExtractorWithContainer, ClangdCallGraphExtractorWithoutContainer
-from source_span_provider import SourceSpanProvider
-from include_relation_provider import IncludeRelationProvider
+from graph_ingester import (
+    SymbolProcessor, PathProcessor, PathManager,
+    ClangdCallGraphExtractor,
+    IncludeRelationProvider
+)
+from symbol_enricher import SymbolEnricher
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -43,7 +44,7 @@ Relationships:
   (CLASS_STRUCTURE|DATA_STRUCTURE) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION) # Symbol.parent_id
   (FUNCTION|METHOD) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION)                # Symbol.parent_id
   (CLASS_STRUCTURE) -[:INHERITS]-> (CLASS_STRUCTURE)                                          # SymbolParser.inheritance_relations
-  (FUNCTION|METHOD) -[:CALLS]-> (FUNCTION|METHOD)                                             # ClangdCallGraphExtractor  (static call relations are enriched to symbols through SourceSpanProvider)
+  (FUNCTION|METHOD) -[:CALLS]-> (FUNCTION|METHOD)                                             # ClangdCallGraphExtractor  (static call relations are enriched to symbols through SymbolEnricher)
   (FUNCTION) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE)                                # Symbol.parent_id
   (METHOD) -[:OVERRIDDEN_BY]-> (METHOD)                                                       # SymbolParser.override_relations
   (NAMESPACE) -[:SCOPE_CONTAINS]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|NAMESPACE|VARIABLE) # qualified_namespace_to_id
@@ -72,38 +73,60 @@ class GraphUpdateScopeBuilder:
             logger.info("No dirty files to rebuild. Skipping.")
             return None # Return None to indicate no mini_parser was generated
 
-        # 1. Parse only the dirty source files to get up-to-date span/include info
+        # 1. Initialize CompilationManager
         self.comp_manager = CompilationManager(
             project_path=self.project_path,
             compile_commands_path=self.args.compile_commands
         )
-        self.comp_manager.parse_files(
-            list(dirty_files),
-            self.args.num_parse_workers,
-            new_commit=new_commit,
-            old_commit=old_commit
-        )
+
+        # 1.5 Determine parsing strategy based on Clangd index capabilities
+        if full_symbol_parser.has_container_field:
+            # Metadata-rich index: we only need to parse dirty files for fresh spans
+            logger.info(f"Clangd index has container field. Parsing {len(dirty_files)} dirty files incrementally.")
+            self.comp_manager.parse_files(
+                list(dirty_files),
+                self.args.num_parse_workers,
+                new_commit=new_commit,
+                old_commit=old_commit
+            )
+        else:
+            # IDENTITY DEPENDENCY NOTE:
+            # To expand the dirty scope via the call graph, we need to know "who calls whom."
+            # Older Clangd only provides the coordinates (file:line:col) of a call.
+            # To find the caller, we must map those coordinates to a physical function body.
+            # This requires 'Function Spans' (start/end lines) for the ENTIRE project.
+            
+            logger.warning("Old Clangd index detected (no container field). To maintain call-graph accuracy, "
+                           "a full source parse is required for this incremental update. "
+                           "This will take longer than a normal update but will still use summary caches.")
+            
+            self.comp_manager.parse_folder(
+                self.project_path, 
+                self.args.num_parse_workers, 
+                new_commit=new_commit
+            )
 
         # 2. Enrich the full symbol parser symbols with the fresh spans, and parent/child relationships
-        span_provider = SourceSpanProvider(full_symbol_parser, self.comp_manager)
-        span_provider.enrich_symbols_with_span()
+        symbol_enricher = SymbolEnricher(full_symbol_parser, self.comp_manager)
+        symbol_enricher.enrich_symbols()
 
         # 3. Find the seed symbols
         dirty_file_uris = {f"file://{os.path.abspath(f)}" for f in dirty_files}
-        self.seed_symbol_to_label = {
-            s.id: Symbol.get_node_label(s)
+        self.seed_symbol_ids = {
+            s.id
             for s in full_symbol_parser.symbols.values()
             if (s.definition and s.definition.file_uri in dirty_file_uris) \
                 or (s.declaration and s.declaration.file_uri in dirty_file_uris)
         }
-        # Filter out nodes without a valid label (structural nodes are handled elsewhere)
-        self.seed_symbol_to_label = {sid: label for sid, label in self.seed_symbol_to_label.items() if label}
-        self.seed_symbol_ids = set(self.seed_symbol_to_label.keys())
 
         # 4. Create the "sufficient subset" of symbols        
         self.mini_symbol_parser = self._create_sufficient_subset(full_symbol_parser, self.seed_symbol_ids)
 
         return self.mini_symbol_parser
+
+    def get_seed_symbol_ids(self) -> Set[str]:
+        """Returns the set of symbol IDs that were identified as seeds."""
+        return self.seed_symbol_ids or set()
 
     def rebuild_mini_scope(self):
         mini_symbol_parser = self.mini_symbol_parser
@@ -130,14 +153,10 @@ class GraphUpdateScopeBuilder:
 
         # 5.5 Re-ingest call graph for the mini-scope
         logger.info("Re-ingesting call graph for the dirty scope...")
-        if mini_symbol_parser.has_container_field:
-            extractor = ClangdCallGraphExtractorWithContainer(mini_symbol_parser, args.log_batch_size, args.ingest_batch_size)
-        else:
-            extractor = ClangdCallGraphExtractorWithoutContainer(mini_symbol_parser, args.log_batch_size, args.ingest_batch_size)
-        
+        extractor = ClangdCallGraphExtractor(mini_symbol_parser, args.log_batch_size, args.ingest_batch_size)
+
         caller_to_callees_map = extractor.extract_call_relationships(generate_bidirectional=False)
         extractor.ingest_call_relations(caller_to_callees_map, neo4j_mgr=neo4j_mgr)
-
         logger.info("--- Re-ingestion complete ---")
         return
 
@@ -199,16 +218,8 @@ class GraphUpdateScopeBuilder:
             override_graph[base_id]['overridden'].add(derived_id)
             override_graph[derived_id]['overriding'].add(base_id)
 
-        if full_symbol_parser.has_container_field:
-            extractor = ClangdCallGraphExtractorWithContainer(full_symbol_parser)
-        else:
-            logger.warning("Cannot extract call graph for subset without container field. Call graph expansion will be incomplete.")
-            extractor = None
-
-        if extractor:
-            caller_to_callees, callee_to_callers = extractor.extract_call_relationships(generate_bidirectional=True)
-        else:
-            caller_to_callees, callee_to_callers = defaultdict(set), defaultdict(set)
+        extractor = ClangdCallGraphExtractor(full_symbol_parser)
+        caller_to_callees, callee_to_callers = extractor.extract_call_relationships(generate_bidirectional=True)
 
         # --- 2. Single-Level Expansion ---
         logger.info("Expanding seed set to include direct dependencies...")

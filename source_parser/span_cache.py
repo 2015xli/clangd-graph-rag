@@ -7,6 +7,7 @@ import logging
 import pickle
 import hashlib
 from typing import Optional, List, Dict, Any
+from utils import safe_pickle_load
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -38,20 +39,17 @@ class CacheManager:
         if not os.path.exists(cache_path):
             return None
 
-        try:
-            with open(cache_path, "rb") as f:
-                cached_data = pickle.load(f)
-            
-            # Deep validation
-            if (cached_data.get("new_commit") == new_commit and
-                cached_data.get("old_commit") == old_commit):
-                logger.info(f"Found and validated Git-based cache: {filename}")
-                return cached_data
-            else:
-                logger.warning(f"Cache file {filename} has mismatched full commit hashes. Ignoring.")
-                return None
-        except Exception as e:
-            logger.warning(f"Cache file {cache_path} is corrupted or invalid: {e}. Ignoring.")
+        cached_data = safe_pickle_load(cache_path)
+        if not cached_data:
+            return None
+
+        # Deep validation
+        if (cached_data.get("new_commit") == new_commit and
+            cached_data.get("old_commit") == old_commit):
+            logger.info(f"Found and validated Git-based cache: {filename}")
+            return cached_data
+        else:
+            logger.warning(f"Cache file {filename} has mismatched full commit hashes. Ignoring.")
             return None
 
     def find_and_load_mtime_cache(self, file_list: List[str]) -> Optional[Dict[str, Any]]:
@@ -72,19 +70,16 @@ class CacheManager:
         if not os.path.exists(cache_path):
             return None
 
-        try:
-            with open(cache_path, "rb") as f:
-                cached_data = pickle.load(f)
+        cached_data = safe_pickle_load(cache_path)
+        if not cached_data:
+            return None
 
-            current_file_list_hash = hashlib.sha256("".join(sorted(file_list)).encode()).hexdigest()
-            if cached_data.get("file_list_hash") == current_file_list_hash:
-                logger.info(f"Found and validated mtime-based cache: {filename}")
-                return cached_data
-            else:
-                logger.warning(f"Cache file {filename} has mismatched file list hash. Ignoring.")
-                return None
-        except Exception as e:
-            logger.warning(f"Cache file {cache_path} is corrupted or invalid: {e}. Ignoring.")
+        current_file_list_hash = hashlib.sha256("".join(sorted(file_list)).encode()).hexdigest()
+        if cached_data.get("file_list_hash") == current_file_list_hash:
+            logger.info(f"Found and validated mtime-based cache: {filename}")
+            return cached_data
+        else:
+            logger.warning(f"Cache file {filename} has mismatched file list hash. Ignoring.")
             return None
 
     def save_git_cache(self, data: Dict[str, Any], new_commit: str, old_commit: str = None):

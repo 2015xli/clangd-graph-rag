@@ -4,6 +4,7 @@ from typing import List, Tuple, Set, Dict, Any, Optional
 from collections import defaultdict
 from tqdm import tqdm
 from utils import align_string
+from llm_client import FAKE_SUMMARY_CONTENT
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -238,17 +239,32 @@ class PurgeMixin:
         logger.info(f"  Total guest declaration relationships purged: {total_purged}")
         return total_purged
 
-    def purge_nodes_by_id(self, symbol_to_label: Dict[str, str], dirty_files: Set[str], debug_mode: bool, batch_size: int = 1000):
+    def purge_nodes_by_id(self, symbol_ids: Set[str], all_symbols: Dict[str, Any], dirty_files: Set[str], debug_mode: bool, batch_size: int = 1000):
         """Resolves identity collisions for seed symbols during incremental updates."""
-        if not symbol_to_label:
+        if not symbol_ids:
             return
 
+        from clangd_index_yaml_parser import Symbol
+
         mode_str = "Isolation (DETACH DELETE)" if debug_mode else "Aggregation (Relationship Purge)"
-        logger.info(f"Resolving {len(symbol_to_label)} seed identities using {mode_str}...")
+        logger.info(f"Resolving {len(symbol_ids)} seed identities using {mode_str}...")
         
+        # Group IDs by their Neo4j label for efficient batch processing
         ids_by_label = defaultdict(list)
-        for sid, label in symbol_to_label.items():
-            ids_by_label[label].append(sid)
+        for sid in symbol_ids:
+            sym = all_symbols.get(sid)
+            if sym:
+                label = Symbol.get_node_label(sym)
+                if label:
+                    ids_by_label[label].append(sid)
+                else:
+                    logger.debug(f"Seed symbol {sid} (kind: {sym.kind}) has no valid label mapping; skipping purge.")
+            else:
+                logger.debug(f"Seed symbol ID {sid} not found in full symbols; skipping purge.")
+
+        if not ids_by_label:
+            logger.info("No valid seed labels found to purge.")
+            return
 
         total_affected = 0
         for label, ids in ids_by_label.items():
@@ -277,19 +293,35 @@ class PurgeMixin:
         logger.info(f"  Total {('nodes purged' if debug_mode else 'relationships purged')}: {total_affected}")
 
     def delete_property(self, label: Optional[str], property_key: str, all_labels: bool = False) -> int:
-        """Deletes a property from nodes with a given label, or from all nodes."""
+        """Deletes a property from nodes with a given label, or from all nodes.
+        Supports 'fake_summary' alias to target specific fake content.
+        """
         if not label and not all_labels:
             raise ValueError("Either 'label' must be provided or 'all_labels' must be True.")
         if label and all_labels:
             raise ValueError("Cannot specify both 'label' and 'all_labels'. Choose one.")
 
         target_clause = f"n:{label}" if label else "n"
-        logger.info(f"Deleting property '{property_key}' from nodes matching '{target_clause}'...")
         
-        query = f"MATCH ({target_clause}) WHERE n.{property_key} IS NOT NULL REMOVE n.{property_key} RETURN count(n)"
+        if property_key == "fake_summary":
+            logger.info(f"Targeting 'fake_summary' (values matching: '{FAKE_SUMMARY_CONTENT}') from nodes matching '{target_clause}'...")
+            # We remove both the summary and the embedding for fake summaries
+            query = f"""
+            MATCH ({target_clause}) 
+            WHERE n.summary = $fake_content or n.code_analysis = $fake_content
+            REMOVE n.code_analysis, n.summary, n.summaryEmbedding 
+            RETURN count(n)
+            """
+            params = {"fake_content": FAKE_SUMMARY_CONTENT}
+        else:
+            logger.info(f"Deleting property '{property_key}' from nodes matching '{target_clause}'...")
+            query = f"MATCH ({target_clause}) WHERE n.{property_key} IS NOT NULL REMOVE n.{property_key} RETURN count(n)"
+            params = {}
         
         with self.driver.session() as session:
-            result = session.run(query)
+            result = session.run(query, **params)
             count = result.single()[0] if result.peek() else 0
-            logger.info(f"Removed property '{property_key}' from {count} nodes.")
+            
+            display_name = property_key if property_key != "fake_summary" else "fake summary and embedding"
+            logger.info(f"Removed {display_name} from {count} nodes.")
             return count

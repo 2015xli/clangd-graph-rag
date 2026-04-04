@@ -1,4 +1,4 @@
-# Algorithm Summary: `graph_update_scope_builder.py`
+# Algorithm Summary: `updater_engine/scope_builder.py`
 
 ## 1. Purpose: The "Sufficient Subset" Strategy
 
@@ -21,7 +21,7 @@ This method identifies the set of symbols that need to be re-ingested. It follow
 
 1.  **Local Source Parsing**: It invokes the `CompilationManager` to parse **only the dirty files**. 
     *   **Rationale**: This gathers fresh "ground truth" (function body spans, macro expansions, and include directives) for the changed files with minimal CPU overhead.
-2.  **Full-Index Enrichment**: It uses `SourceSpanProvider` to enrich the **entire `full_symbol_parser`** using the fresh spans.
+2.  **Full-Index Enrichment**: It uses `SymbolEnricher` to enrich the **entire `full_symbol_parser`** using the fresh spans.
     *   **Rationale**: **This is the most critical step for correctness.** A change in a dirty file (like a specialized member function) might provide the identity for a "phony" parent or a macro-generated symbol that resides in a non-dirty header. By enriching the full set, we ensure dependency expansion uses the most accurate semantic view of the entire codebase.
 3.  **Seed Identification**: It identifies all symbols whose `definition` or `declaration` coordinates reside within the dirty file URIs.
 4.  **Subset Expansion**: It delegates to `_create_sufficient_subset()` to perform the 1-hop dependency expansion.

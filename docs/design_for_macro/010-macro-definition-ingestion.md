@@ -41,7 +41,7 @@ class Symbol:
 #### 2.2 Compilation Manager
 *   Updated `CacheManager` to store and restore `macro_spans` in both Git-based and mtime-based cache files.
 
-### 3. The Bridge (`SourceSpanProvider`)
+### 3. The Bridge (`SymbolEnricher`)
 
 The provider injects macros into the `SymbolParser` so they can be treated as first-class symbols.
 *   **Method**: `_discover_macros()`

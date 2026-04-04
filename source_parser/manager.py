@@ -16,7 +16,7 @@ from typing import Optional, List, Set, Tuple, Dict, Any
 
 from git_manager import get_git_repo, resolve_commit_ref_to_hash
 from utils import FileExtensions
-from .cache import CacheManager
+from .span_cache import CacheManager
 from .orchestrator import ParallelOrchestrator
 from .types import SourceSpan, MacroSpan, TypeAliasSpan, IncludeRelation
 

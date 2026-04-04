@@ -17,7 +17,7 @@ from multiprocessing import get_context
 from tqdm import tqdm
 
 from memory_debugger import Debugger
-from utils import align_string # Import Debugger
+from utils import align_string, safe_pickle_load # Import Debugger
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -211,9 +211,11 @@ class SymbolParser:
 
     def _load_cache_file(self, cache_path: str):
         logger.info(f"Loading parsed symbols from cache: {cache_path}")
+        cache_data = safe_pickle_load(cache_path)
+        if not cache_data:
+            raise EOFError(f"Failed to load cache from {cache_path}")
+
         try:
-            with open(cache_path, 'rb') as f:
-                cache_data = pickle.load(f)
             self.symbols = cache_data['symbols']
             self.functions = cache_data['functions']
             self.has_container_field = cache_data['has_container_field']
@@ -221,8 +223,8 @@ class SymbolParser:
             self.inheritance_relations = cache_data.get('inheritance_relations', []) # Use .get for backward compatibility
             self.override_relations = cache_data.get('override_relations', [])       # Use .get for backward compatibility
             logger.info("Successfully loaded symbols from cache.")
-        except (pickle.UnpicklingError, EOFError, KeyError) as e:
-            logger.error(f"Cache file {cache_path} is corrupted or invalid: {e}. Please delete it and re-run.", exc_info=True)
+        except KeyError as e:
+            logger.error(f"Cache file {cache_path} is missing required key: {e}. Please delete it and re-run.", exc_info=True)
             raise
 
     def _dump_cache_file(self, cache_path: str):

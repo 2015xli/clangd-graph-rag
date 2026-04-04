@@ -126,6 +126,8 @@ class LlmCacheManager:
 
 # --- LLM Clients ---
 
+FAKE_SUMMARY_CONTENT = "This part implements important functionalities."
+
 class LlmClient:
     """
     Base class for LLM clients. Manages a singleton background event loop 
@@ -261,16 +263,17 @@ class FakeLlmClient(LlmClient):
         self.is_local = True 
         super().__init__()
 
-    # WARNING: If you want to experiment with the llm cache for fake client, you should disable this function.
+    # NOTE: If you want to experiment with the llm cache for fake client, you can simply rename this function,
+    # so that it does not override the default `generate_summary` method in the parent class, which will use the cache.
     def generate_summary(self, prompt: str) -> str:
         """Simulate a sync delay and return static text."""
         time.sleep(0.01) 
-        return "This part implements important functionalities."
+        return FAKE_SUMMARY_CONTENT
 
     async def _async_generate(self, prompt: str) -> str:
         """Simulate an async delay and return static text."""
         # await asyncio.sleep(0.01) 
-        return "This part implements important functionalities."
+        return FAKE_SUMMARY_CONTENT
 
 
 def get_llm_client(api_name: str) -> LlmClient:
@@ -283,6 +286,39 @@ def get_llm_client(api_name: str) -> LlmClient:
         return LiteLlmClient(api_name)
     except ValueError:
          raise ValueError(f"Unknown API: {api_name}. Supported APIs are: openai, deepseek, ollama, fake.")
+
+
+def setup_llm_client(args, project_path: str) -> LlmClient:
+    """
+    Factory + Configurator that returns a fully initialized LLM client.
+    Handles worker thread launching and system-level (L2) caching.
+    """
+    client = get_llm_client(args.llm_api)
+    
+    # 1. Handle Workers (Decide concurrency based on whether client is local or remote)
+    num_workers = args.num_local_workers if client.is_local else args.num_remote_workers
+    client.launch_worker_thread(num_workers)
+    
+    # 2. Handle L2 (System) Cache
+    if not getattr(args, 'no_llm_cache', False):
+        cache_folder = getattr(args, 'llm_cache_folder', None)
+        if not cache_folder:
+            cache_folder = os.path.join(project_path, ".cache", "llm_cache")
+        
+        cache_shards = getattr(args, 'llm_cache_shards', None)
+        if not cache_shards:
+            # Match shards to local workers for performance/concurrency
+            cache_shards = args.num_local_workers
+
+        llm_cache_manager = LlmCacheManager(
+            folder=cache_folder, 
+            shards=cache_shards, 
+            size_limit=getattr(args, 'llm_cache_size', "2GB"), 
+            reset=getattr(args, 'llm_cache_reset', False)
+        )
+        client.enable_system_cache(llm_cache_manager)
+        
+    return client
 
 
 # --- Embedding Clients ---

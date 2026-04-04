@@ -1,7 +1,7 @@
 # Comprehensive Analysis: Symbol Collisions and Relationship Discrepancies in Incremental Updates
 
 ## 1. The Milestone and the Mystery
-After refactoring the `CompilationParser` and `SourceSpanProvider` to use **USR-derived IDs** (aligning the parser's "sensing" layer with the `clangd` index's identity), the graph integrity reached a new milestone. Orphan nodes—previously a significant issue—dropped to nearly zero even in massive projects like the Linux kernel and LLVM.
+After refactoring the `CompilationParser` and `SymbolEnricher` to use **USR-derived IDs** (aligning the parser's "sensing" layer with the `clangd` index's identity), the graph integrity reached a new milestone. Orphan nodes—previously a significant issue—dropped to nearly zero even in massive projects like the Linux kernel and LLVM.
 
 However, a subtle discrepancy was discovered during a Tag 1 -> Tag 4 incremental update of the `Llama` project:
 *   **Total Node Count**: Identical to a full build of Tag 4.

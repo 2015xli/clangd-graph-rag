@@ -21,15 +21,18 @@ import math
 
 import input_params
 # Import processors and managers from the library scripts
-from clangd_symbol_nodes_builder import SymbolProcessor
-from path_processor import PathProcessor, PathManager
-from clangd_call_graph_builder import ClangdCallGraphExtractorWithContainer, ClangdCallGraphExtractorWithoutContainer
+from graph_ingester import (
+    SymbolProcessor, PathProcessor, PathManager, 
+    ClangdCallGraphExtractor, 
+    IncludeRelationProvider
+)
 from clangd_index_yaml_parser import SymbolParser
 from neo4j_manager import Neo4jManager
 from memory_debugger import Debugger
 from git_manager import GitManager
-from compilation_engine import CompilationManager
-from include_relation_provider import IncludeRelationProvider
+from source_parser import CompilationManager
+from summary_driver import FullSummarizer
+        
 
 from log_manager import init_logging
 init_logging()
@@ -102,13 +105,13 @@ class GraphBuilder:
 
     def _pass_2_enrich_symbols(self):
         logger.info("\n--- Starting Phase 2: Enriching Symbols with Spans ---")
-        from source_span_provider import SourceSpanProvider
+        from symbol_enricher import SymbolEnricher
         
-        span_provider = SourceSpanProvider(self.symbol_parser, self.compilation_manager)
-        span_provider.enrich_symbols_with_span() # Explicitly call the worker method
+        symbol_enricher = SymbolEnricher(self.symbol_parser, self.compilation_manager)
+        symbol_enricher.enrich_symbols() # Explicitly call the worker method
         
-        logger.info(f"Enriched {span_provider.get_matched_count()} symbols with body_location.")
-        del span_provider
+        logger.info(f"Enriched {symbol_enricher.get_matched_count()} symbols with body_location.")
+        del symbol_enricher
         gc.collect()
         logger.info("--- Finished Phase 2 ---")
 
@@ -160,15 +163,7 @@ class GraphBuilder:
 
     def _pass_6_ingest_call_graph(self, neo4j_mgr):
         logger.info("\n--- Starting Phase 6: Ingesting Call Graph ---")
-        if self.symbol_parser.has_container_field:
-            extractor = ClangdCallGraphExtractorWithContainer(self.symbol_parser, self.args.log_batch_size, self.args.ingest_batch_size)
-            logger.info("Using ClangdCallGraphExtractorWithContainer (new format detected).")
-        else:
-            logger.info("Using ClangdCallGraphExtractorWithoutContainer (old format detected).")
-            # The symbol_parser object has already been enriched with body_location data in Pass 2.
-            # The extractor will read this data directly from the symbol objects.
-            extractor = ClangdCallGraphExtractorWithoutContainer(
-                self.symbol_parser, self.args.log_batch_size, self.args.ingest_batch_size)
+        extractor = ClangdCallGraphExtractor(self.symbol_parser, self.args.log_batch_size, self.args.ingest_batch_size)
         
         call_relations = extractor.extract_call_relationships()
         extractor.ingest_call_relations(call_relations, neo4j_mgr=neo4j_mgr)
@@ -186,9 +181,7 @@ class GraphBuilder:
             return
 
         logger.info("\n--- Starting Phase 8: Generating Summaries and Embeddings ---")
-        from code_graph_rag_generator import RagGenerator
-        
-        rag_generator = RagGenerator(
+        rag_generator = FullSummarizer(
             neo4j_mgr=neo4j_mgr,
             project_path=self.args.project_path,
             args=self.args
@@ -202,10 +195,10 @@ class GraphBuilder:
         neo4j_mgr.add_agent_facing_schema()
         logger.info("--- Finished Phase 9 ---")
 
-import input_params
-from pathlib import Path
 
 def main():
+    import input_params
+    from pathlib import Path
     """Parses arguments and runs the graph builder."""
     parser = argparse.ArgumentParser(description='Build a code graph from a clangd index.')
     

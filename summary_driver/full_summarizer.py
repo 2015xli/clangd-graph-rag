@@ -4,7 +4,7 @@ This script generates summaries and embeddings for nodes in a code graph.
 
 It connects to an existing Neo4j database populated by the ingestion pipeline
 and executes a multi-pass process to enrich the graph with AI-generated
-summaries and vector embeddings, as outlined in docs/code_rag_generation_plan.md.
+summaries and vector embeddings.
 """
 
 import argparse
@@ -12,54 +12,75 @@ import logging
 import re
 
 import input_params
-from rag_orchestrator import RagOrchestrator
+from summary_engine import SummarizationEngine
 from neo4j_manager import Neo4jManager
 
+# Set up logging for this module
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-_SPECIAL_PATTERN = re.compile(r"<\|[^\|]+?\|> ")
+class FullSummarizer:
+    """Orchestrates the full-build generation of RAG data using the SummarizationEngine."""
 
-def sanitize_special_tokens(text: str) -> str:
-    """Break up special tokens so the model won't treat them as control tokens."""
-    return _SPECIAL_PATTERN.sub(lambda m: f"< |{m.group(0)[2:-2]}| >", text)
-
-class RagGenerator(RagOrchestrator):
-    """Orchestrates the full-build generation of RAG data."""
+    def __init__(self, neo4j_mgr: Neo4jManager, project_path: str, args: argparse.Namespace):
+        self.neo4j_mgr = neo4j_mgr
+        self.project_path = project_path
+        self.args = args 
+        
+        # Initialize the Summarization Engine via composition
+        self.engine = SummarizationEngine(
+            neo4j_mgr=self.neo4j_mgr,
+            project_path=self.project_path,
+            args=self.args
+        )
 
     def summarize_code_graph(self):
         """Main orchestrator method to run all summarization passes for a full build."""
-        self.summary_cache_manager.load()
+        # 0. Initialize the run (loads cache and cleans up faked content if needed)
+        self.engine.initialize_run()
         
+        # 1. Individual function analysis (Pass 1)
         self.analyze_functions_individually()
-        self.summary_cache_manager.save(mode="builder", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
+        self.engine.summary_cache_manager.save(mode="builder", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
 
+        # 2. Context-aware function summarization (Pass 2)
         self.summarize_functions_with_context()
-        self.summary_cache_manager.save(mode="builder", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
+        self.engine.summary_cache_manager.save(mode="builder", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
 
+        # 3. Class structure summarization (Pass 3)
         self.summarize_class_structures()
-        self.summary_cache_manager.save(mode="builder", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
+        self.engine.summary_cache_manager.save(mode="builder", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
 
+        # 4. Namespace summarization (Pass 4)
         self.summarize_namespaces()
-        self.summary_cache_manager.save(mode="builder", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
+        self.engine.summary_cache_manager.save(mode="builder", neo4j_mgr=self.neo4j_mgr, is_intermediate=True)
 
+        # 5-7. Hierarchical roll-ups (Files, Folders, Project)
         logging.info("--- Starting File and Folder Summarization ---")
         self._summarize_all_files()
         self._summarize_all_folders()
-        self._summarize_project()
+        self.engine.summarize_project()
         logging.info("--- Finished File and Folder Summarization ---")
-        # Final save before embeddings
-        self.summary_cache_manager.save(mode="builder", neo4j_mgr=self.neo4j_mgr)
+        
+        # Final save of the summary cache
+        self.engine.summary_cache_manager.save(mode="builder", neo4j_mgr=self.neo4j_mgr)
 
-        logging.info(f"Total number of summaries processed: {self.n_restored + self.n_generated + self.n_unchanged + self.n_nochildren + self.n_failed}")
-        logging.info(f"  Restored: {self.n_restored}, Generated: {self.n_generated}, Unchanged: {self.n_unchanged}, No children: {self.n_nochildren}, Failed: {self.n_failed}")
+        total_processed = (self.engine.n_restored + self.engine.n_generated + 
+                           self.engine.n_unchanged + self.engine.n_nochildren + 
+                           self.engine.n_failed)
+        
+        logging.info(f"Total number of summaries processed: {total_processed}")
+        logging.info(f"  Restored: {self.engine.n_restored}, Generated: {self.engine.n_generated}, "
+                     f"Unchanged: {self.engine.n_unchanged}, No children: {self.engine.n_nochildren}, "
+                     f"Failed: {self.engine.n_failed}")
 
-        self.generate_embeddings()
+        # 8. Embedding generation
+        self.engine.generate_embeddings()
 
 
-    # --- Pass 1 Methods ---
+    # --- Pass 1: Individual Code Analysis ---
     def analyze_functions_individually(self):
-        """PASS 1: Generates a code-only analysis for all functions and methods in the graph."""
+        """Generates a code-only analysis for all functions and methods in the graph."""
         logging.info("\n--- Starting Pass 1: Analyzing Functions & Methods Individually ---")
         
         query = "MATCH (n) WHERE (n:FUNCTION OR n:METHOD) AND n.body_location IS NOT NULL RETURN n.id AS id"
@@ -70,12 +91,12 @@ class RagGenerator(RagOrchestrator):
             logging.warning("No functions or methods with body_location found. Exiting Pass 1.")
             return
         
-        self._analyze_functions_individually_with_ids(all_function_ids)
+        self.engine.analyze_functions_individually_with_ids(all_function_ids)
         logging.info("--- Finished Pass 1 ---")
 
-    # --- Pass 2 Methods ---
+    # --- Pass 2: Contextual Function Summarization ---
     def summarize_functions_with_context(self):
-        """PASS 2: Generates a final, context-aware summary for all functions and methods."""
+        """Generates a final, context-aware summary for all functions and methods."""
         logging.info("--- Starting Pass 2: Summarizing Functions & Methods With Context ---")
         
         query = """
@@ -90,16 +111,14 @@ class RagGenerator(RagOrchestrator):
         
         all_function_ids = [r['id'] for r in results]
         
-        updated_ids = self._summarize_functions_with_context_with_ids(all_function_ids)
+        updated_ids = self.engine.summarize_functions_with_context_with_ids(all_function_ids)
         
         logging.info(f"Pass 2 complete. Updated contextual summaries for {len(updated_ids)} functions.")
         logging.info("--- Finished Pass 2 ---")
 
-    # --- Pass 3 Methods: Class Summaries ---
+    # --- Pass 3: Class Summaries ---
     def summarize_class_structures(self):
-        """
-        PASS 3: Generates summaries for all class structures.
-        """
+        """Generates summaries for all class structures."""
         logging.info("\n--- Starting Pass 3: Summarizing Class Structures ---")
         
         query = "MATCH (c:CLASS_STRUCTURE) RETURN c.id AS id"
@@ -110,12 +129,12 @@ class RagGenerator(RagOrchestrator):
             logging.info("No class structures found to summarize.")
             return
 
-        self._summarize_classes_with_ids(all_class_ids)
+        self.engine.summarize_classes_with_ids(all_class_ids)
         logging.info("--- Finished Pass 3 ---")
 
-    # --- Pass 4 Methods: Namespace Summaries ---
+    # --- Pass 4: Namespace Summaries ---
     def summarize_namespaces(self):
-        """PASS 4: Generates a summary for all namespace nodes in the graph."""
+        """Generates a summary for all namespace nodes in the graph."""
         logging.info("\n--- Starting Pass 4: Summarizing Namespaces ---")
 
         query = "MATCH (n:NAMESPACE) RETURN n.id as id"
@@ -126,12 +145,10 @@ class RagGenerator(RagOrchestrator):
             logging.info("No namespaces require summarization.")
             return
 
-        self._summarize_namespaces_with_ids(all_namespace_ids)
+        self.engine.summarize_namespaces_with_ids(all_namespace_ids)
         logging.info("--- Finished Pass 4 ---")
 
-    
-
-    # --- Pass 5 Methods ---
+    # --- Pass 5: File Summaries ---
     def _summarize_all_files(self):
         logging.info("\n--- Starting Pass 5: Summarizing All Files ---")
         query = "MATCH (f:FILE) RETURN f.path AS path"
@@ -140,9 +157,9 @@ class RagGenerator(RagOrchestrator):
             logging.info("No files found to summarize.")
             return
         file_paths = [r['path'] for r in files_to_process]
-        self._summarize_files_with_paths(file_paths)
+        self.engine.summarize_files_with_paths(file_paths)
 
-    # --- Pass 6 Methods ---
+    # --- Pass 6: Folder Summaries ---
     def _summarize_all_folders(self):
         logging.info("\n--- Starting Pass 6: Summarizing All Folders (bottom-up) ---")
         query = "MATCH (f:FOLDER) RETURN f.path as path"
@@ -151,7 +168,7 @@ class RagGenerator(RagOrchestrator):
             logging.info("No folders found to summarize.")
             return
         folder_paths = [r['path'] for r in folders_to_process]
-        self._summarize_folders_with_paths(folder_paths)
+        self.engine.summarize_folders_with_paths(folder_paths)
 
 def main():
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -171,7 +188,7 @@ def main():
             if not neo4j_mgr.check_connection(): return 1
             if not neo4j_mgr.verify_project_path(args.project_path): return 1
             
-            generator = RagGenerator(
+            generator = FullSummarizer(
                 neo4j_mgr=neo4j_mgr, 
                 project_path=args.project_path, 
                 args=args

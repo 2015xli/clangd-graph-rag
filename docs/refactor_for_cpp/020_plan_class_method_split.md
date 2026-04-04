@@ -74,5 +74,5 @@ The `SymbolProcessor` class will need significant changes to its dispatch logic.
 
 ## 5. Missing Considerations (Future Work)
 
-*   **`SourceSpanProvider` Log Message**: The `SourceSpanProvider` currently logs "Matched and enriched X functions with body spans." This message will become inaccurate as it now enriches data structures and methods too. This is a minor point but worth noting for a later cleanup.
+*   **`SymbolEnricher` Log Message**: The `SymbolEnricher` currently logs "Matched and enriched X functions with body spans." This message will become inaccurate as it now enriches data structures and methods too. This is a minor point but worth noting for a later cleanup.
 *   **`code_graph_rag_generator.py`**: This file will eventually need to be updated to generate RAG data for `METHOD` and `CLASS_STRUCTURE` nodes. The current queries likely only target `FUNCTION` and `DATA_STRUCTURE`. This is a significant downstream impact that will be addressed in a later step.

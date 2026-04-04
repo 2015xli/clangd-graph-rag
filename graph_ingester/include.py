@@ -8,11 +8,13 @@ during an incremental update.
 
 import logging
 import os
-from typing import List, Set, Dict, Tuple
+import argparse
+from typing import List, Set, Dict, Tuple, Optional
 from collections import defaultdict, deque
 
 from neo4j_manager import Neo4jManager
-from compilation_engine import CompilationManager, IncludeRelation
+from source_parser import CompilationManager, IncludeRelation
+from log_manager import init_logging
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -20,12 +22,12 @@ logger.setLevel(logging.DEBUG)
 class IncludeRelationProvider:
     """Manages the `:INCLUDES` relationships in the Neo4j graph."""
 
-    def __init__(self, neo4j_manager: Neo4jManager, project_path: str):
+    def __init__(self, neo4j_manager: Optional[Neo4jManager], project_path: str):
         """
         Initializes the provider with a Neo4jManager instance.
 
         Args:
-            neo4j_manager: An active Neo4jManager instance.
+            neo4j_manager: An active Neo4jManager instance (optional for memory-only analysis).
             project_path: The absolute path to the root of the project.
         """
         self.neo4j_manager = neo4j_manager
@@ -65,14 +67,17 @@ class IncludeRelationProvider:
             return
 
         logger.info(f"Ingesting {len(relations_list)} internal include relations.")
-        self.neo4j_manager.ingest_include_relations(relations_list, batch_size=batch_size)
+        if self.neo4j_manager:
+            self.neo4j_manager.ingest_include_relations(relations_list, batch_size=batch_size)
+        else:
+            logger.error("Neo4jManager not provided; cannot ingest include relations.")
 
     def get_impacted_files_from_graph(self, headers: List[str]) -> Set[str]:
         """
         Queries the graph with relative paths to find all source files that
         transitively include the given headers, and returns them as absolute paths.
         """
-        if not headers:
+        if not headers or not self.neo4j_manager:
             return set()
 
         logger.info(f"Querying graph for files impacted by {len(headers)} changed header(s)...")
@@ -132,3 +137,43 @@ class IncludeRelationProvider:
             impact_results[header_path] = source_files
         
         return impact_results
+
+def main():
+    """Main function for standalone impact analysis testing."""
+    init_logging()
+    parser = argparse.ArgumentParser(description='Analyze header impact using include relations.')
+    parser.add_argument('project_path', type=str, help='Path to the project root.')
+    parser.add_argument('headers', nargs='+', help='List of header files to check impact for.')
+    parser.add_argument('--compile-commands', help='Path to the compile_commands.json file.')
+    parser.add_argument('--num-workers', type=int, default=4, help='Number of parallel workers for parsing.')
+
+    args = parser.parse_args()
+    project_path = os.path.abspath(args.project_path)
+
+    # Note: This standalone tool only tests the in-memory analysis as it's for impact debugging.
+    # For graph-based analysis, use the graph updater or a custom script.
+    compilation_manager = CompilationManager(
+        project_path=project_path,
+        compile_commands_path=args.compile_commands
+    )
+    
+    # We parse the whole project folder to get all include relations.
+    compilation_manager.parse_folder(project_path, args.num_workers)
+    
+    provider = IncludeRelationProvider(None, project_path) # No Neo4jManager needed for memory analysis
+    impact_results = provider.analyze_impact_from_memory(
+        compilation_manager.get_include_relations(),
+        [os.path.abspath(h) for h in args.headers]
+    )
+
+    print("\nImpact Analysis Results:")
+    for header, impacted in impact_results.items():
+        print(f"Header: {header}")
+        if impacted:
+            for f in impacted:
+                print(f"  - {f}")
+        else:
+            print("  - No impacted source files found.")
+
+if __name__ == "__main__":
+    main()

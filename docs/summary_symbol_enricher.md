@@ -1,8 +1,8 @@
-# Algorithm Summary: `source_span_provider.py`
+# Algorithm Summary: `symbol_enricher.py`
 
 ## 1. Role in the Pipeline: The Semantic Bridge
 
-The `SourceSpanProvider` acts as the critical **adapter** and **enricher** that bridges the gap between two primary data sources:
+The `SymbolEnricher` acts as the critical **adapter** and **enricher** that bridges the gap between two primary data sources:
 1.  **High-Level Index (SymbolParser)**: Contains the "what" (Symbols, names, kinds, and references) derived from the Clangd index. This data is semantically rich but physically sparse.
 2.  **Low-Level Ground Truth (CompilationManager)**: Contains the "where" (SourceSpans, physical coordinates, and AST-level ownership) derived from direct AST parsing.
 
@@ -13,7 +13,7 @@ Its purpose is to attach implementation reality to index entries. This enrichmen
 
 ---
 
-## 2. Orchestration Logic: `enrich_symbols_with_span`
+## 2. Orchestration Logic: `enrich_symbols`
 
 The enrichment process is organized as a **multi-tier state machine**. Instead of a single pass, it uses progressive refinement to resolve identities and hierarchies.
 
@@ -24,7 +24,7 @@ The provider maintains several key state structures during its execution:
 *   **`sym_source_span_parent` (Propagation Queue)**: Temporary storage for parent-child relationships found during matching that cannot yet be assigned (e.g., if the parent hasn't been anchored to a canonical ID yet).
 
 ### 2.2. The High-Level Flow Logic
-The `enrich_symbols_with_span` method executes the following deterministic sequence:
+The `enrich_symbols` method executes the following deterministic sequence:
 
 1.  **Index-Only Pass**: Preliminary parent assignment using only the metadata provided by Clangd (References and Scopes).
 2.  **Implementation Matching (Tiers 1 & 2)**: Authoritative matching using direct IDs and source coordinates.
