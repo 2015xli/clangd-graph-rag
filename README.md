@@ -31,7 +31,7 @@ The project provides the graph RAG building and updating tools, along with an ex
 ### Current Schema
 Here is a simplified version of the [current neo4j schema](neo4j_simplified_schema.txt) for AI agent to use.
 
-![Current Schema](docs/neo4j_current_schema.png)
+![Current Schema](docs/reference/neo4j_current_schema.png)
 
 ---
 ### A benchmark: The Linux Kernel
