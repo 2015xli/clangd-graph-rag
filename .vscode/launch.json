@@ -30,7 +30,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "graph_builder.py",
-            "args": ["~/Public/llvm/build-21.1.2/llvm-21.1.2-index-with-partial-specialization.yaml", "~/Public/llvm/", "--compile-commands", "~/Public/llvm/llvm-project/compile_commands.json", "--num-parse-workers=1"]
+            "args": ["~/Public/llvm/build-21.1.2/llvm-21.1.2-index-with-partial-specialization.yaml", "~/Public/llvm/", "--compile-commands", "~/Public/llvm/llvm-project/compile_commands.json", "--num-parse-workers=10"]
         },
         {
             "name": "Python Debugger: llvm - with summary",

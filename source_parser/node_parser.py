@@ -74,9 +74,9 @@ class NodeParserMixin:
                     child_usr = child.get_usr()
                     if child_usr:
                         member_ids.append(hash_usr_to_id(child_usr))
-
-            if node.kind.name != "CLASS_TEMPLATE":
-                primary_template_id, template_specialization_args, self_is_synthetic = self._extract_template_metadata(node)
+            # A CLASS_TEMPLATE can also be a specialization of another primary template, when it is a nested template of a specialized outer template
+            # See doc at docs/reference/primary-template-relationships-in-Clang-AST.md for details.
+            primary_template_id, template_specialization_args, self_is_synthetic = self._extract_template_metadata(node)
 
         span = SourceSpan(
             name=sys.intern(node_name),
@@ -102,8 +102,11 @@ class NodeParserMixin:
         self_is_synthetic = False
         template_cursor = clang.cindex.conf.lib.clang_getSpecializedCursorTemplate(node)
         if template_cursor and not template_cursor.is_null(): 
-            # if template_cursor.kind != clang.cindex.CursorKind.NO_DECL_FOUND:
-            assert(template_cursor.kind == clang.cindex.CursorKind.CLASS_TEMPLATE)
+            # template can be CLASS_TEMPLATE, CLASS_TEMPLATE_PARTIAL_SPECIALIZATION, or CLASS_DECL 
+            # CLASS_DECL is because the fully defined class (CLASS_DECL) can be a nested class of a class template, just like a member function. 
+            # When the nested class is specialized, its primary template is that nested class, whose cursor kind is CLASS_DECL.
+            assert (template_cursor.kind.name in NODE_KIND_CLASSES), \
+                    f"Unexpected template cursor kind: {template_cursor.kind}"
             template_usr = template_cursor.get_usr()
             if template_usr:
                 primary_template_id = hash_usr_to_id(template_usr)
@@ -117,11 +120,11 @@ class NodeParserMixin:
 
                 node_start_line, node_start_col = node.extent.start.line, node.extent.start.column
                 node_end_line, node_end_col = node.extent.end.line, node.extent.end.column
-
-                loc_file = template_cursor.location.file
-                file_uri = f"file://{os.path.abspath(loc_file.name)}"
-                template_location = Location(file_uri, template_start_line, template_start_col, template_end_line, template_end_col)
-                node_location = Location(file_uri, node_start_line, node_start_col, node_end_line, node_end_col)
+                # The template must have a location file.
+                file_uri = f"file://{os.path.abspath(template_cursor.location.file.name)}"
+                
+                template_location = (template_start_line, template_start_col, template_end_line, template_end_col, file_uri)
+                node_location = (node_start_line, node_start_col, node_end_line, node_end_col, file_uri)
                 if template_location == node_location:
                     self_is_synthetic = True
             
