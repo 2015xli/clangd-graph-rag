@@ -28,6 +28,9 @@ class MatcherMixin:
                 sym.body_location = source_span.body_location
                 sym.original_name = source_span.original_name
                 sym.expanded_from_id = source_span.expanded_from_id
+                sym.primary_template_id = source_span.primary_template_id
+                sym.template_specialization_args = source_span.template_specialization_args or ""
+                sym.is_synthetic = source_span.is_synthetic
                 
                 # ANCHORING: Move the symbol to the actual implementation file.
                 # This ensures the 'path' property in the graph is consistent with 'body_location'.
@@ -93,6 +96,9 @@ class MatcherMixin:
                 sym.body_location = source_span.body_location
                 sym.original_name = source_span.original_name
                 sym.expanded_from_id = source_span.expanded_from_id
+                sym.primary_template_id = source_span.primary_template_id
+                sym.template_specialization_args = source_span.template_specialization_args or ""
+                sym.is_synthetic = source_span.is_synthetic
                 
                 # Record the mapping for hierarchy propagation.
                 self.synthetic_id_to_index_id[source_span.id] = sym_id
@@ -172,6 +178,9 @@ class MatcherMixin:
                 sym.body_location = source_span.body_location
                 sym.original_name = source_span.original_name
                 sym.expanded_from_id = source_span.expanded_from_id
+                sym.primary_template_id = source_span.primary_template_id
+                sym.template_specialization_args = source_span.template_specialization_args or ""
+                sym.is_synthetic = source_span.is_synthetic
                 
                 # ANCHORING: Move definition to implemention file.
                 sym.definition = Location.from_relative_location(source_span.name_location, file_uri)

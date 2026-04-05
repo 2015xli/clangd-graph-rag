@@ -103,6 +103,15 @@ class SymbolProcessor:
         elif node_label == "MACRO":
             symbol_data["is_function_like"] = sym.is_macro_function_like
             symbol_data["macro_definition"] = sym.macro_definition
+        elif node_label == "CLASS_STRUCTURE":
+            if sym.signature:
+                symbol_data["template_params"] = sym.signature
+            if sym.template_specialization_args:
+                symbol_data["specialization_args"] = sym.template_specialization_args
+            if sym.primary_template_id:
+                symbol_data["primary_template_id"] = sym.primary_template_id
+            if sym.is_synthetic:
+                symbol_data["is_synthetic"] = sym.is_synthetic
         elif node_label in ("FUNCTION", "METHOD"):
             symbol_data.update({"signature": sym.signature, "return_type": sym.return_type, "type": sym.type})
         elif node_label == "FIELD":
@@ -167,9 +176,41 @@ class SymbolProcessor:
         self._ingest_override_relationships(symbol_parser.override_relations, neo4j_mgr)
         self._ingest_alias_of_relationships(processed_symbols.get('TYPE_ALIAS', []), neo4j_mgr)
         self._ingest_expanded_from_relationships(processed_symbols, neo4j_mgr)
+        self._ingest_specialization_relationships(processed_symbols, neo4j_mgr)
 
         del processed_symbols
         gc.collect()
+
+    def _ingest_specialization_relationships(self, processed_symbols: Dict[str, List[Dict]], neo4j_mgr: Neo4jManager):
+        """Ingests SPECIALIZATION_OF relationships for template specializations."""
+        all_specialization_data = []
+        # We only care about specializations for structural nodes (Classes/Structs) for now.
+        for label in ("CLASS_STRUCTURE", "DATA_STRUCTURE"):
+            for data in processed_symbols.get(label, []):
+                if 'primary_template_id' in data:
+                    all_specialization_data.append({
+                        "id": data['id'],
+                        "primary_template_id": data['primary_template_id']
+                    })
+        
+        if not all_specialization_data:
+            return
+
+        logger.info(f"Creating {len(all_specialization_data)} SPECIALIZATION_OF relationships...")
+        query = """
+        UNWIND $data AS d
+        MATCH (spec {id: d.id}) 
+        WHERE spec:CLASS_STRUCTURE|DATA_STRUCTURE
+        MATCH (blue {id: d.primary_template_id})
+        WHERE blue:CLASS_STRUCTURE|DATA_STRUCTURE
+        MERGE (spec)-[:SPECIALIZATION_OF]->(blue)
+        """
+        total_rels_created = 0
+        for i in tqdm(range(0, len(all_specialization_data), self.ingest_batch_size), desc=align_string("Ingesting SPECIALIZATION_OF")):
+            batch = all_specialization_data[i:i + self.ingest_batch_size]
+            counters = neo4j_mgr.execute_autocommit_query(query, {"data": batch})
+            total_rels_created += counters.relationships_created
+        logger.info(f"  Total SPECIALIZATION_OF relationships created: {total_rels_created}")
 
     def _ingest_parental_relationships(self, processed_symbols: Dict[str, List[Dict]], neo4j_mgr: Neo4jManager):
         """Groups and ingests SCOPE_CONTAINS and HAS_NESTED relationships."""
@@ -224,7 +265,7 @@ class SymbolProcessor:
         if label == "TYPE_ALIAS":
             keys_to_remove += ['aliased_type_id'] #'aliased_type_kind' and 'aliased_canonical_spelling' are kept for quick reference
         else:
-            keys_to_remove += ['namespace_id', 'file_path', 'expanded_from_id']       
+            keys_to_remove += ['namespace_id', 'file_path', 'expanded_from_id', 'primary_template_id']       
 
         keys_to_remove = str(keys_to_remove)
         query = f"""

@@ -22,6 +22,9 @@ class SourceSpan:
     original_name: Optional[str] = None
     expanded_from_id: Optional[str] = None
     member_ids: List[str] = field(default_factory=list)
+    primary_template_id: Optional[str] = None
+    template_specialization_args: Optional[str] = None
+    is_synthetic: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> 'SourceSpan':
@@ -35,7 +38,10 @@ class SourceSpan:
             parent_id=data['ParentId'],
             original_name=data.get('OriginalName'),
             expanded_from_id=data.get('ExpandedFromId'),
-            member_ids=data.get('MemberIds', [])
+            member_ids=data.get('MemberIds', []),
+            primary_template_id=data.get('PrimaryTemplateId'),
+            template_specialization_args=data.get('TemplateSpecializationArgs'),
+            is_synthetic=data.get('IsSynthetic', False)
         )
 
 @dataclass(frozen=True, slots=True)

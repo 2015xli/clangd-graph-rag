@@ -9,7 +9,7 @@ import clang.cindex
 from urllib.parse import urlparse, unquote
 from typing import Optional, Tuple, Protocol, Dict, List, Any
 
-from symbol_parser import RelativeLocation
+from symbol_parser import RelativeLocation, Location
 from utils import hash_usr_to_id, make_symbol_key, make_synthetic_id
 from .types import *
 
@@ -26,10 +26,10 @@ class ClangWorkerInterface(Protocol):
     lang: str
     project_path: str
 
-    def _get_parent_id(self, node: clang.cindex.Cursor) -> Optional[str]: ...
     def _convert_node_kind_to_index_kind(self, node: clang.cindex.Cursor) -> str: ...
+    def _get_fully_qualified_scope(self, node: clang.cindex.Cursor) -> str: ...
     def _get_symbol_name_location(self, node: clang.cindex.Cursor) -> Tuple[int, int]: ...
-    def _get_source_text_for_extent(self, extent: Any, file_path: str) -> str: ...
+    def _get_source_text_for_extent(self, extent, file_path: str) -> str: ...
 
 class NodeParserMixin:
     """Encapsulates the logic for identifying and extracting data from a specific AST node."""
@@ -64,14 +64,19 @@ class NodeParserMixin:
         parent_id = self._get_parent_id(node)
         original_name, expanded_from_id = self._get_macro_causality(node, file_uri)
 
-        # COLLECT MEMBER IDs for composite types
+        # COLLECT MEMBER IDs for composite types, and get original template information
         member_ids = []
+        primary_template_id, template_specialization_args = None, None
+        self_is_synthetic = False
         if node.kind.name in NODE_KIND_FOR_COMPOSITE_TYPES:
             for child in node.get_children():
                 if child.kind.name in NODE_KIND_MEMBERS:
                     child_usr = child.get_usr()
                     if child_usr:
                         member_ids.append(hash_usr_to_id(child_usr))
+
+            if node.kind.name != "CLASS_TEMPLATE":
+                primary_template_id, template_specialization_args, self_is_synthetic = self._extract_template_metadata(node)
 
         span = SourceSpan(
             name=sys.intern(node_name),
@@ -83,9 +88,74 @@ class NodeParserMixin:
             parent_id=parent_id,
             original_name=original_name,
             expanded_from_id=expanded_from_id,
-            member_ids=member_ids
+            member_ids=member_ids,
+            primary_template_id=primary_template_id,
+            template_specialization_args=template_specialization_args,
+            is_synthetic=self_is_synthetic
         )
         self.span_results[(sys.intern(file_uri), self._tu_hash)][synthetic_id] = span
+
+    def _extract_template_metadata(self, node) -> Tuple[Optional[str], Optional[str], bool]:
+        """Extracts primary template ID and specialization arguments from a cursor."""
+        primary_template_id = None
+        template_specialization_args = None
+        self_is_synthetic = False
+        template_cursor = clang.cindex.conf.lib.clang_getSpecializedCursorTemplate(node)
+        if template_cursor and not template_cursor.is_null(): 
+            # if template_cursor.kind != clang.cindex.CursorKind.NO_DECL_FOUND:
+            assert(template_cursor.kind == clang.cindex.CursorKind.CLASS_TEMPLATE)
+            template_usr = template_cursor.get_usr()
+            if template_usr:
+                primary_template_id = hash_usr_to_id(template_usr)
+
+                # Compare if the node itself is a phony node.
+                # The node itself does not have explicit specialization in the source code. It exists due to its member's specialization from a template.
+                # Its member needs a class (parent_id) to hold it, so we have to create the phony node for the class.
+                # Phony class does not have its own location. It uses the template's location. So we know it's a phony class by comparing their extents.
+                template_start_line, template_start_col = template_cursor.extent.start.line, template_cursor.extent.start.column
+                template_end_line, template_end_col = template_cursor.extent.end.line, template_cursor.extent.end.column
+
+                node_start_line, node_start_col = node.extent.start.line, node.extent.start.column
+                node_end_line, node_end_col = node.extent.end.line, node.extent.end.column
+
+                loc_file = template_cursor.location.file
+                file_uri = f"file://{os.path.abspath(loc_file.name)}"
+                template_location = Location(file_uri, template_start_line, template_start_col, template_end_line, template_end_col)
+                node_location = Location(file_uri, node_start_line, node_start_col, node_end_line, node_end_col)
+                if template_location == node_location:
+                    self_is_synthetic = True
+            
+            # Extract specialization args from displayname, e.g., "priority_tag<0>" -> "<0>"
+            display_name = node.displayname
+            if '<' in display_name and display_name.endswith('>'):
+                template_specialization_args = display_name[display_name.find('<'):]
+        
+        return primary_template_id, template_specialization_args, self_is_synthetic
+
+    def _get_parent_id(self, node) -> Optional[str]:
+        """Retrieves the parent_id for a node based on its semantic parent."""
+        parent = node.semantic_parent
+        if not parent or parent.kind == clang.cindex.CursorKind.TRANSLATION_UNIT or parent.kind == clang.cindex.CursorKind.LINKAGE_SPEC:
+            return None
+        file_name = parent.location.file.name if parent.location.file else parent.translation_unit.spelling
+        if not file_name: return None
+        if parent.kind.name not in NODE_KIND_FOR_BODY_SPANS:
+            if parent.kind.name not in NODE_KIND_NAMESPACE: 
+                logger.error(f"Parent {parent.kind.name} ({parent.spelling}) of node {node.spelling} is not valid.")
+                return None
+        usr = parent.get_usr()
+        if usr:
+            parent_id = hash_usr_to_id(usr)
+            if parent.kind.name in NODE_KIND_FOR_COMPOSITE_TYPES:
+                parent_uri = f"file://{os.path.abspath(file_name)}"
+                if parent_id not in self.span_results[(parent_uri, self._tu_hash)]:
+                    self._process_generic_node(parent, file_name)
+            return parent_id
+        # No USR, use old way to create synthetic id. This should never happen.
+        file_uri = f"file://{os.path.abspath(file_name)}"
+        line, col = self._get_symbol_name_location(parent)
+        parent_kind = self._convert_node_kind_to_index_kind(parent)
+        return make_synthetic_id(make_symbol_key(parent.spelling, parent_kind, file_uri, line, col))
 
     def _process_macro_definition(self: ClangWorkerInterface, node, file_name):
         name = node.spelling
@@ -247,61 +317,3 @@ class NodeParserMixin:
 
         return original_name, expanded_from_id
 
-    def _get_fully_qualified_scope(self: ClangWorkerInterface, node: clang.cindex.Cursor) -> str:
-        """Builds the fully qualified scope string for a given cursor."""
-        scope_parts = []
-        current = node.semantic_parent
-
-        while current and current.kind != clang.cindex.CursorKind.TRANSLATION_UNIT:
-            if current.kind.name in NODE_KIND_FOR_SCOPES:
-                name = current.spelling
-                if name:
-                    scope_parts.append(name)
-                else:  
-                    scope_parts.append(f"(anonymous {current.kind.name})")
-            current = current.semantic_parent
-
-        if not scope_parts:
-            return ""
-        return "::".join(reversed(scope_parts)) + "::"
-
-    def _get_symbol_name_location(self: ClangWorkerInterface, node):
-        """Return zero-based (line, column) for symbol's name."""
-        for tok in node.get_tokens():
-            if tok.spelling == node.spelling:
-                loc = tok.location
-                try:
-                    file, line, col, _ = loc.get_expansion_location()
-                except AttributeError:
-                    continue
-                if file and file.name.startswith(self.project_path):
-                    return (line - 1, col - 1)
-        loc = node.location
-        try:
-            file, line, col, _ = loc.get_expansion_location()
-            return (line - 1, col - 1)
-        except AttributeError:
-            return (node.location.line - 1, node.location.column - 1)
-
-    def _get_source_text_for_extent(self: ClangWorkerInterface, extent, file_path: str) -> str:
-        """Reads the source text for a given Clang extent."""
-        try:
-            with open(file_path, 'r', errors='ignore') as f:
-                lines = f.readlines()
-            
-            start_line = extent.start.line - 1
-            start_col = extent.start.column - 1
-            end_line = extent.end.line - 1
-            end_col = extent.end.column - 1
-            
-            if start_line == end_line:
-                return lines[start_line][start_col:end_col]
-            else:
-                result = [lines[start_line][start_col:]]
-                for i in range(start_line + 1, end_line):
-                    result.append(lines[i])
-                result.append(lines[end_line][:end_col])
-                return "".join(result)
-        except Exception as e:
-            logger.error(f"Error reading source text for extent in {file_path}: {e}")
-            return ""

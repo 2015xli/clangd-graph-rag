@@ -110,6 +110,10 @@ class Symbol:
     body_location: Optional[RelativeLocation] = None
     parent_id: Optional[str] = None
     template_specialization_args: str = ""
+    # Fields for template specialization relation
+    primary_template_id: Optional[str] = None
+    # This is for phony node/symbol.
+    is_synthetic: bool = False
     # Fields for Macro related
     is_macro_function_like: bool = False    #The macro is function-like, e.g., max(a, b)
     macro_definition: Optional[str] = None  #The full definition of the maco (without the leading "#DEFINE")

@@ -172,30 +172,6 @@ class _ClangWorkerImpl(NodeParserMixin):
             self._local_header_cache.add(file_name)
         return True
 
-    def _get_parent_id(self, node) -> Optional[str]:
-        """Retrieves the parent_id for a node based on its semantic parent."""
-        parent = node.semantic_parent
-        if not parent or parent.kind == clang.cindex.CursorKind.TRANSLATION_UNIT or parent.kind == clang.cindex.CursorKind.LINKAGE_SPEC:
-            return None
-        file_name = parent.location.file.name if parent.location.file else parent.translation_unit.spelling
-        if not file_name: return None
-        if parent.kind.name not in NODE_KIND_FOR_BODY_SPANS:
-            if parent.kind.name not in NODE_KIND_NAMESPACE: 
-                logger.error(f"Parent {parent.kind.name} ({parent.spelling}) of node {node.spelling} is not valid.")
-                return None
-        usr = parent.get_usr()
-        if usr:
-            parent_id = hash_usr_to_id(usr)
-            if parent.kind.name in NODE_KIND_FOR_COMPOSITE_TYPES:
-                parent_uri = f"file://{os.path.abspath(file_name)}"
-                if parent_id not in self.span_results[(parent_uri, self._tu_hash)]:
-                    self._process_generic_node(parent, file_name)
-            return parent_id
-        file_uri = f"file://{os.path.abspath(file_name)}"
-        line, col = self._get_symbol_name_location(parent)
-        parent_kind = self._convert_node_kind_to_index_kind(parent)
-        return make_synthetic_id(make_symbol_key(parent.spelling, parent_kind, file_uri, line, col))
-
     def _identify_template_type(self, node) -> str:
         from itertools import islice
         tokens = islice(node.get_tokens(), 100)
@@ -267,3 +243,62 @@ class _ClangWorkerImpl(NodeParserMixin):
             i += 1
         hash_input = " ".join(bucket_lang + bucket_macros + bucket_features + bucket_includes + bucket_other)
         return hashlib.md5(hash_input.encode("utf-8")).hexdigest()
+
+    def _get_fully_qualified_scope(self, node: clang.cindex.Cursor) -> str:
+        """Builds the fully qualified scope string for a given cursor."""
+        scope_parts = []
+        current = node.semantic_parent
+
+        while current and current.kind != clang.cindex.CursorKind.TRANSLATION_UNIT:
+            if current.kind.name in NODE_KIND_FOR_SCOPES:
+                name = current.spelling
+                if name:
+                    scope_parts.append(name)
+                else:  
+                    scope_parts.append(f"(anonymous {current.kind.name})")
+            current = current.semantic_parent
+
+        if not scope_parts:
+            return ""
+        return "::".join(reversed(scope_parts)) + "::"
+
+    def _get_symbol_name_location(self, node):
+        """Return zero-based (line, column) for symbol's name."""
+        for tok in node.get_tokens():
+            if tok.spelling == node.spelling:
+                loc = tok.location
+                try:
+                    file, line, col, _ = loc.get_expansion_location()
+                except AttributeError:
+                    continue
+                if file and file.name.startswith(self.project_path):
+                    return (line - 1, col - 1)
+        loc = node.location
+        try:
+            file, line, col, _ = loc.get_expansion_location()
+            return (line - 1, col - 1)
+        except AttributeError:
+            return (node.location.line - 1, node.location.column - 1)
+
+    def _get_source_text_for_extent(self, extent, file_path: str) -> str:
+        """Reads the source text for a given Clang extent."""
+        try:
+            with open(file_path, 'r', errors='ignore') as f:
+                lines = f.readlines()
+            
+            start_line = extent.start.line - 1
+            start_col = extent.start.column - 1
+            end_line = extent.end.line - 1
+            end_col = extent.end.column - 1
+            
+            if start_line == end_line:
+                return lines[start_line][start_col:end_col]
+            else:
+                result = [lines[start_line][start_col:]]
+                for i in range(start_line + 1, end_line):
+                    result.append(lines[i])
+                result.append(lines[end_line][:end_col])
+                return "".join(result)
+        except Exception as e:
+            logger.error(f"Error reading source text for extent in {file_path}: {e}")
+            return ""

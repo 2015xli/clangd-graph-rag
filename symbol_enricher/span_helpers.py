@@ -92,5 +92,8 @@ class HelpersMixin:
             body_location=span.body_location,
             parent_id=parent_id,
             original_name=span.original_name,
-            expanded_from_id=span.expanded_from_id
+            expanded_from_id=span.expanded_from_id,
+            primary_template_id=span.primary_template_id,
+            template_specialization_args=span.template_specialization_args or "",
+            is_synthetic=span.is_synthetic
         )
