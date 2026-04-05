@@ -102,11 +102,9 @@ class NodeParserMixin:
         self_is_synthetic = False
         template_cursor = clang.cindex.conf.lib.clang_getSpecializedCursorTemplate(node)
         if template_cursor and not template_cursor.is_null(): 
-            # template can be CLASS_TEMPLATE, CLASS_TEMPLATE_PARTIAL_SPECIALIZATION, or CLASS_DECL 
-            # CLASS_DECL is because the fully defined class (CLASS_DECL) can be a nested class of a class template, just like a member function. 
-            # When the nested class is specialized, its primary template is that nested class, whose cursor kind is CLASS_DECL.
-            assert (template_cursor.kind.name in NODE_KIND_CLASSES), \
-                    f"Unexpected template cursor kind: {template_cursor.kind}"
+            # template can be CLASS_TEMPLATE, CLASS_TEMPLATE_PARTIAL_SPECIALIZATION, or CLASS_DECL/STRUCT_DECL/UNION_DECL 
+            # E.g., CLASS_DECL is because the fully defined class (CLASS_DECL) can be a nested class of a class template, just like a member function. 
+            # When the nesting class is specialized, the nested class' primary template is itself, whose cursor kind is CLASS_DECL.
             template_usr = template_cursor.get_usr()
             if template_usr:
                 primary_template_id = hash_usr_to_id(template_usr)

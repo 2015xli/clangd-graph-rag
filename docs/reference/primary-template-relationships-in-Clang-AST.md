@@ -11,14 +11,14 @@ template <typename T>
 struct Foo {};  // CLASS_TEMPLATE — is the primary template
 ```
 ________________________________________
-### Case 2: CLASS_DECL — a non-templated nested class inside a class template
+### Case 2: CLASS_DECL/STRUCT_DECL — a non-templated nested class inside a class template
 ```
 template <typename T>
 struct Outer {
-    struct Inner {};  // CLASS_DECL — but acts as primary template for Inner's specializations
+    struct Inner {};  // CLASS_DECL/STRUCT_DECL — but acts as primary template for Inner's specializations
 };
 ```
-Inner has no template parameters of its own, so clang gives it a CLASS_DECL cursor, not a CLASS_TEMPLATE. Yet it can still be the primary template for specializations of Inner scoped to explicit specializations of Outer.
+Inner has no template parameters of its own, so clang gives it a CLASS_DECL or STRUCT_DECL cursor, not a CLASS_TEMPLATE. Yet it can still be the primary template for specializations of Inner scoped to explicit specializations of Outer.
 ________________________________________
 ### Case 3: CLASS_TEMPLATE (member template redefined in explicit outer specialization)
 ```
@@ -80,15 +80,16 @@ struct Foo {};      // CLASS_TEMPLATE — primary
 template <>
 struct Foo<int> {}; // CLASS_DECL (explicit full specialization)
                     //   → primary: Foo (CLASS_TEMPLATE)
-Primary is a CLASS_DECL (the nested non-templated class case):
+
+Primary is a CLASS_DECL/STRUCT_DECL (the nested non-templated class case):
 template <typename T>
 struct Outer {
-    struct Inner {};    // CLASS_DECL — primary template for Inner
+    struct Inner {};    // CLASS_DECL/STRUCT_DECL/UNION_DECL — primary template for Inner
 };
 
 template <>
-struct Outer<int>::Inner {  // CLASS_DECL (explicit specialization)
-                            //   → primary: Outer<T>::Inner (CLASS_DECL)
+struct Outer<int>::Inner {  // CLASS_DECL/STRUCT_DECL/UNION_DECL (explicit specialization)
+                            //   → primary: Outer<T>::Inner (CLASS_DECL/STRUCT_DECL/UNION_DECL)
 };
 ```
 ________________________________________
@@ -111,11 +112,11 @@ struct Outer<int>::Inner {  // CLASS_TEMPLATE
 ________________________________________
 ## Summary table
 
-| Cursor Kind	                        | Can be a primary template	                                             | Can have a primary template |
-|---------------------------------------|------------------------------------------------------------------------|------------------------------------------------------------------|
+| Cursor Kind	                        | Can be a primary template	                                             | Can have a primary template                                                          |
+|---------------------------------------|------------------------------------------------------------------------|--------------------------------------------------------------------------------------|
 | CLASS_TEMPLATE	                    | V Always	                                                             | V Only when it's a member template redefined inside an explicit outer specialization |   
-| CLASS_DECL	                        | V Only when it's a non-templated nested class inside a CLASS_TEMPLATE	 | V Only when it's an explicit full specialization                                      |
-| CLASS_TEMPLATE_PARTIAL_SPECIALIZATION	| X Never	                                                             | V Always                                                            |
+| CLASS_DECL/STRUCT_DECL/UNION_DECL	    | V Only when it's a non-templated nested class inside a CLASS_TEMPLATE	 | V When it or its outer class is an explicit full specialization                      |
+| CLASS_TEMPLATE_PARTIAL_SPECIALIZATION	| X Never	                                                             | V Always                                                                             |
 
 Termination condition when walking the primary template chain: stop when clang_getSpecializedCursorTemplate returns null — do not assume CLASS_TEMPLATE is always the terminus.
 

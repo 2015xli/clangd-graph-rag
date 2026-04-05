@@ -4,23 +4,116 @@ CODE = """
 template <typename T>
 struct Outer {
     template <typename U>
-    struct Inner {}; // Primary Template for Inner
+    struct TemplateInner {}; // Primary Template for TemplateInner
+    struct StructInner {}; //Nested struct, not a template
+    union UnionInner {}; //Nested union, not a template
 };
+
+/** 
+ * Output:
+ 
+--- Outer_primary ---
+  Spelling      : Outer
+  Kind          : CLASS_TEMPLATE
+  Primary Tmpl  : (none / is the primary)
+
+--- TemplateInner_CLASS_TEMPLATE_0 ---
+  Spelling      : TemplateInner
+  Kind          : CLASS_TEMPLATE
+  Primary Tmpl  : (none / is the primary)
+
+--- StructInner_STRUCT_DECL_0 ---
+  Spelling      : StructInner
+  Kind          : STRUCT_DECL
+  Primary Tmpl  : (none / is the primary)
+
+*/
+
 
 // We specialize the Outer class for 'int'
 template <>
 template <typename U>
-struct Outer<int>::Inner {
+struct Outer<int>::TemplateInner {
     U data;
 };
 
-// Partial specialization of Inner itself, still inside Outer<T>
+/**
+ * Output:
+
+--- TemplateInner_CLASS_TEMPLATE_1 ---
+  Spelling      : TemplateInner
+  Kind          : CLASS_TEMPLATE
+  Primary Tmpl  : TemplateInner  (kind: CLASS_TEMPLATE)
+
+*/
+
+
+// Partial specialization of TemplateInner itself, still inside Outer<T>
 // specializing on U's shape (pointer)
 template <typename T>
 template <typename U>
-struct Outer<T>::Inner<U*> {
+struct Outer<T>::TemplateInner<U*> {
     U* ptr_data;
 };
+
+/**
+ * Output:
+
+--- TemplateInner_CLASS_TEMPLATE_PARTIAL_SPECIALIZATION_2 ---
+  Spelling      : TemplateInner
+  Kind          : CLASS_TEMPLATE_PARTIAL_SPECIALIZATION
+  Primary Tmpl  : TemplateInner  (kind: CLASS_TEMPLATE)
+ 
+*/
+
+// Full specialization of Outer and TemplateInner
+template <>
+template <>
+struct Outer<int>::TemplateInner<int> {
+    int* ptr_data;
+};
+
+/**
+ * Output:
+
+--- TemplateInner_STRUCT_DECL_3 ---
+  Spelling      : TemplateInner
+  Kind          : STRUCT_DECL
+  Primary Tmpl  : TemplateInner  (kind: CLASS_TEMPLATE)
+
+*/
+
+// We specialize the Outer class for 'int'
+template <>
+struct Outer<int>::StructInner {
+    int data;
+};
+
+/**
+ * Output:
+
+--- StructInner_STRUCT_DECL_1 ---
+  Spelling      : StructInner
+  Kind          : STRUCT_DECL
+  Primary Tmpl  : StructInner  (kind: STRUCT_DECL)
+
+*/
+
+// We specialize the Outer class for 'int'
+template <>
+struct Outer<int>::UnionInner {
+    int data;
+};
+
+/** 
+ * Output:
+
+--- UnionInner_UNION_DECL_1 ---
+  Spelling      : UnionInner
+  Kind          : UNION_DECL
+  Primary Tmpl  : UnionInner  (kind: UNION_DECL)
+
+*/
 """
 
 def kind_name(cursor):
@@ -32,11 +125,10 @@ def get_primary_template(cursor):
         if pt and not pt.is_null():
             return pt
 
-        print("Warning: Try again!")
         #This python binding is not reliable, should avoid using it.
-        pt = cursor.specialized_cursor
-        if pt and pt.kind != clang.cindex.CursorKind.NO_DECL_FOUND:
-            return pt
+        #pt = cursor.specialized_cursor
+        #if pt and pt.kind != clang.cindex.CursorKind.NO_DECL_FOUND:
+        #    return pt
     except Exception:
         pass
     return None
@@ -63,8 +155,16 @@ def find_cursors(tu):
             if cursor.kind.name == "CLASS_TEMPLATE":
                 results.setdefault("Outer_primary", cursor)
 
-        if cursor.spelling == "Inner":
-            key = f"Inner_{cursor.kind.name}_{len([k for k in results if k.startswith('Inner')])}"
+        if cursor.spelling == "TemplateInner":
+            key = f"TemplateInner_{cursor.kind.name}_{len([k for k in results if k.startswith('TemplateInner')])}"
+            results[key] = cursor
+
+        if cursor.spelling == "StructInner":
+            key = f"StructInner_{cursor.kind.name}_{len([k for k in results if k.startswith('StructInner')])}"
+            results[key] = cursor
+
+        if cursor.spelling == "UnionInner":
+            key = f"UnionInner_{cursor.kind.name}_{len([k for k in results if k.startswith('UnionInner')])}"
             results[key] = cursor
 
         for child in cursor.get_children():
