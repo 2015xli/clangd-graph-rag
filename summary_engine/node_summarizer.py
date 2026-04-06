@@ -95,6 +95,44 @@ class NodeSummaryProcessor:
 
         return "code_analysis_regenerated", {"code_hash": new_code_hash, "code_analysis": new_code_analysis}
 
+    def get_interface_analysis(self, node_data: dict) -> Tuple[str, dict]:
+        """
+        Deterministic string generation for function/method interfaces (no body).
+        Uses node ID as code_hash for cache invalidation.
+        """
+        node_id = node_data['id']
+        label = node_data['label']
+        db_code_hash = node_data.get('db_code_hash')
+        db_code_analysis = node_data.get('db_code_analysis')
+
+        # Use ID as hash for automatic invalidation if a body is ever added
+        new_code_hash = node_id
+
+        # 1. Staleness Check
+        # Path A: DB is up-to-date
+        if db_code_hash == new_code_hash and db_code_analysis:
+            return "unchanged", {"code_hash": new_code_hash, "code_analysis": db_code_analysis}
+
+        # Path B: DB is stale, check historical cache
+        cached_entry = self.cache_manager.get_cache_entry(label, node_id)
+        cache_code_analysis = cached_entry.get('code_analysis') if cached_entry else None
+        cache_code_hash = cached_entry.get('code_hash') if cached_entry else None
+        if cache_code_hash == new_code_hash and cache_code_analysis:
+            return "code_analysis_restored", {"code_hash": new_code_hash, "code_analysis": cache_code_analysis}
+
+        # Path C: Cache miss, generate deterministic analysis
+        name = node_data.get('name', '')
+        signature = node_data.get('signature', '')
+        return_type = node_data.get('return_type', '')
+        kind = node_data.get('kind', label)
+        
+        constructed_string = (
+            f"This {kind} '{name}' is an interface/declaration that has no code implementation. "
+            f"It's declared as: {return_type} {name}{signature}."
+        )
+
+        return "code_analysis_regenerated", {"code_hash": new_code_hash, "code_analysis": constructed_string}
+
     def get_function_contextual_summary(self, node_data: dict, caller_entities: List[dict], callee_entities: List[dict]) -> Tuple[str, dict]:
         """
         Performs staleness checks and generates a final, context-aware summary for a function.
@@ -121,7 +159,7 @@ class NodeSummaryProcessor:
         if not is_stale and cache_summary:
             return "summary_restored", {"summary": cache_summary}
 
-        # Path C: Must regenerate (either because it's stale, or no valid summary exists anywhere)
+        # Path C: Must regenerate (either because it's stale, or no valid summary exists anywhere). Let's get the code_analysis for summary generation.
         own_cached_data = self.cache_manager.get_cache_entry(label, node_id)
         code_analysis = own_cached_data.get('code_analysis') if own_cached_data else None
 

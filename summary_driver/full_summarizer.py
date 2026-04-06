@@ -77,18 +77,17 @@ class FullSummarizer:
         # 8. Embedding generation
         self.engine.generate_embeddings()
 
-
-    # --- Pass 1: Individual Code Analysis ---
+    # --- Pass 1: Individual Function Code Analysis ---
     def analyze_functions_individually(self):
         """Generates a code-only analysis for all functions and methods in the graph."""
         logging.info("\n--- Starting Pass 1: Analyzing Functions & Methods Individually ---")
         
-        query = "MATCH (n) WHERE (n:FUNCTION OR n:METHOD) AND n.body_location IS NOT NULL RETURN n.id AS id"
+        query = "MATCH (n:FUNCTION|METHOD) RETURN n.id AS id"
         results = self.neo4j_mgr.execute_read_query(query)
         all_function_ids = [r['id'] for r in results]
 
         if not all_function_ids:
-            logging.warning("No functions or methods with body_location found. Exiting Pass 1.")
+            logging.warning("No functions or methods found. Exiting Pass 1.")
             return
         
         self.engine.analyze_functions_individually_with_ids(all_function_ids)

@@ -23,30 +23,51 @@ class FunctionProcessorMixin:
         if not function_ids:
             return set()
             
-        functions_to_process = self._get_functions_for_code_analysis(function_ids)
-        if not functions_to_process:
-            logger.info("No functions or methods from the provided list require a code analysis.")
-            return set()
-            
-        logger.info(f"Found {len(functions_to_process)} functions/methods that need code analyses.")
+        updated_ids = set()
         max_workers = self.num_local_workers if self.is_local_llm else self.num_remote_workers
-        logger.info(f"Using {max_workers} parallel workers for Pass 1.")
 
-        updated_ids = self._parallel_process(
-            items=functions_to_process,
-            process_func=self._process_one_function_for_code_analysis,
-            max_workers=max_workers,
-            desc="Pass 1: Code analyses"
-        )
-        logger.info(f"Pass 1: Code analyses - Updated {len(updated_ids)} nodes.")
+        impls_to_process = self._get_functions_for_code_analysis(function_ids)
+        if impls_to_process:
+            logger.info(f"Found {len(impls_to_process)} functions/methods with bodies.")
+            logger.info(f"Using {max_workers} parallel workers for Pass 1.a.")
+            updated_ids = self._parallel_process(
+                items=impls_to_process,
+                process_func=self._process_one_function_for_code_analysis,
+                max_workers=max_workers,
+                desc="Pass 1a: Code analyses (with bodies)"
+            )
+
+        interfaces_to_process = self._get_functions_without_bodies(function_ids)
+        if interfaces_to_process:
+            logger.info(f"Found {len(interfaces_to_process)} functions/methods without bodies.")
+            logger.info(f"Using {max_workers} parallel workers for Pass 1.b.")
+            updated_intf_ids = self._parallel_process(
+                items=interfaces_to_process,
+                process_func=self._process_one_interface_for_analysis,
+                max_workers=max_workers,
+                desc="Pass 1b: Interface analyses (no bodies)"
+            )
+            updated_ids.update(updated_intf_ids)
+
+        logger.info(f"Pass 1: Combined analyses - Updated {len(updated_ids)} total nodes.")
         return updated_ids
 
     def _get_functions_for_code_analysis(self, function_ids: list[str]) -> list[dict]:
         query = """
         MATCH (n:FUNCTION|METHOD)
         WHERE n.id IN $function_ids AND n.body_location IS NOT NULL
-        RETURN n.id AS id, n.name AS name, n.path AS path, n.body_location as body_location,
+        RETURN n.id AS id, n.name AS name, n.kind AS kind, n.path AS path, n.body_location as body_location,
                n.code_hash as db_code_hash, n.code_analysis as db_code_analysis, labels(n) as labels
+        """
+        return self.neo4j_mgr.execute_read_query(query, {"function_ids": function_ids})
+
+    def _get_functions_without_bodies(self, function_ids: list[str]) -> list[dict]:
+        query = """
+        MATCH (n:FUNCTION|METHOD)
+        WHERE n.id IN $function_ids AND n.body_location IS NULL
+        RETURN n.id AS id, n.name AS name, n.kind AS kind, n.signature AS signature, 
+               n.return_type AS return_type, n.code_hash as db_code_hash, 
+               n.code_analysis as db_code_analysis, labels(n) as labels
         """
         return self.neo4j_mgr.execute_read_query(query, {"function_ids": function_ids})
 
@@ -65,6 +86,26 @@ class FunctionProcessorMixin:
                 {"id": node_data["id"], "code_analysis": data["code_analysis"], "code_hash": data["code_hash"]}
             )
         
+        return {
+            "key": node_data["id"],
+            "label": node_data["label"],
+            "status": status,
+            "data": data
+        }
+
+    def _process_one_interface_for_analysis(self, node_data: dict) -> dict:
+        """Worker for a single interface analysis."""
+        node_data['label'] = [l for l in node_data['labels'] if l in ['FUNCTION', 'METHOD']][0]
+        
+        status, data = self.node_processor.get_interface_analysis(node_data)
+
+        if status in ["code_analysis_regenerated", "code_analysis_restored"]:
+            update_query = "MATCH (n:FUNCTION|METHOD {id: $id}) SET n.code_analysis = $code_analysis, n.code_hash = $code_hash"
+            self.neo4j_mgr.execute_autocommit_query(
+                update_query,
+                {"id": node_data["id"], "code_analysis": data["code_analysis"], "code_hash": data["code_hash"]}
+            )
+
         return {
             "key": node_data["id"],
             "label": node_data["label"],
