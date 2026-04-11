@@ -1,19 +1,40 @@
 # 050-file-folder-manifests.md
 
-**Goal**: Provide 100% summary coverage for Files and Folders through a structural inventory (manifest) approach.
+**Goal**: Transition File and Folder summaries from simple roll-ups to "Structural Manifests" with physical code context and robust staleness tracking via hashing.
 
-#### **1. Pass 5: File Inventory Summaries**
-*   **`summary_engine/hierarchy_processor.py`**:
-    *   In `_process_one_file_summary`, replace the child summary roll-up with a **manifest**.
-*   **Logic**:
-    *   **Includes**: Fetch list of paths from `[:INCLUDES]` relationship.
-    *   **Logic Inventory**: Fetch list of all nodes with `[:DEFINES]` and `[:DECLARES]`.
-    *   **Enrichment**: Include the summaries (if available) for the symbols in the inventory.
-*   **Fallback**: If the inventory is empty, provide a summary like *"This file is an empty header or non-source asset."*
+---
 
-#### **2. Pass 6: Folder Logic Consistency**
-*   **`summary_engine/hierarchy_processor.py`**:
-    *   Update `_process_one_folder_summary`.
-    *   Provide a "Folder Manifest" including subfolders and files.
-    *   **AI Goal**: Describe the collective role of the components.
-    *   **Fallback**: If the folder is empty, explicitly state *"The folder is empty or does not contain recognized source code."*
+### **Step 1: File Manifest Construction (`hierarchy_processor.py`)**
+**Operation**: Identify inclusions and definitions, while capturing the physical state of the file.
+1.  **Read Source**: Read the full file content from the filesystem.
+2.  **Physical Hashing**: Calculate `current_code_hash = SHA1(file_body)`.
+3.  **Discovery Query**: Fetch `[:INCLUDES]` paths and an inventory of `[:DEFINES|DECLARES]` symbols.
+
+**Staleness Decision**:
+*   A file is stale if `current_code_hash != db_code_hash`.
+*   **OR** if any member of its symbol inventory has `summary_changed`.
+
+---
+
+### **Step 2: Manifest Summarization (`node_summarizer.py`)**
+**Operation**: Implement the "Three-Stage Waterfall" for files.
+1.  **DB Check**: If hashes match and context is clean, return `unchanged`.
+2.  **Cache Check**: If DB is stale, check if the L1 cache matches the `current_code_hash`.
+3.  **Regeneration**: If both fail, generate a manifest prompt including:
+    *   List of relative include paths.
+    *   List of defined symbols (with their individual summaries).
+    *   **Source Code Context**: The literal text of the file (potentially truncated if exceeding token limits).
+
+---
+
+### **Step 3: Database Synchronization (`hierarchy_processor.py`)**
+**Operation**: Ensure the physical state is persisted.
+*   **Action**: The Neo4j `SET` query now updates both `n.summary` AND `n.code_hash` for the File node.
+*   **Result**: Subsequent runs can perform O(1) staleness checks using only the database properties.
+
+---
+
+### **Step 4: Folder Manifest Consistency**
+**Operation**: Apply similar manifest logic to folders and the project node.
+*   **Empty Folders**: Explicitly summarized as *"This folder is empty or contains no recognized source files."*
+*   **Incremental Propagation**: A change in a file's summary now correctly propagates staleness up to its containing folder and the root project.

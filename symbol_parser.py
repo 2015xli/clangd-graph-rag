@@ -319,6 +319,7 @@ class SymbolParser:
     def _parse_symbol_doc(self, doc: dict) -> Symbol:
         """Parses a YAML document into a Symbol object."""
         sym_info = doc.get('SymInfo', {})
+            
         return Symbol(
             id=doc['ID'],
             name=doc['Name'],

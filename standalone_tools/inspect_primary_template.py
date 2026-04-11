@@ -114,6 +114,29 @@ struct Outer<int>::UnionInner {
   Primary Tmpl  : UnionInner  (kind: UNION_DECL)
 
 */
+
+/**
+ * Template metaprogramming with recursion
+ */
+
+template<typename T> struct ChainB; 
+
+// General Case: A inherits from B with an extra pointer level
+template<typename T>
+struct ChainA : ChainB<T*> {}; 
+
+// General Case: B inherits from A
+template<typename T>
+struct ChainB : ChainA<T> {};
+
+// THE TERMINATOR: Specialization for a triple-pointer
+// This version does NOT inherit from anything, breaking the cycle.
+template<typename T>
+struct ChainA<T***> {
+    using type = T;
+};
+
+
 """
 
 def kind_name(cursor):
@@ -166,6 +189,11 @@ def find_cursors(tu):
         if cursor.spelling == "UnionInner":
             key = f"UnionInner_{cursor.kind.name}_{len([k for k in results if k.startswith('UnionInner')])}"
             results[key] = cursor
+
+        if cursor.spelling == "ChainA":
+            key = f"ChainA_{cursor.kind.name}_{len([k for k in results if k.startswith('ChainA')])}"
+            results[key] = cursor
+
 
         for child in cursor.get_children():
             visit(child, depth + 1)

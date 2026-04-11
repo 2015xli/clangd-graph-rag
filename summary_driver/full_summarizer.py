@@ -77,6 +77,9 @@ class FullSummarizer:
         # 8. Embedding generation
         self.engine.generate_embeddings()
 
+        # 9. Finalize the run (persist project summary)
+        self.engine.finalize_run()
+
     # --- Pass 1: Individual Function Code Analysis ---
     def analyze_functions_individually(self):
         """Generates a code-only analysis for all functions and methods in the graph."""
@@ -115,21 +118,22 @@ class FullSummarizer:
         logging.info(f"Pass 2 complete. Updated contextual summaries for {len(updated_ids)} functions.")
         logging.info("--- Finished Pass 2 ---")
 
-    # --- Pass 3: Class Summaries ---
     def summarize_class_structures(self):
-        """Generates summaries for all class structures."""
-        logging.info("\n--- Starting Pass 3: Summarizing Class Structures ---")
-        
-        query = "MATCH (c:CLASS_STRUCTURE) RETURN c.id AS id"
+        """Generates summaries for class and data structures by inheritance level."""
+        logging.info("\n--- Starting Pass 3: Summarizing Class & Data Structures ---")
+
+        # We query for both CLASS_STRUCTURE (C++ classes/structs) and DATA_STRUCTURE (C structs, enums, unions)
+        query = "MATCH (c) WHERE c:CLASS_STRUCTURE OR c:DATA_STRUCTURE RETURN c.id AS id"
         results = self.neo4j_mgr.execute_read_query(query)
         all_class_ids = {r['id'] for r in results}
 
         if not all_class_ids:
-            logging.info("No class structures found to summarize.")
+            logging.info("No class or data structures found. Skipping Pass 3.")
             return
 
         self.engine.summarize_classes_with_ids(all_class_ids)
         logging.info("--- Finished Pass 3 ---")
+
 
     # --- Pass 4: Namespace Summaries ---
     def summarize_namespaces(self):

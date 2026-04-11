@@ -19,7 +19,7 @@ class HierarchyProcessorMixin:
     """
 
     def summarize_files_with_paths(self, file_paths: list[str]) -> set:
-        """Generates summaries for the specified file paths."""
+        """Generates summaries for the specified file paths using a manifest approach."""
         if not file_paths:
             return set()
         
@@ -27,9 +27,18 @@ class HierarchyProcessorMixin:
         max_workers = self.num_local_workers if self.is_local_llm else self.num_remote_workers
 
         query = """
-        MATCH (parent:FILE {path: $key})-[:DEFINES]->(child) 
-        WHERE child.summary IS NOT NULL 
-        RETURN collect(DISTINCT {id: child.id, labels: labels(child), name: child.name}) as children
+        MATCH (f:FILE {path: $key})
+        OPTIONAL MATCH (f)-[:INCLUDES]->(inc:FILE)
+        OPTIONAL MATCH (f)-[:DEFINES|DECLARES]->(sym)
+        WHERE NOT sym:FIELD
+        RETURN collect(DISTINCT inc.path) AS include_paths,
+               collect(DISTINCT {
+                   name: sym.name, 
+                   kind: sym.kind, 
+                   id: sym.id, 
+                   labels: labels(sym), 
+                   summary: sym.summary
+               }) AS symbol_inventory
         """
         items_to_process = [
             (file_path, 'FILE', query, self.node_processor.get_file_summary)
@@ -46,7 +55,7 @@ class HierarchyProcessorMixin:
         return updated_ids
 
     def summarize_folders_with_paths(self, folder_paths: list[str]) -> set:
-        """Generates summaries for the specified folder paths, bottom-up."""
+        """Generates summaries for the specified folder paths using a manifest approach, bottom-up."""
         if not folder_paths:
             return set()
 
@@ -62,9 +71,14 @@ class HierarchyProcessorMixin:
             logger.info(f"Processing {len(level_paths)} folders at depth {depth}.")
 
             query = """
-            MATCH (parent:FOLDER {path: $key})-[:CONTAINS]->(child) 
-            WHERE child.summary IS NOT NULL 
-            RETURN collect(DISTINCT {id: child.id, path: child.path, labels: labels(child), name: child.name}) as children
+            MATCH (fold:FOLDER {path: $key})
+            MATCH (fold)-[:CONTAINS]->(child)
+            RETURN collect(DISTINCT {
+                       name: child.name, 
+                       path: child.path, 
+                       labels: labels(child), 
+                       summary: child.summary
+                   }) AS children_inventory
             """
             items_to_process = [
                 (path, 'FOLDER', query, self.node_processor.get_folder_summary)
@@ -84,15 +98,20 @@ class HierarchyProcessorMixin:
         return all_updated_ids
 
     def summarize_project(self) -> set:
-        """Generates the final summary for the PROJECT node."""
+        """Generates the final summary for the PROJECT node using a manifest approach."""
         project_path = self.project_path
         logger.info("Processing summary for PROJECT node.")
         max_workers = self.num_local_workers if self.is_local_llm else self.num_remote_workers
 
         query = """
-        MATCH (parent:PROJECT {path: $key})-[:CONTAINS]->(child) 
-        WHERE child.summary IS NOT NULL 
-        RETURN collect(DISTINCT {id: child.id, path: child.path, labels: labels(child), name: child.name}) as children
+        MATCH (p:PROJECT {path: $key})
+        MATCH (p)-[:CONTAINS]->(child)
+        RETURN collect(DISTINCT {
+                   name: child.name, 
+                   path: child.path, 
+                   labels: labels(child), 
+                   summary: child.summary
+               }) AS children_inventory
         """
         items_to_process = [(project_path, 'PROJECT', query, self.node_processor.get_project_summary)]
 
@@ -105,7 +124,7 @@ class HierarchyProcessorMixin:
 
     def _process_one_hierarchical_node(self, args) -> dict:
         """Generic worker for hierarchical nodes (File, Folder, Project)."""
-        key, label, dependency_query, processor_func = args
+        key, label, manifest_query, processor_func = args
 
         node_query = f"MATCH (n:{label} {{path: $key}}) RETURN n, labels(n) as n_labels"
         node_results = self.neo4j_mgr.execute_read_query(node_query, {"key": key})
@@ -116,17 +135,23 @@ class HierarchyProcessorMixin:
         node_data = dict(node_results[0]['n'])
         node_data['label'] = label
 
-        deps_result = self.neo4j_mgr.execute_read_query(dependency_query, {"key": key})
-        child_entities = deps_result[0]['children'] if deps_result and deps_result[0]['children'] else []
+        # Execute the manifest query
+        manifest_results = self.neo4j_mgr.execute_read_query(manifest_query, {"key": key})
+        manifest_data = manifest_results[0] if manifest_results else {}
 
-        status, data = processor_func(node_data, child_entities)
+        status, data = processor_func(node_data, manifest_data)
 
         if status in ["summary_regenerated", "summary_restored"]:
-            update_query = f"MATCH (n:{label} {{path: $key}}) SET n.summary = $summary REMOVE n.summaryEmbedding"
-            self.neo4j_mgr.execute_autocommit_query(
-                update_query,
-                {"key": key, "summary": data["summary"]}
-            )
+            # Build the SET clause dynamically to handle optional code_hash
+            set_clauses = ["n.summary = $summary"]
+            params = {"key": key, "summary": data["summary"]}
+            
+            if data.get("code_hash"):
+                set_clauses.append("n.code_hash = $code_hash")
+                params["code_hash"] = data["code_hash"]
+            
+            update_query = f"MATCH (n:{label} {{path: $key}}) SET {', '.join(set_clauses)} REMOVE n.summaryEmbedding"
+            self.neo4j_mgr.execute_autocommit_query(update_query, params)
         
         return {
             "key": key,

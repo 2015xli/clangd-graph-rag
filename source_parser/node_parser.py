@@ -54,7 +54,7 @@ class NodeParserMixin:
             synthetic_id = make_synthetic_id(node_key)
 
         # ANONYMITY HANDLING: Use USR as name for debug info when no spelling is available.
-        is_anonymous = not node.spelling or "(unnamed" in node.spelling
+        is_anonymous = not node.spelling or "(unnamed" in node.spelling or "(anonymous" in node.spelling 
         node_name = usr if (is_anonymous and usr) else node.spelling
 
         # Deduplication check using the final ID.

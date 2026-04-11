@@ -131,6 +131,10 @@ class IncrementalSummarizer:
 
         # --- Final Pass: Embeddings ---
         self.engine.generate_embeddings()
+
+        # Finalize the run (persist project summary)
+        self.engine.finalize_run()
+
         logging.info("--- Finished Targeted RAG Update ---")
         
 
@@ -166,11 +170,11 @@ class IncrementalSummarizer:
         return {r['path'] for r in results}
 
     def _find_classes_of_symbol_ids(self, symbol_ids: set) -> set:
-        """Filters a set of symbol IDs to return only those that are class structures."""
+        """Filters a set of symbol IDs to return only those that are class or data structures."""
         if not symbol_ids:
             return set()
         query = """
-            MATCH (c:CLASS_STRUCTURE) 
+            MATCH (c:CLASS_STRUCTURE|DATA_STRUCTURE) 
             WHERE c.id IN $symbol_ids 
             RETURN DISTINCT c.id AS id
         """
@@ -190,24 +194,24 @@ class IncrementalSummarizer:
         return {r['id'] for r in results}
 
     def _find_classes_for_changed_files(self, file_paths: list[str]) -> set:
-        """Finds class structures defined or declared in changed files."""
+        """Finds structural nodes defined or declared in changed files."""
         if not file_paths:
             return set()
         query = """
         UNWIND $file_paths as file_path
-        MATCH (f:FILE {path: file_path})-[:DEFINES|DECLARES]->(c:CLASS_STRUCTURE)
+        MATCH (f:FILE {path: file_path})-[:DEFINES|DECLARES]->(c:CLASS_STRUCTURE|DATA_STRUCTURE)
         RETURN DISTINCT c.id AS id
         """
         results = self.neo4j_mgr.execute_read_query(query, {"file_paths": list(file_paths)})
         return {r['id'] for r in results}
 
     def _find_files_for_updated_classes(self, class_ids: set) -> set:
-        """Finds file paths for updated class IDs."""
+        """Finds file paths for updated class or data structure IDs."""
         if not class_ids:
             return set()
         query = """
         UNWIND $class_ids as classId
-        MATCH (f:FILE)-[:DEFINES|DECLARES]->(c:CLASS_STRUCTURE) WHERE c.id = classId
+        MATCH (f:FILE)-[:DEFINES|DECLARES]->(c:CLASS_STRUCTURE|DATA_STRUCTURE) WHERE c.id = classId
         RETURN DISTINCT f.path AS path
         """
         results = self.neo4j_mgr.execute_read_query(query, {"class_ids": list(class_ids)})

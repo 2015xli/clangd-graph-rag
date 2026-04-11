@@ -196,9 +196,17 @@ class SummaryCacheManager:
         """Provides read-only access to a single entry in the cache."""
         return self.cache.get(label, {}).get(key)
 
+    def get_scc_cache_entry(self, scc_id: str) -> Optional[Dict[str, Any]]:
+        """Accesses a collective analysis entry for an SCC group."""
+        return self.cache.get('SCC_GROUP', {}).get(scc_id)
+
     def update_cache_entry(self, label: str, key: str, data: Dict[str, Any]):
         """Updates or adds an entry in the cache. Called by the orchestrator."""
         self.cache[label][key].update(data)
+
+    def update_scc_cache_entry(self, scc_id: str, data: Dict[str, Any]):
+        """Updates or adds an SCC group entry in the cache."""
+        self.cache['SCC_GROUP'][scc_id].update(data)
 
     def set_runtime_status(self, label: str, key: str, status: str):
         """Sets the runtime status of a node for the current run."""

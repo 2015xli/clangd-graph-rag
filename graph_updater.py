@@ -111,7 +111,7 @@ class GraphUpdater:
             
             self._purge_stale_graph_data(dirty_files_rel, deleted_files_rel)
             
-            # --- FIX: Purge by ID to handle USR collisions and identity migration ---
+            # --- Purge by ID to handle USR collisions and identity migration ---
             if seed_ids:
                 self.neo4j_mgr.purge_nodes_by_id(
                     seed_ids, 

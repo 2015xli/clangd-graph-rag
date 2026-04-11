@@ -16,7 +16,7 @@ from utils import align_string
 from llm_client import setup_llm_client, get_embedding_client
 from .prompts import PromptManager
 from .node_cache import SummaryCacheManager
-from .node_summarizer import NodeSummaryProcessor
+from .node_summarizer import NodeSummarizer
 
 # Import logical mixins
 from .function_processor import FunctionProcessorMixin
@@ -61,13 +61,22 @@ class SummaryEngine(
 
         # Initialize Prompt Manager and Node Processor
         prompt_manager = PromptManager()
-        self.node_processor = NodeSummaryProcessor(
+        
+        # Determine the maximum context size based on model or user input
+        max_context_token_size = getattr(args, 'max_context_size', None)
+        if not max_context_token_size:
+            max_context_token_size = llm_client.get_context_window_size()
+            logger.info(f"Using model's default context window size: {max_context_token_size} tokens.")
+        else:
+            logger.info(f"Using user-specified context window size: {max_context_token_size} tokens.")
+
+        self.node_processor = NodeSummarizer(
             project_path=project_path,
             cache_manager=self.summary_cache_manager,
             llm_client=llm_client,
             prompt_manager=prompt_manager,
             token_encoding=getattr(args, 'token_encoding', 'cl100k_base'),
-            max_context_token_size=getattr(args, 'max_context_size', None)
+            max_context_token_size=max_context_token_size
         )
 
         # Initialize Embedding Client
@@ -77,12 +86,16 @@ class SummaryEngine(
         """
         Prepares the engine for a summarization run.
         - Loads the L1 cache.
+        - Resolves project context (Name and Background).
         - Automatically detects and purges fake summaries if using a real LLM API.
         """
         # 1. Load the L1 node cache
         self.summary_cache_manager.load()
 
-        # 2. Automatic Fake Cleanup Logic
+        # 2. Resolve Project Context
+        self._resolve_project_context()
+
+        # 3. Automatic Fake Cleanup Logic
         # If we are using a REAL LLM API (not 'fake'), we check for and purge faked content.
         if self.args.llm_api == 'fake':
             return
@@ -130,6 +143,72 @@ class SummaryEngine(
             self.summary_cache_manager._write_cache_to_file()
             logger.info(f"Automatic cleanup of {removed_count} fake summaries complete from L1 cache.")
 
+    def _resolve_project_context(self):
+        """Resolves the project name and background info."""
+        # 1. Project Name
+        query = "MATCH (p:PROJECT) RETURN p.name AS name"
+        results = self.neo4j_mgr.execute_read_query(query)
+        project_name = results[0]['name'] if results else "Unknown Project"
+        
+        # 2. Project Background (Tiered resolution)
+        project_info = "(N/A)"
+        
+        # Tier 1: Machine-generated summary from previous run
+        cache_dir = os.path.join(self.project_path, ".cache")
+        machine_summary_path = os.path.join(cache_dir, "project-summary.md")
+        user_info_path = os.path.join(self.project_path, "project-info.md")
+        
+        if os.path.exists(machine_summary_path):
+            try:
+                with open(machine_summary_path, 'r') as f:
+                    project_info = f.read().strip()
+                logger.info("Loaded machine-generated project summary as context.")
+            except Exception as e:
+                logger.warning(f"Failed to read machine summary at {machine_summary_path}: {e}")
+
+        # Tier 2: User-provided manual info
+        if project_info == "(N/A)" and os.path.exists(user_info_path):
+            try:
+                with open(user_info_path, 'r') as f:
+                    project_info = f.read().strip()
+                logger.info("Loaded user-provided project info as context.")
+            except Exception as e:
+                logger.warning(f"Failed to read user info at {user_info_path}: {e}")
+
+        # Fallback to (N/A) is already the default
+        
+        # Update node_processor
+        self.node_processor.project_name = project_name
+        self.node_processor.project_info = project_info
+        logger.info(f"Project Context Resolved - Name: {project_name}, Info: {project_info[:100]}...")
+
+    def finalize_run(self):
+        """
+        Finalizes the summarization run.
+        - Persists the project summary to .cache/project-summary.md if using a real LLM.
+        """
+        if self.args.llm_api == 'fake':
+            logger.debug("Skipping project summary persistence for fake LLM API.")
+            return
+
+        logger.info("Finalizing run: checking for project summary persistence...")
+        query = "MATCH (p:PROJECT) RETURN p.summary AS summary"
+        results = self.neo4j_mgr.execute_read_query(query)
+        
+        if results and results[0].get('summary'):
+            project_summary = results[0]['summary']
+            cache_dir = os.path.join(self.project_path, ".cache")
+            os.makedirs(cache_dir, exist_ok=True)
+            machine_summary_path = os.path.join(cache_dir, "project-summary.md")
+            
+            try:
+                with open(machine_summary_path, 'w') as f:
+                    f.write(project_summary)
+                logger.info(f"Project summary persisted to {machine_summary_path}")
+            except Exception as e:
+                logger.error(f"Failed to persist project summary: {e}")
+        else:
+            logger.warning("No project summary found in database to persist.")
 
     def _parallel_process(self, items: Iterable, process_func: Callable, max_workers: int, desc: str) -> Set[str]:
         """
@@ -165,7 +244,7 @@ class SummaryEngine(
                         data = result_packet["data"]
 
                         # Only update the cache if the data packet contains a valid, non-empty summary.
-                        if data and (data.get('summary') or data.get('code_analysis')):
+                        if data and (data.get('summary') or data.get('code_analysis') or data.get('group_analysis')):
                             self.summary_cache_manager.update_cache_entry(label, key, data)
                         
                         self.summary_cache_manager.set_runtime_status(label, key, "visited")

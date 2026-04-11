@@ -196,6 +196,10 @@ class LlmClient:
             logger.error(f"LlmClient request failed: {e}")
             return ""
 
+    def get_context_window_size(self) -> int:
+        """Returns the maximum input token limit for the model."""
+        raise NotImplementedError
+
     async def _async_generate_wrapper(self, prompt: str) -> str:
         """Internal wrapper to handle caching logic before/after the model call."""
         cache_key = None
@@ -236,11 +240,23 @@ class LiteLlmClient(LlmClient):
         if self.api_name == 'openai':
             self.model_name = os.environ.get("OPENAI_MODEL", "gpt-3.5-turbo")
         elif self.api_name == 'deepseek':
-            self.model_name = os.environ.get("DEEPSEEK_MODEL", "deepseek-coder")
+            self.model_name = os.environ.get("DEEPSEEK_MODEL", "deepseek/deepseek-coder")
         elif self.api_name == 'ollama':
             self.model_name = f"ollama/{os.environ.get('OLLAMA_MODEL', 'deepseek-llm:7b')}"
         else:
             raise ValueError(f"Unsupported API '{self.api_name}' for LiteLlmClient.")
+
+    def get_context_window_size(self) -> int:
+        try:
+            # get_model_info provides granular limits (input vs output)
+            info = litellm.get_model_info(self.model_name)
+            return info.get("max_input_tokens") or info.get("max_tokens") or 128000
+        except Exception:
+            # Fallback for models not in the LiteLLM registry (e.g. some local Ollama models)
+            try:
+                return litellm.get_max_tokens(self.model_name) or 128000
+            except Exception:
+                return 128000
 
     async def _async_generate(self, prompt: str) -> str:
         try:
@@ -269,6 +285,9 @@ class FakeLlmClient(LlmClient):
         """Simulate a sync delay and return static text."""
         time.sleep(0.01) 
         return FAKE_SUMMARY_CONTENT
+
+    def get_context_window_size(self) -> int:
+        return 128000
 
     async def _async_generate(self, prompt: str) -> str:
         """Simulate an async delay and return static text."""

@@ -50,15 +50,15 @@
             "name": "Python Debugger: LLama Graph RAG builder original_4 (single parser)",
             "type": "debugpy",
             "request": "launch",
-            "program": "graph_builder.py",
-            "args": ["~/Public/llama.cpp/llama_cpp_original_4.yaml", "~/Public/llama.cpp/", "--num-parse-workers=1"]
+            "module": "summary_driver",
+            "args": ["~/Public/llama.cpp/llama_cpp_original_4.yaml", "~/Public/llama.cpp/", "--generate-summary", "--num-parse-workers=1", "--num-local-workers=10", "--llm-cache-shards=10"]
         },
         {
             "name": "Python Debugger: LLama Graph RAG builder original_4",
             "type": "debugpy",
             "request": "launch",
             "program": "graph_builder.py",
-            "args": ["~/Public/llama.cpp/llama_cpp_original_4.yaml", "~/Public/llama.cpp/",  "--compile-commands=~/Public/llama.cpp/compile_commands.json", "--new-commit", "original_4", "--generate-summary", "--llm-api", "ollama"]
+            "args": ["~/Public/llama.cpp/llama_cpp_original_4.yaml", "~/Public/llama.cpp/",  "--compile-commands=~/Public/llama.cpp/compile_commands.json", "--new-commit", "original_4", "--generate-summary", "--llm-api", "deepseek"]
         },
         {
             "name": "Python Debugger: Llama.cpp Graph RAG updater original_9",
@@ -83,11 +83,11 @@
             "args": ["../wsl2-graph-built-clang20.1.8/linux-clangd.yaml", "~/Public/microsoft-WSL2-Linux-Kernel-427645e/"]
         },
         {
-            "name": "Python Debugger: MiniJVM Graph RAG builder",
+            "name": "Python Debugger: MiniJVM Graph RAG builder (original)",
             "type": "debugpy",
             "request": "launch",
             "program": "graph_builder.py",
-            "args": ["../../mini-jvm/graphrag/original/korp_clangd_21.x.yaml", "../../mini-jvm", "--compile-commands", "../../mini-jvm/graphrag/original/original_compile_commands.json", "--generate-summary", "--llm-api", "fake", "--ingest-batch-size", "10", "--log-batch-size", "10"]
+            "args": ["../../mini-jvm/graphrag/original/korp_clangd_21.x.yaml", "../../mini-jvm", "--compile-commands", "../../mini-jvm/graphrag/original/original_compile_commands.json", "--generate-summary", "--llm-api", "deepseek", "--num-parse-workers=10", "--num-local-workers=10", "--num-remote-workers=1", "--llm-cache-shards=10"]
         },
 
         {

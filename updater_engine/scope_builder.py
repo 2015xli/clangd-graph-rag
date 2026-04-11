@@ -40,10 +40,10 @@ Relationships:
   (FILE) -[:DEFINES]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION|MACRO|TYPE_ALIAS|VARIABLE)    # Symbol.file_path      
   (FILE) -[:INCLUDES]-> (FILE)                                                                # IncludeRelationProvider
   (CLASS_STRUCTURE|DATA_STRUCTURE) -[:HAS_FIELD]-> (FIELD)                                    # Symbol.parent_id
-  (CLASS_STRUCTURE|DATA_STRUCTURE) -[:HAS_METHOD]-> (METHOD)                                  # Symbol.parent_id
+  (CLASS_STRUCTURE) -[:HAS_METHOD]-> (METHOD)                                                 # Symbol.parent_id
   (CLASS_STRUCTURE|DATA_STRUCTURE) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION) # Symbol.parent_id
   (FUNCTION|METHOD) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE|FUNCTION)                # Symbol.parent_id
-  (CLASS_STRUCTURE) -[:INHERITS]-> (CLASS_STRUCTURE)                                          # SymbolParser.inheritance_relations
+  (CLASS_STRUCTURE) -[:INHERITS|SPECIALIZATION_OF]-> (CLASS_STRUCTURE)                        # SymbolParser.inheritance_relations, sym.primary_template_id
   (FUNCTION|METHOD) -[:CALLS]-> (FUNCTION|METHOD)                                             # ClangdCallGraphExtractor  (static call relations are enriched to symbols through SymbolEnricher)
   (FUNCTION) -[:HAS_NESTED]-> (CLASS_STRUCTURE|DATA_STRUCTURE)                                # Symbol.parent_id
   (METHOD) -[:OVERRIDDEN_BY]-> (METHOD)                                                       # SymbolParser.override_relations
@@ -194,6 +194,8 @@ class GraphUpdateScopeBuilder:
         aliasee_to_aliaser_ids = defaultdict(set)
         # Build map for Macro downward expansion (macro_id -> expanded symbol IDs)
         macro_to_expanded_ids = defaultdict(set)
+        # Build map for Specialization expansion (blueprint_id -> specialized version IDs)
+        blueprint_to_spec_ids = defaultdict(set)
 
         for sym in full_symbol_parser.symbols.values():
             if sym.parent_id:
@@ -204,6 +206,8 @@ class GraphUpdateScopeBuilder:
                 aliasee_to_aliaser_ids[sym.aliased_type_id].add(sym.id)
             if sym.expanded_from_id:
                 macro_to_expanded_ids[sym.expanded_from_id].add(sym.id)
+            if sym.primary_template_id:
+                blueprint_to_spec_ids[sym.primary_template_id].add(sym.id)
 
         # Build a map from fully qualified namespace names to their symbol IDs
         qualified_namespace_to_id = self._build_scope_maps(full_symbol_parser.symbols)
@@ -304,6 +308,14 @@ class GraphUpdateScopeBuilder:
             # Pull in aliasers of the seed (Upward)
             for aliaser_id in aliasee_to_aliaser_ids.get(symbol_id, set()):
                 add_symbol(direct_dependencies, aliaser_id, "alias_types")
+
+            # 9. Specialization (Up to Blueprint and Down to Specialized versions)
+            if symbol.primary_template_id:
+                add_symbol(direct_dependencies, symbol.primary_template_id, "specialization_of")
+            
+            # Pull in specialized versions of the seed (Downward)
+            for spec_id in blueprint_to_spec_ids.get(symbol_id, set()):
+                add_symbol(direct_dependencies, spec_id, "has_specialization")
 
         # Add the collected direct dependencies to the final set
         final_symbol_ids.update(direct_dependencies)

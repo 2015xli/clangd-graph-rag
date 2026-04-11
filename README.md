@@ -122,7 +122,9 @@ To successfully build the graph, this project leverages the power of the LLVM ec
 
 The two main entry points for the pipeline are the builder and the updater.
 
-**Note**: All scripts now rely on a `compile_commands.json` file for accurate source code analysis. The examples below assume this file is located in the root of your project path. If it is located elsewhere, you must specify its location with the `--compile-commands` option (see Common Options).
+**Note 1**: All scripts now rely on a `compile_commands.json` file for accurate source code analysis. The examples below assume this file is located in the root of your project path. If it is located elsewhere, you must specify its location with the `--compile-commands` option (see Common Options).
+
+**Note 2**: It is highly recommended to create a `project-info.md` file in the project root folder as the project context information, which is extremely useful when you generate RAG summaries with LLM. The file content can be a few words or a few paragraphs as you want, such as "This LLVM project is a collection of modular compiler and toolchain technologies."
 
 For all the scripts that can run standalone, you can always use --help to see the full CLI options.
 
@@ -137,15 +139,15 @@ python3 graph_builder.py /path/to/clangd-index.yaml /path/to/project/
 # Build the graph with LLM summary RAG data generation (you don't need separate command for summary generation) 
 python3 graph_builder.py /path/to/clangd-index.yaml /path/to/project/ --generate-summary [--llm-api [openai|deepseek|ollama|fake]]
 ```
-* Without `--generate-summary`, the tool will only perform the graph enrichment phase. This is to give you an option to check the enrichment results before generating summaries that may cost time and money.
-* With `--generate-summary` enabled, the tool will generate summary. By default it will use `--llm-api fake` to test the summary generation without actually calling an LLM API. You can use `--llm-api [openai|deepseek|ollama|fake]` to specify the LLM API to use. Option `ollama` will use local ollama setup. Please check the `llm_client.py` for the details.
+* Without `--generate-summary`, the tool will only perform the graph construction phase. This is to give you an option to check the graph results before generating summaries that may cost time and money.
+* With `--generate-summary` enabled, the tool will generate summary. By default it will use `--llm-api fake` to test the summary generation without actually calling an LLM API. You can use `--llm-api [openai|deepseek|ollama|fake]` to specify the LLM API to use. You need setup/config your API keys in the OS environment. Option `ollama` will use local ollama setup. I use LiteLLM to support multiple LLM APIs, so adding an API for your use case is super easy. Please check the `llm_client.py` for the details. 
 * The generated summaries are cached in two levels of caches, so that you don't need to regenerate them if the source code of the project remains unchanged. If you did not specify the --llm-api in your previous runs (i.e., using the default `fake` llm client), and now you want to use a real LLM API, the fake summaries will be removed automatically, so that your graphRAG does not have mixed fake and real summaries. 
 
 Please check the detailed design document for more details: [Graph Builder](./docs/graph_builder.md) or go to the [Documentation](#documentation) section for a full description.
 
 ### Summary RAG Data Generation
 
-After the graph is fully built (without --generate-summary enabled), you can generate LLM summary RAG data with the following command. If you don't specify the --llm-api, it will use the `fake` llm client.
+After the graph is fully built (without --generate-summary enabled), you can generate LLM summary RAG data with the following command. If you don't specify the --llm-api, it will use the `fake` llm client for testing purpose.
 ```bash
 python3 -m summary_driver /path/to/clangd-index.yaml /path/to/project/ --llm-api [openai|deepseek|ollama|fake]
 ```
@@ -250,42 +252,17 @@ These scripts are the core components of the pipeline and can also be run standa
 
 ## Rebuild or Clean Up Graph
 
-If your graph has mixed summaries of fake and real LLM API, you have following opitions to solve the problem. 
-
-### Surgical clean up summaries
-
-The recommended way to clean up fake summaries (generated using the `fake` LLM client) is to use the dedicated cleanup command. This will surgically remove fake content from both the Neo4j graph database and the summary cache, leaving you a clean graph and cache that have only real summaries.
-
-```bash
-python3 -m summary_engine clean-fakes
-```
-
-Then, you can generate the summaries with real LLM API by following section [Summary Data Generation](#summary-rag-data-generation). 
-
-#### What if I want to clean the summaries manually? (Not recommended)
-
-You can perform the steps manually just in case you need to:
-
-1. **Delete the fake summary property from Neo4j**:
-    ```bash
-    python3 -m neo4j_manager delete-property --key fake_summary --all-labels --rebuild-indices
-    ```
-
-2. **Delete the fake summaries in node cache**:
-    Fake summary can be cached in the file at `<project_path>/.cache/summary_cache.json`. You can manually delete the fake summaries from this file.
-    ```bash
-    python3 -m summary_engine clean-fake-cache
-    ```
+In this section, I will show you how to rebuild or clean up the graph.
 
 ### Rebuild the graphRAG
 
 You can rebuild your graph with `--generate-summary --llm-api <real-api-name>`. Graph rebuilding may be acceptable sometimes, depending on your situation. 
 
-1. **Rebuilding time** If you had a full build with your project before, and the source code has no change since then, the rebuilding of its graphRAG can be quite fast, because the previous run already caches the results of the long time operations, i.e., the source tree parsing and the yaml index parsing. It may take only several minutes to rebuild the graph with the cached results. The real time consuming part (and also money consuming) is the summary generation process with a real LLM API. 
+1. **Rebuilding time**: If you had a full build with your project before, and the source code has no change since then, the rebuilding of its graphRAG can be quite fast, because the previous run already caches the results of the long time operations, i.e., the source tree parsing and the yaml index parsing. It may take only several minutes to rebuild the graph with the cached results. The real time consuming part (and also money consuming) is the summary generation process with a real LLM API. 
 
-2. **Summarization time/cost** If you had used real LLM API to generate some summaries, the results are not lost in graphRAG rebuilding. They are cached by the `llm-cache` separately in the disk, managed by `llm_client.py`. So rebuilding does not increase your time or cost for summarization.
+2. **Summarization time/cost**: If you had used real LLM API to generate some summaries, the results are not lost in graphRAG rebuilding. They are cached by the `llm-cache` separately in the disk, managed by `llm_client.py`. So rebuilding does not increase your time or cost for summarization.
 
-3. **Other considerations** Graph rebuilding sometimes is useful when you have incrementally updated the graphRAG many times. Incremental update may introduce some minor inconsistencies, and rebuilding can help to fix them. This is just a guess, not confirmed. The minor inconsistencies I observed so far are due to issues in the source code and the way clangd-indexer works, not the incremental update itself. E.g., the source code may have two classes of same name, while clangd-indexer will choose one "winner" to represent the class (since they have the same USR: "Unified Symbol Resolution"), but merge the other class's relationships to the "winner".
+3. **Other considerations**: The way Clangd-indexer works may introduce some inconsistance in your graph after many times of incremental update. E.g., your project source code may have two classes of same name, while clangd-indexer will choose one "winner" to represent the class (since they have the same USR: "Unified Symbol Resolution"), but merge the other class's relationships to the "winner". Different incremental updates may choose different "winner". This is not a bug of clangd-indexer or clangd-graph-rag, but an issue in your project source code. A graph rebuilding does not solve the issue of your project source code, but it helps to keep the graph consistent with the same "winner".
 
 #### What if the database is huge when rebuilding
 
@@ -324,6 +301,29 @@ If you don't want to rebuild your graph, you can simply regenerate the summaries
 
 3. **Why two levels of caches** As mentioned above, the node cache is valid as long as the source code is not modified, while the llm cache is valid only if the whole prompt matches. The node cache has both fake and real summaries, and the llm cache has only the real summaries. They can be used for different purposes. The node cache can be used to develop out-of-graph RAG systems; the llm cache can be shared by different projects if they point to the same cache folder.
 
+### Clean up fake summaries
+
+If your graph has mixed summaries of fake and real LLM API, you don't really need to do anything, because the system will clean them up automatically whenever you generate summaries with real LLM API. The system uses the following command to clean up the fake summaries. You can also execute it manually.
+
+```bash
+python3 -m summary_engine clean-fakes
+```
+
+This will surgically remove fake content from both the Neo4j graph database and the summary cache, leaving you a clean graph and cache that have only real summaries.
+
+#### What it really does
+
+1. **Delete the fake summary property from Neo4j**:
+    ```bash
+    python3 -m neo4j_manager delete-property --key fake_summary --all-labels --rebuild-indices
+    ```
+
+2. **Delete the fake summaries in the L1 summary cache (node cache)**:
+    Fake summary can be cached in the file at `<project_path>/.cache/summary_cache.json`. You can manually delete the fake summaries from this file.
+    ```bash
+    python3 -m summary_engine clean-fake-cache
+    ```
+    You don't need to clean up the L2 summary cache (llm cache), because it only caches real LLM responses.
 
 ## Documentation & Contributing
 
