@@ -245,23 +245,33 @@ These scripts are the core components of the pipeline and can also be run standa
 
 ## Rebuild or Clean Up Graph
 
-In this section, I will show you how to rebuild or clean up the graph.
+In this section, I will show you how to rebuild or clean up the summaries. If you only want to regenerate the summaries, please check next section [Regenerate the summaries](#regenerate-the-summaries); or if you only want to clean up the fake summaries from your graph (and cache), you can check [Clean up fake summaries](#clean-up-fake-summaries).
 
 ### Rebuild the graphRAG
 
-You can rebuild your graph with `--generate-summary --llm-api <real-api-name>`. Graph rebuilding may be acceptable sometimes, depending on your situation. 
+Graph rebuilding is not needed normally. If your project source code is not managed by git, you can rebuild the graph when the code base has changed significantly. (If it is managed by git, you can use incremental update.) Or if your graph was built with old version of clangd-graph-rag, you can rebuild it to enjoy the newly added features. 
 
-1. **Rebuilding time**: If you had a full build with your project before, and the source code has no change since then, the rebuilding of its graphRAG can be quite fast, because the previous run already caches the results of the long time operations, i.e., the source tree parsing and the yaml index parsing. It may take only several minutes to rebuild the graph with the cached results. The real time consuming part (and also money consuming) is the summary generation process with a real LLM API. 
+There are two parsing cache files that you probably need to delete depending on the following cases:
 
-2. **Summarization time/cost**: If you had used real LLM API to generate some summaries, the results are not lost in graphRAG rebuilding. They are cached by the `llm-cache` separately in the disk, managed by `llm_client.py`. So rebuilding does not increase your time or cost for summarization.
+1. **Index yaml parsing cache file**: If your project source code has been changed, you should regenerate the clangd index yaml file, and remove the old yaml parsing cache file that is under the same folder as the yaml file, and has the same name as the yaml file but with a different suffix .pkl. 
 
-3. **Other considerations**: The way Clangd-indexer works may introduce some inconsistance in your graph after many times of incremental update. E.g., your project source code may have two classes of same name, while clangd-indexer will choose one "winner" to represent the class (since they have the same USR: "Unified Symbol Resolution"), but merge the other class's relationships to the "winner". Different incremental updates may choose different "winner". This is not a bug of clangd-indexer or clangd-graph-rag, but an issue in your project source code. A graph rebuilding does not solve the issue of your project source code, but it helps to keep the graph consistent with the same "winner".
+2. **Source code parsing cache file**: If your project source code does not change, but you want to try with new version of clangd-graph-rag, you should remove the old source parsing cache file under `<project_path>/.cache/`, with name of `parsing_<project_name>_<time_stamp>.pkl`. 
+
+3. **Keep the cache files**: If you rebuild the graph because of other reasons (not due to project code base changes or new version of clangd-graph-rag), you don't need to remove the two parsing cache files. They can speed up your rebuilding process significantly.
+ 
+Rebuilding your graph may not take the same time/cost as the first time graph building, because of the two parsing cache files and two-level summary caching supports. 
+
+1. **Graph rebuilding time**: If you had a full build with your project before, and the source code has no change since then, the rebuilding of its graphRAG can be quite fast, because the previous run already caches the parsing results of the long time operations, i.e., the yaml parsing and the source parsing. It may take only several minutes to rebuild the graph with the cached results. 
+
+2. **Summarization time/cost**: If you had used real LLM API to generate the summaries, the results are not lost in graphRAG rebuilding. They are cached by the `llm-cache` separately in the disk, managed by `llm_client.py`. So rebuilding does not increase your time or cost for summarization either.
+
+3. **A minor consideration**: The way Clangd-indexer works may introduce some inconsistance in your graph after many times of incremental update. E.g., your project source code may have two classes of same name, while clangd-indexer will choose one "winner" to represent the class (since they have the same USR: "Unified Symbol Resolution"), but merge the other class's relationships to the "winner". Different incremental updates may choose different "winner". This is not a bug of clangd-indexer or clangd-graph-rag, but an issue in your project source code. A graph rebuilding does not solve the issue of your project source code, but it helps to keep the graph consistent with the same "winner".
 
 #### What if the database is huge when rebuilding
 
 Rebuilding the graph will delete existing nodes/relationships. If your graph is really big (millions of nodes/relationships like Linux kernel), it may take some time to reset the database. It is recommended to reset your database through Neo4j commands before you start the rebuilding. Please check Neo4j manual or Google a solution on how to reset it. 
 
-What I do is to delete the database files directly with the following commands. Don't use them unless you really know what you are doing. You need first check your Neo4j conf file (mine is /etc/neo4j/neo4j.conf) for its data path.
+What I sometimes do is to delete the database files directly with the following commands. Do _NOT_ use them unless you really know what you are doing. You need first check your Neo4j conf file (mine is /etc/neo4j/neo4j.conf) for its data path.
 
 ```
 sudo systemctl stop neo4j 
@@ -272,7 +282,7 @@ sudo systemctl start neo4j
 
 ### Regenerate the summaries
 
-If you don't want to rebuild your graph, you can simply regenerate the summaries, by following section [Summary Data Generation](#summary-rag-data-generation). We have two-level summary caching mechanism built-in, which can help you avoid regenerating summaries for unchanged code, thus saving your LLM credits. 
+If you don't want to rebuild your graph, but regenerate the summaries. You can do it by following section [Summary Data Generation](#summary-rag-data-generation). We have two-level summary caching mechanism built-in, which can help you avoid regenerating summaries for unchanged code, thus saving your LLM credits. 
 
 #### Just in case you are interested
 
