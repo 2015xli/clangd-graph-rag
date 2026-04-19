@@ -2,15 +2,7 @@
 
 This project builds a Neo4j graph RAG (Retrieval-Augmented Generation) for a C/C++ software project based on clang/clangd, which can be queried for deep software project analysis. It works well with large codebases like the Linux kernel, llvm, chromium, etc. 
 
-### Example Questions it Can Help With:
-
-*   "What are the key modules in this project?"
-*   "Show me the call chain for function X"
-*   "What's the architecture of this service?"
-*   "Help me understand the workflow of this feature"
-*   "Identify potential race conditions when accessing this variable"
-
-The project provides the graph RAG building and updating tools, along with an example MCP server and an AI expert agent. You can also develop your own MCP servers and agents around the graph RAG for your specific purposes, such as:
+The project includes an example MCP server and an AI expert agent. You can also develop your own MCP servers and agents around the graph RAG for your specific purposes, such as:
 
 **Software Analysis**
 *   Analyze project organization (folders, files, modules)
@@ -46,17 +38,18 @@ When building a code graph for the Linux kernel (WSL2 release) on a workstation 
   - [Full Graph Build](#full-graph-build)
   - [Incremental Graph Update](#incremental-graph-update)
   - [Common Options](#common-options)
-- [Interacting with the Graph: AI Agent](#interacting-with-the-graph-ai-agent)
+- [Interacting with the Graph: MCP and Agent](#interacting-with-the-graph-ai-agent)
 - [Supporting Scripts](#supporting-scripts)
+- [Rebuild or Clean Up Graph](#rebuild-or-clean-up-graph)
 - [Documentation & Contributing](#documentation--contributing)
 
 ## Why This Project?
 
-For C/C++ project, Clangd index YAML file is an intermediate data format from [Clangd-indexer](https://clangd.llvm.org/design/indexing.html) containing detailed syntactical information used by language servers for code navigation and completion. However, while powerful for IDEs, the raw index data doesn't expose the full graph structure of a codebase (e.g., the call graph, header inclusion graph, macro expansion graph, etc.) or integrate the semantic understanding that Large Language Models (LLMs) can leverage.
+For C/C++ project, Clangd language server has been very useful for developers using an IDE. The symbols in the code are represented in an intermediate data format from [Clangd-indexer](https://clangd.llvm.org/design/indexing.html) containing detailed syntactical information used by language servers for code navigation and completion. However, while powerful for IDEs, the raw index data doesn't expose the full graph structure of a codebase (e.g., the call graph, header dependence graph, macro expansion graph, etc.) or integrate the semantic understanding that Large Language Models (LLMs) can leverage.
 
 This project fills that gap. It reconciles the Clangd index data and Clang parsing data, and ingests them into a Neo4j graph database, reconstructing the complete file, symbol, and relationship hierarchy. It then enriches this structure with AI-generated summaries and vector embeddings, transforming the raw compiler index into a semantically rich knowledge graph. In essence, `clangd-graph-rag` extends Clangd's powerful foundation into an AI-ready code graph, enabling LLMs to reason about a codebase's structure and behavior for advanced tasks like in-depth code analysis, refactoring, and automated reviewing.
 
-Another critical feature is that this project supports building the graphRAG incrementally, which means it can update the graph based on the diff of git commits without rebuilding the entire graph from scratch. This significantly reduces the time and cost of maintaining the graphRAG.
+Another powerful feature is that this project supports building the graphRAG incrementally, which means it can update the graph based on the diff of git commits without rebuilding the entire graph from scratch. This significantly reduces the time and cost of maintaining the graphRAG.
 
 Note, this is an independent project and is not affiliated with the official Clang or clangd projects.
 
@@ -303,7 +296,7 @@ If you don't want to rebuild your graph, you can simply regenerate the summaries
 
 ### Clean up fake summaries
 
-If your graph has mixed summaries of fake and real LLM API, you don't really need to do anything, because the system will clean them up automatically whenever you generate summaries with real LLM API. The system uses the following command to clean up the fake summaries. You can also execute it manually.
+If your graph has mixed summaries of fake and real LLM API, you don't really need to do anything, because the system will clean them up automatically whenever you generate summaries with real LLM API. The system uses the following command to clean up the fake summaries automatically for you. You can also execute it manually.
 
 ```bash
 python3 -m summary_engine clean-fakes
@@ -312,6 +305,8 @@ python3 -m summary_engine clean-fakes
 This will surgically remove fake content from both the Neo4j graph database and the summary cache, leaving you a clean graph and cache that have only real summaries.
 
 #### What it really does
+
+Here is what it really does:
 
 1. **Delete the fake summary property from Neo4j**:
     ```bash
