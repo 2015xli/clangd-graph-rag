@@ -125,7 +125,7 @@ To successfully build the graph, this project leverages the power of the LLVM ec
 
 3. **LLM model and its API key**
 
-   If you want to generate summaries in the neo4j graph with LLM, you need have access to an LLM model service either remotely or locally. The project uses Litellm package to access LLM APIs, which can virtually support almost all popular LLM services. You need set environment variable for the API key for your remote LLM service, such as OPENAI_API_KEY, or DEEPSEEK_API_KEY, etc. If you want to use your specific model, you can simply add it in file `llm_client.py`, by modifying the constructor `__init__()` of the `LiteLlmClient` class. The code retrieves the max context window size from the service by default. You can also specify a window size by modifyin the code there.
+   If you want to generate summaries in the neo4j graph with LLM, you need have access to an LLM model service either remotely or locally. The project uses Litellm package to access LLM APIs, which can virtually support almost all popular LLM services. You need set environment variable for the API key for your remote LLM service, such as OPENAI_API_KEY, or DEEPSEEK_API_KEY, etc. If you want to use your specific model, you can simply add it in file `llm_client.py`, by modifying the constructor `__init__()` of the `LiteLlmClient` class. The code retrieves the max context window size from the service by default. You can also specify a window size by modifying the code there.
 
 4. **Python**
 
