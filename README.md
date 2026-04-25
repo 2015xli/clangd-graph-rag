@@ -1,4 +1,4 @@
-# Source Code Graph RAG (using Clang/Clangd)
+# C/C++ Source Code Graph RAG (using Clang/Clangd)
 
 This project builds a Neo4j graph RAG (Retrieval-Augmented Generation) for a C/C++ software project based on clang/clangd, which can be queried for deep software project analysis. It works well with large and complex codebases like the Linux, llvm, llama.cpp, etc. 
 
