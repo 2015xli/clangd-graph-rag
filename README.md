@@ -1,6 +1,6 @@
 # Source Code Graph RAG (using Clang/Clangd)
 
-This project builds a Neo4j graph RAG (Retrieval-Augmented Generation) for a C/C++ software project based on clang/clangd, which can be queried for deep software project analysis. It works well with large codebases like the Linux kernel, llvm, chromium, etc. 
+This project builds a Neo4j graph RAG (Retrieval-Augmented Generation) for a C/C++ software project based on clang/clangd, which can be queried for deep software project analysis. It works well with large and complex codebases like the Linux, llvm, llama.cpp, etc. 
 
 The project includes an example MCP server and an AI expert agent. You can also develop your own MCP servers and agents around the graph RAG for your specific purposes, such as:
 
@@ -32,6 +32,7 @@ When building a code graph for the Linux kernel (WSL2 release) on a workstation 
 
 ## Table of Contents
 - [Why This Project?](#why-this-project)
+- [Why Clang instead of Tree-sitter?](#why-clang-instead-of-tree-sitter)
 - [Key Features & Design Principles](#key-features--design-principles)
 - [Prerequisites](#prerequisites)
 - [Primary Usage](#primary-usage)
@@ -53,10 +54,20 @@ Another powerful feature is that this project supports building the graphRAG inc
 
 Note, this is an independent project and is not affiliated with the official Clang or clangd projects.
 
+## Why Clang instead of Tree-sitter?
+
+While Tree-sitter is an excellent tool for syntax highlighting and simple code navigation, it falls short when building a high-fidelity, semantically accurate code graph for C/C++, especially for large-scale production codebases. This project deliberately leverages Clang for several critical reasons:
+
+*   **Macro and Preprocessor Awareness**: C/C++ development relies heavily on the preprocessor. Tree-sitter is purely syntactic and lacks a preprocessor; it cannot resolve macro expansions or track the relationship between a macro definition and the code it generates. Clang provides "causality tracking" for macro-expanded entities.
+*   **Semantic Accuracy with Conditional Compilation**: In real-world code, `#ifdef` and `#else` blocks are ubiquitous. Tree-sitter often sees both branches of a conditional block simultaneously and may give dependence relationships incorrectly. Clang (using `compile_commands.json`) knows exactly which code path is actually compiled and "visible" to the compiler.
+*   **Global Symbol Identity (USR)**: This project uses Unified Symbol Resolution (USR) to uniquely identify entities across the entire codebase. E.g., USRs allow the graph to link template specializations to their primary templates and resolve overloads accurately—tasks that are impossible with a file-local syntactic parser.
+*   **Cross-File Semantic Integrity**: Many C/C++ constructs are fragmented across files (e.g., a struct whose fields are defined in an included header). Because Tree-sitter parses files in isolation, it cannot "see" the complete definition of such entities. Clang parses Translation Units (TUs) with full header context and preprocessing, ensuring a complete and accurate model.
+*   **Compiler-Grade Fidelity**: By leveraging the same engine used for compilation, we ensure the graph reflects the code exactly as it is understood by the compiler, including complex C++ template metaprogramming and name lookup rules.
+
 ## Key Features & Design Principles
 
 *   **AI-Enriched Code Graph**: Builds a comprehensive graph of files, folders, symbols, and function calls, then enriches it with AI-generated summaries and vector embeddings for semantic understanding.
-*   **Robust Dependency Analysis**: Builds a complete `[:INCLUDES]` graph by parsing source files, enabling accurate impact analysis for header file changes.
+*   **Robust Dependency Analysis**: Builds a complete graph for call chain, header inclusion, macro expansion, class specialization, and type alias relationships, enabling accurate code structure and architecture analysis.
 *   **Compiler-Accurate Parsing**: Leverages `clang` via its compilation database (the `compile_commands.json` file) to parse source code with full semantic context, correctly handling complex macros and include paths.
 *   **Incremental Updates**: Includes a Git-aware updater script that efficiently processes only the files changed between commits, avoiding the need for a full rebuild.
 *   **AI Agent Interaction**: Provides a tool server and an example agent to allow for interactive, natural language-based exploration and analysis of the code graph.
@@ -65,11 +76,11 @@ Note, this is an independent project and is not affiliated with the official Cla
 
 ## Prerequisites
 ### Input file dependencies
-To successfully build the graph, this project leverages the power of the LLVM ecosystem. Before starting, ensure you have the following two components ready:
+To successfully build the graph, this project leverages the power of the LLVM ecosystem. Before starting, ensure you have the following two files ready:
 
 1. **JSON Compilation Database (.json)**
  
-    The project requires a compile_commands.json file, which provides the necessary compiler flags and include paths for your source code. This file is usually generated by your build system. There are usually two ways:
+    The project requires a compilation database file, usually named `compile_commands.json`, which provides the necessary compiler flags and include paths for your source code. This file is usually generated by your build system. There are usually two ways:
    - If you are using CMake, you can use the following command:
      ```
      cmake -DCMAKE_EXPORT_COMPILE_COMMANDS=ON <your_original_cmake_option>
@@ -80,7 +91,7 @@ To successfully build the graph, this project leverages the power of the LLVM ec
      ```
    For other build system like Bazel, please refer to [LLVM original document](https://clang.llvm.org/docs/JSONCompilationDatabase.html) for more details.
 
-   By default, the system looks for the `compile_commands.json` files in the root of your project path. If they are located elsewhere, you can point to them using the `--compile-commands` option. For more details on customizing paths, see the [Common Options](#common-options) section.
+   By default, the system looks for the `compile_commands.json` files in the root of your project path. If they are located  or with a different name, you can point to them using the `--compile-commands` option. For more details on customizing paths, see the [Common Options](#common-options) section.
 
 2. **Clangd Index File (.yaml)**
 
@@ -88,7 +99,7 @@ To successfully build the graph, this project leverages the power of the LLVM ec
 
    Then you can use the following command to generate the index file:
    ```
-   clangd-indexer --executor=all-TUs --format=yaml <path/to/compile_commands.json> > index.yaml
+   clangd-indexer --executor=all-TUs --format=yaml <path/to/compile_commands.json> > your-clangd-index.yaml
    ```
    The `<path/to/compile_commands.json>` can be `.` (a dot) if it is in the current directory.
 
@@ -101,40 +112,61 @@ To successfully build the graph, this project leverages the power of the LLVM ec
 
 2. **Neo4j**
 
-   The project requires a Neo4j database to store the graph data. You can download it from the official [Neo4j website](https://neo4j.com/download/), version >= 5.0.0. (I used to work with version 4.x. Not sure if it still works.)
+   The project requires a Neo4j database running to store the graph data. Check if your system supports neo4j in its package management (like apt). Or you can download its Desktop version (encouraged) or service version (the Community version works fine) from the official [Neo4j website](https://neo4j.com/download/), version >= 5.0.0. (I used to work with version 4.x. Not sure if it still works.) 
 
-3. **Python**
+   The project also needs the neo4j's APOC plugin (core + extension), which can be easily installed from the Desktop version. That's why the Desktop version is suggested. If you use neo4j service version, you need download [APOC core](https://github.com/neo4j/apoc/releases) and [APOC extension](https://github.com/neo4j-contrib/neo4j-apoc-procedures/releases), and put them to your neo4j's plugins folder (mine is at /var/lib/neo4j/plugins) then restart neo4j service. Note the downloaded APOC version should match with your neo4j version. 
+   
+   The project by default uses the neo4j default values for its `NEO4J_URI/NEO4J_USER/NEO4J_PASSWORD`. If you use different values, please set them in your environment variables or modify the default values in the following lines of `neo4j_manager/base.py`: 
+    ```
+    NEO4J_URI = os.getenv("NEO4J_URI", "bolt://localhost:7687") 
+    NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
+    NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "neo4j")
+    ```
 
-   The project requires `Python 3.13` (or higher). Then you can install the required packages using the following command:
-   ```
-   pip install -r requirements.txt
-   ```
-   If you only want to build the graphRAG without the example AI agent (which is developed using Google ADK), `python 3.11` is enough. You need remove the `google-adk` dependency from `requirements.txt`, and maintain your own requirements file.
+3. **LLM model and its API key**
+
+   If you want to generate summaries in the neo4j graph with LLM, you need have access to an LLM model service either remotely or locally. The project uses Litellm package to access LLM APIs, which can virtually support almost all popular LLM services. You need set environment variable for the API key for your remote LLM service, such as OPENAI_API_KEY, or DEEPSEEK_API_KEY, etc. If you want to use your specific model, you can simply add it in file `llm_client.py`, by modifying the constructor `__init__()` of the `LiteLlmClient` class. The code retrieves the max context window size from the service by default. You can also specify a window size by modifyin the code there.
+
+4. **Python**
+
+   The project requires `Python 3.13` (or higher). 
+   Actually `Python 3.11 (or higher)` is enough, if you only want to build the graphRAG and don't plan to run the example AI agent. The example agent is developed using Google ADK that requires `Python 3.13`. Then you can remove the `google-adk` dependency from the provided `requirements.txt`, and maintain your own requirements file.
 
 ## Primary Usage
 
-The two main entry points for the pipeline are the builder and the updater.
+**Note 1**: To build graph, please follow [the prerequisites](#prerequisites) to prepare the clang compilation database file `compile_commands.json` and the clangd index `.yaml` file, and have the neo4j server started. The examples below assume the `compile_commands.json` file is located in the root of your project path. If it is located elsewhere, you must specify its location with the `--compile-commands` option (see [Common Options](#common-options)).  
 
-**Note 1**: All scripts now rely on a `compile_commands.json` file for accurate source code analysis. The examples below assume this file is located in the root of your project path. If it is located elsewhere, you must specify its location with the `--compile-commands` option (see Common Options).
+**Note 2**: To generate LLM summaries for the graph, it is highly recommended to create a `project-info.md` file in the project root folder as the project context information, which is extremely useful for the LLM to have a right context. The file content can be a few words or a few paragraphs as you want, such as "This LLVM project is a collection of modular compiler and toolchain technologies."
 
-**Note 2**: It is highly recommended to create a `project-info.md` file in the project root folder as the project context information, which is extremely useful when you generate RAG summaries with LLM. The file content can be a few words or a few paragraphs as you want, such as "This LLVM project is a collection of modular compiler and toolchain technologies."
 
-For all the scripts that can run standalone, you can always use --help to see the full CLI options.
+   Before building graph for your C/C++ code, checkout a copy of the project:
+   ```
+   git clone https://github.com/2015xli/clangd-graph-rag.git
+   cd clangd-graph-rag
+   ```
+   Then you need install the required packages using the following command:
+   ```
+   #If you don't want to run the example AI agent, you can remove the `google-adk` dependence
+   pip install -r requirements.txt
+   ```
+
+The two main entry points of the project are the graph builder and the graph updater.
+For all the scripts that can run standalone, you can always use `--help` to see the full CLI options.
 
 ### Full Graph Build
 
 Used for the initial, from-scratch ingestion of a project. Orchestrated by `graph_builder.py`.
 
 ```bash
-# Basic build (graph structure only, no LLM summary RAG data, which you can generate separately later)
+# Build the graph only (no LLM summary generation, which you can generate separately later)
 python3 graph_builder.py /path/to/clangd-index.yaml /path/to/project/
 
-# Build the graph with LLM summary RAG data generation (you don't need separate command for summary generation) 
+# Build the graph with LLM summary generation (single command for both graph construction and summary generation)
 python3 graph_builder.py /path/to/clangd-index.yaml /path/to/project/ --generate-summary [--llm-api [openai|deepseek|ollama|fake]]
 ```
-* Without `--generate-summary`, the tool will only perform the graph construction phase. This is to give you an option to check the graph results before generating summaries that may cost time and money.
-* With `--generate-summary` enabled, the tool will generate summary. By default it will use `--llm-api fake` to test the summary generation without actually calling an LLM API. You can use `--llm-api [openai|deepseek|ollama|fake]` to specify the LLM API to use. You need setup/config your API keys in the OS environment. Option `ollama` will use local ollama setup. I use LiteLLM to support multiple LLM APIs, so adding an API for your use case is super easy. Please check the `llm_client.py` for the details. 
-* The generated summaries are cached in two levels of caches, so that you don't need to regenerate them if the source code of the project remains unchanged. If you did not specify the --llm-api in your previous runs (i.e., using the default `fake` llm client), and now you want to use a real LLM API, the fake summaries will be removed automatically, so that your graphRAG does not have mixed fake and real summaries. 
+* Without `--generate-summary`, the tool will only perform the graph construction phase. This is to give you an option to check the graph results before generating LLM summaries that may cost time and money.
+* With `--generate-summary` enabled, the tool will generate summary. By default it will use `--llm-api fake` to test the summary generation without actually calling an LLM API. You can use `--llm-api [openai|deepseek|ollama|fake]` to specify the LLM API to use. Adding an API for your use case is super easy. Please check the `llm_client.py` file for the details. 
+* The generated summaries are cached in two levels of caches, so that you don't need to regenerate them if the source code of the project remains unchanged. If you used the default `fake` llm client in previous run, and now you specify a real LLM API, the fake summaries will be removed automatically, so that your graphRAG does not have mixed fake and real summaries. 
 
 Please check the detailed design document for more details: [Graph Builder](./docs/graph_builder.md) or go to the [Documentation](#documentation) section for a full description.
 
@@ -148,16 +180,16 @@ Please check the detailed design document for more details: [Summary Generation]
 
 ### Incremental Graph Update
 
-Used to efficiently update an existing graph with changes from Git. Orchestrated by `graph_updater.py`.
+Used to efficiently update an existing graph with changes from Git. Orchestrated by `graph_updater.py`. Note graph incremental update only supports source tree that is a git repo.
 
 ```bash
-# Update from the recorded last commit in the graph to the current HEAD 
+# Update the graph to the current HEAD 
 python3 graph_updater.py /path/to/new/clangd-index.yaml /path/to/project/ --generate-summary --llm-api [openai|deepseek|ollama|fake]
 
-# Update between two specific commits
+# Update between two specific commits 
 python3 graph_updater.py /path/to/new/clangd-index.yaml /path/to/project/ --old-commit <hash1> --new-commit <hash2> --generate-summary --llm-api [openai|deepseek|ollama|fake]
 ```
-Note: If your full build graphRAG has been generated with a real LLM API, you definitely want to use a real one for the incremental update as well, to avoid the `fake` llm client polluting your graphRAG with meaningless summaries. If you accidently used the `fake` llm client, and your graphRAG is polluted, no worry. Please check section [Rebuild or Clean Up Graph](#rebuild-or-clean-up-graph) on how to deal with it. 
+Note: If your full build graph has been generated with a real LLM API, you definitely want to use a real one for the incremental update as well, to avoid the `fake` llm client polluting your graphRAG with meaningless summaries. If you accidently used the `fake` llm client, and your graphRAG is polluted, no worry. It can be simply cleaned up. Please check section [Rebuild or Clean Up Graph](#rebuild-or-clean-up-graph) on how to deal with it. 
 
 Please check the detailed design document for more details: [Graph Updater](./docs/graph_updater.md) or go to the [Documentation](#documentation) section for a full description.
 
@@ -245,7 +277,7 @@ These scripts are the core components of the pipeline and can also be run standa
 
 ## Rebuild or Clean Up Graph
 
-In this section, I will show you how to rebuild or clean up the summaries. If you only want to regenerate the summaries, please check next section [Regenerate the summaries](#regenerate-the-summaries); or if you only want to clean up the fake summaries from your graph (and cache), you can check [Clean up fake summaries](#clean-up-fake-summaries).
+In this section, I will show you how to rebuild the graph or clean up the summaries. If you only want to regenerate the summaries, please check next section [Regenerate the summaries](#regenerate-the-summaries); or if you only want to clean up the fake summaries from your graph (and cache), you can check [Clean up fake summaries](#clean-up-fake-summaries).
 
 ### Rebuild the graphRAG
 
@@ -282,7 +314,7 @@ sudo systemctl start neo4j
 
 ### Regenerate the summaries
 
-If you don't want to rebuild your graph, but regenerate the summaries. You can do it by following section [Summary Data Generation](#summary-rag-data-generation). We have two-level summary caching mechanism built-in, which can help you avoid regenerating summaries for unchanged code, thus saving your LLM credits. 
+If you don't want to rebuild your graph, but regenerate the summaries, you can do it by following the instruction in section [Summary Data Generation](#summary-rag-data-generation). We have two-level summary caching mechanism built-in, which can help you avoid regenerating summaries for unchanged code, thus saving your LLM credits. 
 
 #### Just in case you are interested
 
